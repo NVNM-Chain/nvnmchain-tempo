@@ -1,4 +1,6 @@
 [profile.default]
+# Pinned so the bytecode vendored into tempo-e2e is reproducible across machines.
+solc = "0.8.28"
 evm_version = "cancun"
 src = "src"
 out = "out"
