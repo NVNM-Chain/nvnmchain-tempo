@@ -132,7 +132,7 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
-        "testnet" | "moderato" => MODERATO.clone(),
+        "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -155,7 +155,7 @@ impl reth_cli::chainspec::ChainSpecParser for TempoChainSpecParser {
 pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
-        42431 => Some(MODERATO.clone()),
+        787222 => Some(MODERATO.clone()),
         _ => None,
     }
 }
@@ -166,7 +166,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
 
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::testnet())
-        .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
+        .with_default_follow_url("wss://rpc.testnet.nvnm.xyz")
         .into()
 });
 
@@ -378,7 +378,7 @@ impl EthChainSpec for TempoChainSpec {
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
-            42431 => Some(moderato_nodes()),
+            787222 => Some(moderato_nodes()),
             _ => self.inner.bootnodes(),
         }
     }
