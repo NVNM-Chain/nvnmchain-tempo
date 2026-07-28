@@ -1635,16 +1635,30 @@ fn determine_next_players_at_hash(
                 if let Some(players) =
                     crate::validators::filter_elected_players(&registry, &elected)
                 {
-                    let next_players = ordered::Set::try_from_iter(players)
-                        .wrap_err("failed collecting elected players")?;
-                    debug!(?next_players, "determined next players from staking election");
-                    return Ok(next_players);
+                    // A duplicate consensus key is deterministic across nodes (all read the same
+                    // registry), so falling back here is consistent — never a partial halt. This
+                    // is unreachable while the ValidatorConfigV2 precompile enforces key
+                    // uniqueness, but the contract says "any shortfall falls back," so honor it.
+                    match ordered::Set::try_from_iter(players) {
+                        Ok(next_players) => {
+                            debug!(
+                                ?next_players,
+                                "determined next players from staking election"
+                            );
+                            return Ok(next_players);
+                        }
+                        Err(error) => warn!(
+                            %error,
+                            "elected committee has duplicate keys; falling back to full registry"
+                        ),
+                    }
+                } else {
+                    warn!(
+                        elected = elected.len(),
+                        registry = registry.len(),
+                        "elected committee below minimum; falling back to full registry"
+                    );
                 }
-                warn!(
-                    elected = elected.len(),
-                    registry = registry.len(),
-                    "elected committee below minimum; falling back to full registry"
-                );
             }
             Err(error) => {
                 warn!(%error, "failed reading elected committee; falling back to full registry");

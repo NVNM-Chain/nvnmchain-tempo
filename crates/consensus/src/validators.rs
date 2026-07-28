@@ -205,7 +205,13 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Gas cap for the election read; the candidate list is bounded, so this is generous.
+/// Nominal gas limit for the election read. NOTE: this is a read-only *system* call
+/// (`is_system_tx: true`), and revm's system-call path rebuilds the tx with its own
+/// `SYSTEM_CALL_GAS_LIMIT` — the value set here is not the one enforced. Determinism does not
+/// rely on this cap: `NVNMStaking` bounds the candidate list (`MAX_CANDIDATES`), so
+/// `computeCommittee()`'s gas is bounded far below any revm system-call limit on every node,
+/// and a homogeneous fleet enforces an identical limit regardless. Kept for intent/documentation
+/// and in case the call is ever moved off the system-tx path.
 const ELECTION_CALL_GAS: u64 = 30_000_000;
 
 /// Minimum elected committee size before falling back to the full registry (3f+1, f=1).
@@ -242,7 +248,9 @@ pub(crate) fn read_elected_committee_at_block_hash(
             inner: reth_ethereum::evm::revm::context::TxEnv {
                 caller: Address::ZERO,
                 kind: alloy_primitives::TxKind::Call(contract),
-                data: IStakingElection::computeCommitteeCall {}.abi_encode().into(),
+                data: IStakingElection::computeCommitteeCall {}
+                    .abi_encode()
+                    .into(),
                 gas_limit: ELECTION_CALL_GAS,
                 gas_price: 0,
                 ..Default::default()
