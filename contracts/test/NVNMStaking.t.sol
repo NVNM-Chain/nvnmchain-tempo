@@ -140,6 +140,28 @@ contract NVNMStakingTest is Test {
         assertEq(staking.claim(validator), 100 ether);
     }
 
+    // -- compounding ---------------------------------------------------------
+    function test_compoundReward_growsAllStakesProRata() public {
+        _stake(alice, validator, 300 ether);
+        _stake(bob, validator, 100 ether);
+        nvnm.mint(address(this), 100 ether);
+        nvnm.approve(address(staking), 100 ether);
+
+        staking.compoundReward(validator, 100 ether); // e.g. fee-buyback proceeds
+        assertEq(staking.stakedOf(validator, alice), 375 ether, "3/4 of the growth");
+        assertEq(staking.stakedOf(validator, bob), 125 ether, "1/4 of the growth");
+        // Shares and the stablecoin reward accumulator are untouched.
+        assertEq(staking.sharesOf(validator, alice), 300 ether);
+        assertEq(staking.earned(validator, alice), 0);
+    }
+
+    function test_compoundReward_noStakersReverts() public {
+        nvnm.mint(address(this), 1 ether);
+        nvnm.approve(address(staking), 1 ether);
+        vm.expectRevert(NVNMStaking.NoStakers.selector);
+        staking.compoundReward(validator, 1 ether);
+    }
+
     // -- committee election --------------------------------------------------
     function _electionSetup() internal {
         vm.startPrank(owner);

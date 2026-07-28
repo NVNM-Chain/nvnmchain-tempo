@@ -74,6 +74,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event Withdrawn(address indexed validator, address indexed user, uint256 amount);
     event UnbondingPeriodSet(uint256 period);
     event Slashed(address indexed validator, uint256 bps, uint256 seized, address indexed recipient);
+    event RewardCompounded(address indexed validator, address indexed from, uint256 amount);
 
     // -- errors --------------------------------------------------------------
     error ZeroAmount();
@@ -185,6 +186,18 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         SafeTransferLib.safeTransferFrom($.rewardToken, msg.sender, address(this), amount);
         $.accRewardPerShare[validator] += (amount * ACC) / tShares;
         emit RewardDeposited(validator, msg.sender, amount);
+    }
+
+    /// @notice Add stake tokens to `validator`'s pool without minting shares: every delegator's
+    ///         stake grows pro-rata. The hook for compounding fee-buyback NVNM (the pool is
+    ///         donation-immune, so compounding must be explicit). Permissionless.
+    function compoundReward(address validator, uint256 amount) external nonReentrant {
+        if (amount == 0) revert ZeroAmount();
+        StakingStorage storage $ = _s();
+        if ($.totalShares[validator] == 0) revert NoStakers();
+        $.totalStaked[validator] += amount;
+        SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), amount);
+        emit RewardCompounded(validator, msg.sender, amount);
     }
 
     /// @notice Claim your accrued reward-token rewards for `validator`.
