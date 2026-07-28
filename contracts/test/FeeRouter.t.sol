@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 import {FeeRouter, FeeRouterFactory} from "../src/FeeRouter.sol";
+import {MockSwapPool} from "./support/MockSwapPool.sol";
 import {NVNMStaking} from "../src/NVNMStaking.sol";
 import {MockERC20} from "./support/MockERC20.sol";
 
@@ -26,7 +27,7 @@ contract FeeRouterTest is Test {
         staking = NVNMStaking(LibClone.deployERC1967(address(new NVNMStaking())));
         staking.initialize(owner, address(nvnm), address(usd));
         factory = new FeeRouterFactory(address(staking), owner, 2_000); // cap commission at 20%
-        router = FeeRouter(factory.create(validator, operator, 1_000)); // 10% commission
+        router = FeeRouter(factory.create(validator, operator, 1_000, 0)); // 10% commission
 
         nvnm.mint(alice, 1_000 ether);
         vm.prank(alice);
@@ -67,11 +68,11 @@ contract FeeRouterTest is Test {
 
     function test_flush_commissionExtremes() public {
         _stake(1 ether);
-        FeeRouter zero = FeeRouter(factory.create(validator, operator, 0));
+        FeeRouter zero = FeeRouter(factory.create(validator, operator, 0, 0));
         usd.mint(address(zero), 50 ether);
         assertEq(zero.flush(), 50 ether); // all to stakers
 
-        FeeRouter all = new FeeRouter(validator, operator, address(staking), 10_000);
+        FeeRouter all = new FeeRouter(validator, operator, address(staking), address(0), 10_000, 0);
         usd.mint(address(all), 50 ether);
         assertEq(all.flush(), 0); // all to operator
         assertEq(usd.balanceOf(operator), 50 ether);
@@ -79,9 +80,9 @@ contract FeeRouterTest is Test {
 
     function test_factory_enforcesCommissionCap() public {
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        factory.create(validator, operator, 2_001);
+        factory.create(validator, operator, 2_001, 0);
 
-        factory.create(validator, operator, 2_000); // at the cap: fine
+        factory.create(validator, operator, 2_000, 0); // at the cap: fine
 
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(Ownable.Unauthorized.selector);
@@ -90,21 +91,48 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setMaxCommission(500);
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        factory.create(validator, operator, 501);
+        factory.create(validator, operator, 501, 0);
+    }
+
+    function test_flush_buysBackAndCompounds() public {
+        MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
+        usd.mint(address(pool), 1_000 ether);
+        nvnm.mint(address(pool), 1_000 ether);
+        vm.prank(owner);
+        factory.setSwapper(address(pool));
+
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 1_000, 4_000)); // 10% + 40%
+        _stake(100 ether);
+        usd.mint(address(r), 100 ether);
+
+        uint256 expectedOut = (uint256(1_000 ether) * 40 ether) / uint256(1_040 ether); // x*y=k, no fee
+        assertEq(r.flush(), 50 ether); // deposited remainder
+        assertEq(usd.balanceOf(operator), 10 ether);
+        assertEq(staking.earned(validator, alice), 50 ether);
+        assertEq(staking.stakedOf(validator, alice), 100 ether + expectedOut, "buyback compounded");
+    }
+
+    function test_flush_withoutSwapper_foldsBuybackIntoDeposit() public {
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 1_000, 4_000));
+        _stake(100 ether);
+        usd.mint(address(r), 100 ether);
+
+        assertEq(r.flush(), 90 ether, "buyback folds into deposit until a market exists");
+        assertEq(staking.earned(validator, alice), 90 ether);
     }
 
     function test_constructor_validation() public {
         vm.expectRevert(FeeRouter.ZeroAddress.selector);
-        new FeeRouter(address(0), operator, address(staking), 0);
+        new FeeRouter(address(0), operator, address(staking), address(0), 0, 0);
         vm.expectRevert(FeeRouter.InvalidBps.selector);
-        new FeeRouter(validator, operator, address(staking), 10_001);
+        new FeeRouter(validator, operator, address(staking), address(0), 6_000, 5_000); // sum > 100%
     }
 
     function test_factory_isDeterministicPerParams() public {
         // Same params redeploy reverts (CREATE2 collision); different params get a new router.
         vm.expectRevert();
-        factory.create(validator, operator, 1_000);
-        address other = factory.create(validator, operator, 2_000);
+        factory.create(validator, operator, 1_000, 0);
+        address other = factory.create(validator, operator, 2_000, 0);
         assertTrue(other != address(router));
         assertEq(FeeRouter(other).commissionBps(), 2_000);
         assertEq(FeeRouter(other).rewardToken(), address(usd));
