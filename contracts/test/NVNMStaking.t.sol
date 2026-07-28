@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {Test} from "forge-std/Test.sol";
-import {LibClone} from "solady/utils/LibClone.sol";
-import {Ownable} from "solady/auth/Ownable.sol";
-import {NVNMStaking} from "../src/NVNMStaking.sol";
-import {MockERC20} from "./support/MockERC20.sol";
+import { NVNMStaking } from "../src/NVNMStaking.sol";
+import { MockERC20 } from "./support/MockERC20.sol";
+import { Test } from "forge-std/Test.sol";
+import { Ownable } from "solady/auth/Ownable.sol";
+import { LibClone } from "solady/utils/LibClone.sol";
 
 contract NVNMStakingV2 is NVNMStaking {
     function version() external pure returns (uint256) {
@@ -31,8 +31,8 @@ contract NVNMStakingTest is Test {
         staking = NVNMStaking(LibClone.deployERC1967(impl));
         staking.initialize(owner, address(nvnm), address(usd));
 
-        for (address who = alice; ; who = bob) {
-            nvnm.mint(who, 1_000 ether);
+        for (address who = alice;; who = bob) {
+            nvnm.mint(who, 1000 ether);
             vm.prank(who);
             nvnm.approve(address(staking), type(uint256).max);
             if (who == bob) break;
@@ -148,10 +148,12 @@ contract NVNMStakingTest is Test {
         nvnm.approve(address(staking), 100 ether);
 
         staking.compoundReward(validator, 100 ether); // e.g. fee-buyback proceeds
-        assertEq(staking.stakedOf(validator, alice), 375 ether, "3/4 of the growth");
-        assertEq(staking.stakedOf(validator, bob), 125 ether, "1/4 of the growth");
-        // Shares and the stablecoin reward accumulator are untouched.
-        assertEq(staking.sharesOf(validator, alice), 300 ether);
+        // 1 wei tolerance: the virtual-offset share rate rounds in the pool's favor.
+        assertApproxEqAbs(staking.stakedOf(validator, alice), 375 ether, 1, "3/4 of the growth");
+        assertApproxEqAbs(staking.stakedOf(validator, bob), 125 ether, 1, "1/4 of the growth");
+        // Shares and the stablecoin reward accumulator are untouched (first mint is scaled by
+        // the 1e6 virtual-share offset).
+        assertEq(staking.sharesOf(validator, alice), 300 ether * 1e6);
         assertEq(staking.earned(validator, alice), 0);
     }
 
@@ -160,6 +162,74 @@ contract NVNMStakingTest is Test {
         nvnm.approve(address(staking), 1 ether);
         vm.expectRevert(NVNMStaking.NoStakers.selector);
         staking.compoundReward(validator, 1 ether);
+    }
+
+    function test_compoundReward_collapsedPoolReverts() public {
+        _stake(alice, validator, 100 ether);
+        vm.prank(owner);
+        staking.slash(validator, 10_000, treasury);
+
+        nvnm.mint(address(this), 1 ether);
+        nvnm.approve(address(staking), 1 ether);
+        vm.expectRevert(NVNMStaking.PoolCollapsed.selector);
+        staking.compoundReward(validator, 1 ether); // must not revive worthless shares
+    }
+
+    function test_stake_inflationAttackUnprofitable() public {
+        // Classic first-depositor inflation: 1 wei stake, then a large donation via
+        // compoundReward to push the share rate so the victim mints zero shares.
+        address attacker = alice;
+        address victim = bob;
+        vm.startPrank(attacker);
+        nvnm.approve(address(staking), type(uint256).max);
+        staking.stake(validator, 1);
+        staking.compoundReward(validator, 100 ether);
+        vm.stopPrank();
+
+        _stake(victim, validator, 100 ether);
+        // The virtual offset keeps the victim's mint proportional: they must own ~half of the
+        // ~200-ether pool, and the attacker cannot exit with more than they put in.
+        assertApproxEqRel(staking.stakedOf(validator, victim), 100 ether, 1e12);
+        uint256 attackerValue = staking.stakedOf(validator, attacker);
+        assertLe(attackerValue, 100 ether + 1); // donation not recouped from the victim
+
+        vm.prank(victim);
+        staking.unstake(validator, 99.99 ether); // victim can exit ~all of their stake
+    }
+
+    function test_stake_zeroSharesBackstopReverts() public {
+        // Push the rate past the virtual offset with tiny magnitudes: 1 wei staked, 3e6 wei
+        // compounded → a 1-wei stake would mint 0 shares and must revert, not silently donate.
+        vm.startPrank(alice);
+        nvnm.approve(address(staking), type(uint256).max);
+        staking.stake(validator, 1);
+        staking.compoundReward(validator, 3e6);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        nvnm.approve(address(staking), 1);
+        vm.expectRevert(NVNMStaking.ZeroShares.selector);
+        staking.stake(validator, 1);
+        vm.stopPrank();
+    }
+
+    function test_candidacy_registrationCapped() public {
+        vm.prank(owner);
+        staking.setCandidacyBond(1 ether);
+        for (uint256 i; i < 256; ++i) {
+            address c = address(uint160(0x10000 + i));
+            nvnm.mint(c, 1 ether);
+            vm.startPrank(c);
+            nvnm.approve(address(staking), 1 ether);
+            staking.registerCandidate();
+            vm.stopPrank();
+        }
+        nvnm.mint(alice, 1 ether);
+        vm.startPrank(alice);
+        nvnm.approve(address(staking), 1 ether);
+        vm.expectRevert(NVNMStaking.CandidateListFull.selector);
+        staking.registerCandidate();
+        vm.stopPrank();
     }
 
     // -- committee election --------------------------------------------------
@@ -287,7 +357,7 @@ contract NVNMStakingTest is Test {
         staking.resignCandidate();
         assertEq(staking.candidates().length, 0);
         assertEq(staking.bondOf(alice), 0);
-        assertEq(nvnm.balanceOf(alice), 1_000 ether);
+        assertEq(nvnm.balanceOf(alice), 1000 ether);
     }
 
     function test_candidacy_ownerKickRefundsBond() public {
@@ -298,7 +368,7 @@ contract NVNMStakingTest is Test {
 
         vm.prank(owner);
         staking.setCandidate(alice, false);
-        assertEq(nvnm.balanceOf(alice), 1_000 ether, "kicked candidate gets bond back");
+        assertEq(nvnm.balanceOf(alice), 1000 ether, "kicked candidate gets bond back");
     }
 
     function test_candidacy_bondChangeDoesNotAffectHeldBonds() public {
@@ -311,7 +381,7 @@ contract NVNMStakingTest is Test {
         staking.setCandidacyBond(500 ether); // raise after alice registered
         vm.prank(alice);
         staking.resignCandidate();
-        assertEq(nvnm.balanceOf(alice), 1_000 ether, "refund is the bond actually paid");
+        assertEq(nvnm.balanceOf(alice), 1000 ether, "refund is the bond actually paid");
     }
 
     function test_candidacy_duplicateAndNonCandidateRevert() public {
@@ -335,7 +405,7 @@ contract NVNMStakingTest is Test {
         _stake(alice, validator, 100 ether);
         vm.prank(alice);
         staking.unstake(validator, 100 ether);
-        assertEq(nvnm.balanceOf(alice), 1_000 ether);
+        assertEq(nvnm.balanceOf(alice), 1000 ether);
     }
 
     function test_unbonding_delaysWithdrawal() public {
@@ -357,7 +427,7 @@ contract NVNMStakingTest is Test {
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
         assertEq(staking.withdraw(validator), 100 ether);
-        assertEq(nvnm.balanceOf(alice), 1_000 ether);
+        assertEq(nvnm.balanceOf(alice), 1000 ether);
         (amount,) = staking.pendingUnstakeOf(validator, alice);
         assertEq(amount, 0);
     }
@@ -429,7 +499,7 @@ contract NVNMStakingTest is Test {
         _stake(bob, validator, 100 ether);
 
         vm.prank(owner);
-        uint256 seized = staking.slash(validator, 5_000, treasury); // 50%
+        uint256 seized = staking.slash(validator, 5000, treasury); // 50%
         assertEq(seized, 200 ether);
         assertEq(nvnm.balanceOf(treasury), 200 ether);
         assertEq(staking.stakedOf(validator, alice), 150 ether);
@@ -442,10 +512,10 @@ contract NVNMStakingTest is Test {
 
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.NotAuthorized.selector);
-        staking.slash(validator, 1_000, treasury);
+        staking.slash(validator, 1000, treasury);
 
         vm.prank(address(0)); // the protocol system caller
-        assertEq(staking.slash(validator, 1_000, treasury), 10 ether);
+        assertEq(staking.slash(validator, 1000, treasury), 10 ether);
     }
 
     function test_slash_hitsPendingBucket() public {
@@ -456,7 +526,7 @@ contract NVNMStakingTest is Test {
         staking.unstake(validator, 100 ether); // all pending
 
         vm.prank(owner);
-        uint256 seized = staking.slash(validator, 5_000, treasury);
+        uint256 seized = staking.slash(validator, 5000, treasury);
         assertEq(seized, 50 ether, "pending stake is slashable");
 
         vm.warp(block.timestamp + 7 days);
@@ -467,16 +537,17 @@ contract NVNMStakingTest is Test {
     function test_slash_thenStake_ratesStayFair() public {
         _stake(alice, validator, 100 ether);
         vm.prank(owner);
-        staking.slash(validator, 5_000, treasury); // alice now effectively 50
+        staking.slash(validator, 5000, treasury); // alice now effectively 50
 
         _stake(bob, validator, 100 ether); // joins post-slash at the new rate
         assertEq(staking.stakedOf(validator, alice), 50 ether, "old staker keeps the loss");
-        assertEq(staking.stakedOf(validator, bob), 100 ether, "new staker unaffected");
+        assertApproxEqAbs(staking.stakedOf(validator, bob), 100 ether, 1, "new staker unaffected");
 
-        // Rewards split by shares: alice 100 shares, bob 200 shares.
+        // Rewards split by shares: alice ~1/3, bob ~2/3 (bob staked at the post-slash rate, so
+        // holds ~2x alice's shares; virtual-offset rounding leaves a few wei of dust).
         staking.depositReward(validator, 300 ether);
-        assertEq(staking.earned(validator, alice), 100 ether);
-        assertEq(staking.earned(validator, bob), 200 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 2);
+        assertApproxEqAbs(staking.earned(validator, bob), 200 ether, 2);
     }
 
     function test_slash_full_collapsesPool() public {
@@ -497,7 +568,7 @@ contract NVNMStakingTest is Test {
         vm.expectRevert(NVNMStaking.InvalidBps.selector);
         staking.slash(validator, 10_001, treasury);
         vm.expectRevert(NVNMStaking.ZeroAddress.selector);
-        staking.slash(validator, 1_000, address(0));
+        staking.slash(validator, 1000, address(0));
         vm.stopPrank();
     }
 
@@ -512,7 +583,7 @@ contract NVNMStakingTest is Test {
         _stake(alice, validator, 100 ether);
 
         vm.prank(owner);
-        uint256 seized = staking.slash(validator, 5_000, treasury);
+        uint256 seized = staking.slash(validator, 5000, treasury);
         assertEq(seized, 50 ether + 50 ether, "half the pool plus the full bond");
         assertEq(staking.bondOf(validator), 0);
 
@@ -532,7 +603,7 @@ contract NVNMStakingTest is Test {
         _stake(alice, validator, 300 ether); // 3 seats
 
         vm.prank(owner);
-        staking.slash(validator, 5_000, treasury); // 150 left -> 1 seat
+        staking.slash(validator, 5000, treasury); // 150 left -> 1 seat
         (, uint256[] memory seats) = staking.computeCommittee();
         assertEq(seats[0], 1);
     }

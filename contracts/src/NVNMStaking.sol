@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
-import {Initializable} from "solady/utils/Initializable.sol";
-import {Ownable} from "solady/auth/Ownable.sol";
-import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
-import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
-import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
+import { Ownable } from "solady/auth/Ownable.sol";
+import { FixedPointMathLib } from "solady/utils/FixedPointMathLib.sol";
+import { Initializable } from "solady/utils/Initializable.sol";
+import { ReentrancyGuard } from "solady/utils/ReentrancyGuard.sol";
+import { SafeTransferLib } from "solady/utils/SafeTransferLib.sol";
+import { UUPSUpgradeable } from "solady/utils/UUPSUpgradeable.sol";
 
 /// @title NVNMStaking
 /// @notice Delegated fee-sharing staking: stake NVNM toward a validator, and that validator's
@@ -22,6 +22,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     uint256 private constant ACC = 1e18; // fixed-point scale (reward accumulator, pending factor)
     uint256 private constant BPS = 10_000;
+    // ERC4626-style virtual offset: the share rate is (tShares + VIRTUAL_SHARES) per
+    // (tStaked + VIRTUAL_STAKE), so inflating the rate via `compoundReward` donations costs the
+    // attacker more than any victim's rounding loss — first-depositor share-inflation is
+    // unprofitable by construction. Virtual shares earn nothing real: they only absorb dust.
+    uint256 private constant VIRTUAL_SHARES = 1e6;
+    uint256 private constant VIRTUAL_STAKE = 1;
+    uint256 private constant MAX_CANDIDATES = 256; // bounds the consensus-facing election scan
 
     // -- ERC-7201 namespaced storage -----------------------------------------
     /// @custom:storage-location erc7201:nvnm.staking.storage
@@ -70,10 +77,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event CandidateSet(address indexed validator, bool active);
     event SeatConfigSet(uint256 tokensPerSeat, uint256 maxSeats, uint256 maxSeatsPerValidator);
     event CandidacyBondSet(uint256 bond);
-    event UnstakeRequested(address indexed validator, address indexed user, uint256 amount, uint256 releaseAt);
+    event UnstakeRequested(
+        address indexed validator, address indexed user, uint256 amount, uint256 releaseAt
+    );
     event Withdrawn(address indexed validator, address indexed user, uint256 amount);
     event UnbondingPeriodSet(uint256 period);
-    event Slashed(address indexed validator, uint256 bps, uint256 seized, address indexed recipient);
+    event Slashed(
+        address indexed validator, uint256 bps, uint256 seized, address indexed recipient
+    );
     event RewardCompounded(address indexed validator, address indexed from, uint256 amount);
 
     // -- errors --------------------------------------------------------------
@@ -91,13 +102,18 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error InvalidBps();
     error NotAuthorized();
     error PoolCollapsed();
+    error ZeroShares();
+    error CandidateListFull();
 
     constructor() {
         _disableInitializers();
     }
 
     /// @dev Tokens must be standard ERC-20s (no fee-on-transfer / rebasing).
-    function initialize(address owner_, address stakeToken_, address rewardToken_) external initializer {
+    function initialize(address owner_, address stakeToken_, address rewardToken_)
+        external
+        initializer
+    {
         if (stakeToken_ == address(0) || rewardToken_ == address(0)) revert ZeroAddress();
         _initializeOwner(owner_);
         StakingStorage storage $ = _s();
@@ -114,7 +130,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 tStaked = $.totalStaked[validator];
         // A fully-slashed pool (shares outstanding, zero tokens) has no meaningful rate.
         if (tShares != 0 && tStaked == 0) revert PoolCollapsed();
-        uint256 minted = tShares == 0 ? amount : amount.fullMulDiv(tShares, tStaked);
+        uint256 minted = amount.fullMulDiv(tShares + VIRTUAL_SHARES, tStaked + VIRTUAL_STAKE);
+        if (minted == 0) revert ZeroShares(); // backstop: rate pushed beyond the virtual offset
         _settle($, validator, msg.sender);
         $.shares[validator][msg.sender] += minted;
         $.totalShares[validator] = tShares + minted;
@@ -133,9 +150,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 tShares = $.totalShares[validator];
         uint256 tStaked = $.totalStaked[validator];
         uint256 userShares = $.shares[validator][msg.sender];
-        if (tStaked == 0 || userShares.fullMulDiv(tStaked, tShares) < amount) revert InsufficientStake();
+        if (
+            tStaked == 0
+                || userShares.fullMulDiv(tStaked + VIRTUAL_STAKE, tShares + VIRTUAL_SHARES) < amount
+        ) {
+            revert InsufficientStake();
+        }
         // Burn rounded-up shares so the pool never pays out more than the share fraction.
-        uint256 burned = amount.fullMulDivUp(tShares, tStaked);
+        uint256 burned = amount.fullMulDivUp(tShares + VIRTUAL_SHARES, tStaked + VIRTUAL_STAKE);
         if (burned > userShares) burned = userShares;
         _settle($, validator, msg.sender);
         $.shares[validator][msg.sender] = userShares - burned;
@@ -189,12 +211,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     /// @notice Add stake tokens to `validator`'s pool without minting shares: every delegator's
-    ///         stake grows pro-rata. The hook for compounding fee-buyback NVNM (the pool is
-    ///         donation-immune, so compounding must be explicit). Permissionless.
+    ///         stake grows pro-rata. The hook for compounding fee-buyback NVNM (raw transfers are
+    ///         ignored by the accounting, so compounding must be explicit). Permissionless — the
+    ///         virtual-offset share rate makes donation-based rate inflation unprofitable.
     function compoundReward(address validator, uint256 amount) external nonReentrant {
         if (amount == 0) revert ZeroAmount();
         StakingStorage storage $ = _s();
         if ($.totalShares[validator] == 0) revert NoStakers();
+        if ($.totalStaked[validator] == 0) revert PoolCollapsed(); // don't revive a fully-slashed pool
         $.totalStaked[validator] += amount;
         SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), amount);
         emit RewardCompounded(validator, msg.sender, amount);
@@ -237,7 +261,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 poolBefore = $.totalPendingNorm[validator].fullMulDiv(factor, ACC);
         uint256 newFactor = (factor * (BPS - bps)) / BPS;
         $.pendingFactor[validator] = newFactor == 0 ? 1 : newFactor; // 1 wei floor: 0 means "unset"
-        uint256 poolAfter = $.totalPendingNorm[validator].fullMulDiv($.pendingFactor[validator], ACC);
+        uint256 poolAfter =
+            $.totalPendingNorm[validator].fullMulDiv($.pendingFactor[validator], ACC);
 
         // Any slash forfeits the full candidacy bond — the validator's own skin in the game.
         uint256 bond = $.bondPaid[validator];
@@ -251,12 +276,18 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     /// @dev Fold pending rewards into `accrued` and mark the user settled to the current accumulator.
     function _settle(StakingStorage storage $, address validator, address user) private {
         uint256 acc = $.accRewardPerShare[validator];
-        $.accrued[validator][user] += ($.shares[validator][user] * (acc - $.userPaid[validator][user])) / ACC;
+        $.accrued[
+                validator
+            ][user] += ($.shares[validator][user] * (acc - $.userPaid[validator][user])) / ACC;
         $.userPaid[validator][user] = acc;
     }
 
     /// @dev The pending-bucket slash factor (ACC-scaled); an unset slot means "never slashed".
-    function _pendingFactor(StakingStorage storage $, address validator) private view returns (uint256 f) {
+    function _pendingFactor(StakingStorage storage $, address validator)
+        private
+        view
+        returns (uint256 f)
+    {
         f = $.pendingFactor[validator];
         if (f == 0) f = ACC;
     }
@@ -285,6 +316,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         StakingStorage storage $ = _s();
         uint256 bond = $.candidacyBond;
         if (bond == 0) revert CandidacyClosed();
+        // The consensus layer eth_calls computeCommittee() each epoch under a fixed gas budget;
+        // an unbounded self-registered list would let bond capital grief that read into fallback.
+        if ($.candidates.length >= MAX_CANDIDATES) revert CandidateListFull();
         $.bondPaid[msg.sender] = bond;
         _addCandidate(msg.sender);
         SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), bond);
@@ -335,7 +369,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         external
         onlyOwner
     {
-        if (tokensPerSeat_ == 0 || maxSeats_ == 0 || maxSeatsPerValidator_ == 0) revert ZeroAmount();
+        if (tokensPerSeat_ == 0 || maxSeats_ == 0 || maxSeatsPerValidator_ == 0) {
+            revert ZeroAmount();
+        }
         StakingStorage storage $ = _s();
         $.tokensPerSeat = tokensPerSeat_;
         $.maxSeats = maxSeats_;
@@ -345,7 +381,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice The elected committee at the current state: candidates with >= 1 seat, ranked by
     ///         stake (stable on ties), seats truncated to the `maxSeats` budget.
-    function computeCommittee() external view returns (address[] memory vals, uint256[] memory seats) {
+    function computeCommittee()
+        external
+        view
+        returns (address[] memory vals, uint256[] memory seats)
+    {
         StakingStorage storage $ = _s();
         uint256 per = $.tokensPerSeat;
         if (per == 0) revert NotConfigured();
@@ -364,7 +404,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
             }
         }
 
-        // Stable insertion sort by stake, descending (m is small: candidates are owner-curated).
+        // Stable insertion sort by stake, descending (m is bounded: owner curation plus the
+        // MAX_CANDIDATES cap on bonded self-registration).
         for (uint256 i = 1; i < m; ++i) {
             address v = cv[i];
             uint256 s = cstake[i];
@@ -411,7 +452,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         return _s().bondPaid[validator];
     }
 
-    function seatConfig() external view returns (uint256 tokensPerSeat, uint256 maxSeats, uint256 maxSeatsPerValidator) {
+    function seatConfig()
+        external
+        view
+        returns (uint256 tokensPerSeat, uint256 maxSeats, uint256 maxSeatsPerValidator)
+    {
         StakingStorage storage $ = _s();
         return ($.tokensPerSeat, $.maxSeats, $.maxSeatsPerValidator);
     }
@@ -421,7 +466,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     function earned(address validator, address user) external view returns (uint256) {
         StakingStorage storage $ = _s();
         uint256 pending =
-            ($.shares[validator][user] * ($.accRewardPerShare[validator] - $.userPaid[validator][user])) / ACC;
+            ($.shares[validator][user]
+                    * ($.accRewardPerShare[validator] - $.userPaid[validator][user])) / ACC;
         return $.accrued[validator][user] + pending;
     }
 
@@ -430,7 +476,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         StakingStorage storage $ = _s();
         uint256 tShares = $.totalShares[validator];
         if (tShares == 0) return 0;
-        return $.shares[validator][user].fullMulDiv($.totalStaked[validator], tShares);
+        return $.shares[validator][user].fullMulDiv(
+            $.totalStaked[validator] + VIRTUAL_STAKE, tShares + VIRTUAL_SHARES
+        );
     }
 
     function sharesOf(address validator, address user) external view returns (uint256) {
@@ -465,7 +513,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- upgrade authority ---------------------------------------------------
-    function _authorizeUpgrade(address) internal override onlyOwner {}
+    function _authorizeUpgrade(address) internal override onlyOwner { }
 
     function _guardInitializeOwner() internal pure override returns (bool) {
         return true;
