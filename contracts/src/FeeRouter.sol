@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
+import {Ownable} from "solady/auth/Ownable.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 interface INVNMStaking {
@@ -55,16 +56,31 @@ contract FeeRouter {
 }
 
 /// @notice Deploys one deterministic FeeRouter per (validator, operator, commission).
-contract FeeRouterFactory {
+///         Validators self-serve, but only within the owner-set commission bound.
+contract FeeRouterFactory is Ownable {
     address public immutable staking;
+    uint256 public maxCommissionBps;
 
     event RouterCreated(address indexed validator, address router, address operator, uint256 commissionBps);
+    event MaxCommissionSet(uint256 bps);
 
-    constructor(address staking_) {
+    error CommissionTooHigh();
+
+    constructor(address staking_, address owner_, uint256 maxCommissionBps_) {
         staking = staking_;
+        _initializeOwner(owner_);
+        maxCommissionBps = maxCommissionBps_;
+    }
+
+    /// @notice Bound future routers' commission (existing routers are immutable and unaffected).
+    function setMaxCommission(uint256 bps) external onlyOwner {
+        if (bps > 10_000) revert CommissionTooHigh();
+        maxCommissionBps = bps;
+        emit MaxCommissionSet(bps);
     }
 
     function create(address validator, address operator, uint256 commissionBps) external returns (address router) {
+        if (commissionBps > maxCommissionBps) revert CommissionTooHigh();
         bytes32 salt = keccak256(abi.encode(validator, operator, commissionBps));
         router = address(new FeeRouter{salt: salt}(validator, operator, staking, commissionBps));
         emit RouterCreated(validator, router, operator, commissionBps);

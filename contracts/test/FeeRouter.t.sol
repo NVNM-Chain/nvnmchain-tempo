@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {Test} from "forge-std/Test.sol";
+import {Ownable} from "solady/auth/Ownable.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 import {FeeRouter, FeeRouterFactory} from "../src/FeeRouter.sol";
 import {NVNMStaking} from "../src/NVNMStaking.sol";
@@ -24,7 +25,7 @@ contract FeeRouterTest is Test {
         usd = new MockERC20("nvmnUSD", "nvmnUSD");
         staking = NVNMStaking(LibClone.deployERC1967(address(new NVNMStaking())));
         staking.initialize(owner, address(nvnm), address(usd));
-        factory = new FeeRouterFactory(address(staking));
+        factory = new FeeRouterFactory(address(staking), owner, 2_000); // cap commission at 20%
         router = FeeRouter(factory.create(validator, operator, 1_000)); // 10% commission
 
         nvnm.mint(alice, 1_000 ether);
@@ -70,10 +71,26 @@ contract FeeRouterTest is Test {
         usd.mint(address(zero), 50 ether);
         assertEq(zero.flush(), 50 ether); // all to stakers
 
-        FeeRouter all = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter all = new FeeRouter(validator, operator, address(staking), 10_000);
         usd.mint(address(all), 50 ether);
         assertEq(all.flush(), 0); // all to operator
         assertEq(usd.balanceOf(operator), 50 ether);
+    }
+
+    function test_factory_enforcesCommissionCap() public {
+        vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
+        factory.create(validator, operator, 2_001);
+
+        factory.create(validator, operator, 2_000); // at the cap: fine
+
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(Ownable.Unauthorized.selector);
+        factory.setMaxCommission(500);
+
+        vm.prank(owner);
+        factory.setMaxCommission(500);
+        vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
+        factory.create(validator, operator, 501);
     }
 
     function test_constructor_validation() public {
