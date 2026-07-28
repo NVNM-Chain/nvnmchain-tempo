@@ -201,7 +201,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     // -- slashing ------------------------------------------------------------
     /// @notice Slash `bps` of `validator`'s pool — live and unbonding stake alike, pro-rata
-    ///         across all delegators in O(1) — transferring the seized NVNM to `recipient`.
+    ///         across all delegators in O(1), plus the validator's full candidacy bond —
+    ///         transferring the seized NVNM to `recipient`.
     /// @dev Callable by the protocol system caller (address(0), the sender tempo uses for
     ///      system transactions) or by the owner (governance slashing; removed at ossification).
     function slash(address validator, uint256 bps, address recipient)
@@ -225,7 +226,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         $.pendingFactor[validator] = newFactor == 0 ? 1 : newFactor; // 1 wei floor: 0 means "unset"
         uint256 poolAfter = $.totalPendingNorm[validator].fullMulDiv($.pendingFactor[validator], ACC);
 
-        seized = liveCut + (poolBefore - poolAfter);
+        // Any slash forfeits the full candidacy bond — the validator's own skin in the game.
+        uint256 bond = $.bondPaid[validator];
+        if (bond != 0) $.bondPaid[validator] = 0;
+
+        seized = liveCut + (poolBefore - poolAfter) + bond;
         if (seized != 0) SafeTransferLib.safeTransfer($.stakeToken, recipient, seized);
         emit Slashed(validator, bps, seized, recipient);
     }

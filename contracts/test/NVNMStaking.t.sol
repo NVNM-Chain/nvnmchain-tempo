@@ -479,6 +479,29 @@ contract NVNMStakingTest is Test {
         vm.stopPrank();
     }
 
+    function test_slash_seizesCandidacyBond() public {
+        vm.prank(owner);
+        staking.setCandidacyBond(50 ether);
+        nvnm.mint(validator, 50 ether);
+        vm.startPrank(validator);
+        nvnm.approve(address(staking), 50 ether);
+        staking.registerCandidate();
+        vm.stopPrank();
+        _stake(alice, validator, 100 ether);
+
+        vm.prank(owner);
+        uint256 seized = staking.slash(validator, 5_000, treasury);
+        assertEq(seized, 50 ether + 50 ether, "half the pool plus the full bond");
+        assertEq(staking.bondOf(validator), 0);
+
+        // Resigning afterwards refunds nothing; administrative removal of an unslashed
+        // candidate still would (bond only forfeits on slash).
+        uint256 before = nvnm.balanceOf(validator);
+        vm.prank(validator);
+        staking.resignCandidate();
+        assertEq(nvnm.balanceOf(validator), before);
+    }
+
     function test_slash_reducesElectionSeats() public {
         vm.startPrank(owner);
         staking.setCandidate(validator, true);
