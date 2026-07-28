@@ -35,6 +35,11 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// Staking-election contract: when set, each epoch's validator set is the committee
+    /// elected by this contract's `computeCommittee()` (intersected with the
+    /// ValidatorConfigV2 registry). Consensus-critical — must be identical on all nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election: Option<Address>,
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
@@ -91,6 +96,11 @@ impl TempoGenesisInfo {
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    /// The staking-election contract selecting each epoch's validator set, if configured.
+    pub fn staking_election(&self) -> Option<Address> {
+        self.staking_election
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {

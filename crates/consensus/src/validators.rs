@@ -178,6 +178,108 @@ where
     Ok((header.number(), block_hash, res))
 }
 
+/// Reads the active validator set at `block_hash` as `(consensus key, validator address)` pairs.
+pub(crate) fn read_active_validator_keys_at_block_hash(
+    node: impl ExecutionNode,
+    block_hash: B256,
+) -> eyre::Result<Vec<(PublicKey, Address)>> {
+    read_validator_config_at_block_hash(node, block_hash, |config: &ValidatorConfigV2| {
+        let mut out = Vec::new();
+        for raw in config
+            .get_active_validators()
+            .wrap_err("failed getting active validator set")?
+        {
+            if let Ok(decoded) = DecodedValidatorV2::decode_from_contract(raw) {
+                out.push((decoded.public_key().clone(), decoded.address()));
+            }
+        }
+        Ok(out)
+    })
+    .map(|(_, _, out)| out)
+}
+
+alloy_sol_types::sol! {
+    /// The committee-election surface of the staking contract (`NVNMStaking.computeCommittee`).
+    interface IStakingElection {
+        function computeCommittee() external view returns (address[] vals, uint256[] seats);
+    }
+}
+
+/// Gas cap for the election read; the candidate list is bounded, so this is generous.
+const ELECTION_CALL_GAS: u64 = 30_000_000;
+
+/// Minimum elected committee size before falling back to the full registry (3f+1, f=1).
+pub(crate) const MIN_ELECTED_COMMITTEE: usize = 4;
+
+/// Reads the elected committee (validator addresses, election order) from the
+/// staking-election contract at `block_hash` via a read-only call.
+///
+/// Deterministic across nodes: same block hash => same state => same result.
+pub(crate) fn read_elected_committee_at_block_hash(
+    node: impl ExecutionNode,
+    block_hash: B256,
+    contract: Address,
+) -> eyre::Result<Vec<Address>> {
+    use alloy_evm::Evm as _;
+    use alloy_sol_types::SolCall as _;
+
+    let header = node
+        .header(block_hash)
+        .wrap_err_with(|| format!("failed reading block with hash `{block_hash}`"))?;
+    let db = State::builder()
+        .with_database(StateProviderDatabase::new(
+            node.state_by_block_hash(block_hash).wrap_err_with(|| {
+                format!("failed to get state from node provider for hash `{block_hash}`")
+            })?,
+        ))
+        .build();
+    let mut evm = node
+        .evm_for_block(db, &header)
+        .wrap_err("failed instantiating evm for block")?;
+
+    let result = evm
+        .transact(tempo_revm::TempoTxEnv {
+            inner: reth_ethereum::evm::revm::context::TxEnv {
+                caller: Address::ZERO,
+                kind: alloy_primitives::TxKind::Call(contract),
+                data: IStakingElection::computeCommitteeCall {}.abi_encode().into(),
+                gas_limit: ELECTION_CALL_GAS,
+                gas_price: 0,
+                ..Default::default()
+            },
+            is_system_tx: true,
+            ..Default::default()
+        })
+        .map_err(|e| eyre::eyre!("election call failed to execute: {e:?}"))?;
+
+    let reth_ethereum::evm::revm::context::result::ExecutionResult::Success { output, .. } =
+        result.result
+    else {
+        eyre::bail!("election call did not succeed: {:?}", result.result);
+    };
+    let ret = IStakingElection::computeCommitteeCall::abi_decode_returns(output.data())
+        .wrap_err("failed decoding computeCommittee() return")?;
+    Ok(ret.vals)
+}
+
+/// Filters the registry down to the elected committee.
+///
+/// Returns `None` when the intersection is smaller than
+/// `min(MIN_ELECTED_COMMITTEE, registry size)` — the caller must then fall back
+/// to the full registry so a mis-configured election cannot halt the chain.
+pub(crate) fn filter_elected_players(
+    registry: &[(PublicKey, Address)],
+    elected: &[Address],
+) -> Option<Vec<PublicKey>> {
+    let filtered: Vec<PublicKey> = registry
+        .iter()
+        .filter(|(_, addr)| elected.contains(addr))
+        .map(|(pk, _)| pk.clone())
+        .collect();
+    let required = MIN_ELECTED_COMMITTEE.min(registry.len());
+    (filtered.len() >= required && required > 0).then_some(filtered)
+}
+
 /// An entry in the validator config v2 contract with all its fields decoded
 /// into Rust types.
 pub(crate) struct DecodedValidatorV2 {
@@ -223,6 +325,10 @@ impl DecodedValidatorV2 {
         &self.public_key
     }
 
+    pub(crate) fn address(&self) -> Address {
+        self.address
+    }
+
     pub(crate) fn to_p2p_address(&self) -> commonware_p2p::Address {
         // NOTE: commonware takes egress as socket address but only uses the IP part.
         // So setting port to 0 is ok.
@@ -244,5 +350,61 @@ impl std::fmt::Display for DecodedValidatorV2 {
             self.index,
             self.address
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+    use super::*;
+
+    fn registry(n: u8) -> Vec<(PublicKey, Address)> {
+        (0..n)
+            .map(|i| {
+                (
+                    PrivateKey::from_seed(u64::from(i)).public_key(),
+                    Address::repeat_byte(i + 1),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn elected_subset_above_minimum_is_used() {
+        let reg = registry(6);
+        let elected: Vec<Address> = reg[..4].iter().map(|(_, a)| *a).collect();
+        let players = filter_elected_players(&reg, &elected).expect("meets minimum");
+        assert_eq!(players.len(), 4);
+        assert!(players.iter().eq(reg[..4].iter().map(|(pk, _)| pk)));
+    }
+
+    #[test]
+    fn committee_below_minimum_falls_back() {
+        let reg = registry(6);
+        let elected: Vec<Address> = reg[..3].iter().map(|(_, a)| *a).collect();
+        assert!(filter_elected_players(&reg, &elected).is_none());
+    }
+
+    #[test]
+    fn small_registry_lowers_the_minimum() {
+        // A 2-validator devnet: electing both is enough; electing one is not.
+        let reg = registry(2);
+        let both: Vec<Address> = reg.iter().map(|(_, a)| *a).collect();
+        assert_eq!(filter_elected_players(&reg, &both).unwrap().len(), 2);
+        assert!(filter_elected_players(&reg, &both[..1].to_vec()).is_none());
+    }
+
+    #[test]
+    fn unknown_elected_addresses_are_ignored() {
+        let reg = registry(5);
+        let mut elected: Vec<Address> = reg[..4].iter().map(|(_, a)| *a).collect();
+        elected.push(Address::repeat_byte(0xEE)); // not in the registry
+        assert_eq!(filter_elected_players(&reg, &elected).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn empty_registry_falls_back() {
+        assert!(filter_elected_players(&[], &[Address::repeat_byte(1)]).is_none());
     }
 }
