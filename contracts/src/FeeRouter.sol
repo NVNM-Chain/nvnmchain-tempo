@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {Ownable} from "solady/auth/Ownable.sol";
-import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import { Ownable } from "solady/auth/Ownable.sol";
+import { SafeTransferLib } from "solady/utils/SafeTransferLib.sol";
 
 interface INVNMStaking {
     function depositReward(address validator, uint256 amount) external;
@@ -38,9 +38,11 @@ contract FeeRouter {
     uint256 public immutable buybackBps;
 
     event Flushed(uint256 commission, uint256 compounded, uint256 deposited);
+    event Swept(address indexed token, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error InvalidBps();
+    error NotFactoryOwner();
 
     constructor(
         address validator_,
@@ -76,20 +78,36 @@ contract FeeRouter {
         uint256 compounded;
         address swapper = factory == address(0) ? address(0) : FeeRouterFactory(factory).swapper();
         if (buyback != 0 && swapper != address(0)) {
-            SafeTransferLib.safeApprove(rewardToken, swapper, buyback);
+            SafeTransferLib.safeApproveWithRetry(rewardToken, swapper, buyback);
             compounded = ISwapper(swapper).swap(rewardToken, stakeToken, buyback, 0);
-            SafeTransferLib.safeApprove(stakeToken, staking, compounded);
-            INVNMStaking(staking).compoundReward(validator, compounded);
+            if (compounded != 0) {
+                SafeTransferLib.safeApproveWithRetry(stakeToken, staking, compounded);
+                INVNMStaking(staking).compoundReward(validator, compounded);
+            }
         } else {
             buyback = 0; // no market yet: fold into the stablecoin deposit
         }
 
         deposited = balance - commission - buyback;
         if (deposited != 0) {
-            SafeTransferLib.safeApprove(rewardToken, staking, deposited);
+            SafeTransferLib.safeApproveWithRetry(rewardToken, staking, deposited);
             INVNMStaking(staking).depositReward(validator, deposited);
         }
         emit Flushed(commission, compounded, deposited);
+    }
+
+    /// @notice Governance escape hatch for funds that `flush()` can never route — e.g. a pool
+    ///         permanently collapsed by a 100% slash (stake() reverts, so `totalStaked` can never
+    ///         return to nonzero), or stray stake-token residue. Callable only by the factory
+    ///         owner (the Safe). Not reachable for factoryless routers.
+    function sweep(address token, address to) external returns (uint256 amount) {
+        if (factory == address(0) || msg.sender != Ownable(factory).owner()) {
+            revert NotFactoryOwner();
+        }
+        if (to == address(0)) revert ZeroAddress();
+        amount = SafeTransferLib.balanceOf(token, address(this));
+        if (amount != 0) SafeTransferLib.safeTransfer(token, to, amount);
+        emit Swept(token, to, amount);
     }
 }
 
@@ -102,14 +120,21 @@ contract FeeRouterFactory is Ownable {
     address public swapper; // 0 = buybacks disabled (fold into deposits)
 
     event RouterCreated(
-        address indexed validator, address router, address operator, uint256 commissionBps, uint256 buybackBps
+        address indexed validator,
+        address router,
+        address operator,
+        uint256 commissionBps,
+        uint256 buybackBps
     );
     event MaxCommissionSet(uint256 bps);
     event SwapperSet(address swapper);
 
     error CommissionTooHigh();
+    error ZeroAddress();
 
     constructor(address staking_, address owner_, uint256 maxCommissionBps_) {
+        if (staking_ == address(0)) revert ZeroAddress();
+        if (maxCommissionBps_ > 10_000) revert CommissionTooHigh();
         staking = staking_;
         _initializeOwner(owner_);
         maxCommissionBps = maxCommissionBps_;
@@ -135,7 +160,11 @@ contract FeeRouterFactory is Ownable {
     {
         if (commissionBps > maxCommissionBps) revert CommissionTooHigh();
         bytes32 salt = keccak256(abi.encode(validator, operator, commissionBps, buybackBps));
-        router = address(new FeeRouter{salt: salt}(validator, operator, staking, address(this), commissionBps, buybackBps));
+        router = address(
+            new FeeRouter{ salt: salt }(
+                validator, operator, staking, address(this), commissionBps, buybackBps
+            )
+        );
         emit RouterCreated(validator, router, operator, commissionBps, buybackBps);
     }
 }
