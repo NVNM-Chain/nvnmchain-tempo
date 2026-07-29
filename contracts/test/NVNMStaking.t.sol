@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import { NVNMStaking } from "../src/NVNMStaking.sol";
-import { MockERC20 } from "./support/MockERC20.sol";
-import { Test } from "forge-std/Test.sol";
-import { Ownable } from "solady/auth/Ownable.sol";
-import { LibClone } from "solady/utils/LibClone.sol";
+import {NVNMStaking} from "../src/NVNMStaking.sol";
+import {MockERC20} from "./support/MockERC20.sol";
+import {Test} from "forge-std/Test.sol";
+import {Ownable} from "solady/auth/Ownable.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 
 contract NVNMStakingV2 is NVNMStaking {
     function version() external pure returns (uint256) {
@@ -151,9 +151,9 @@ contract NVNMStakingTest is Test {
         // 1 wei tolerance: the virtual-offset share rate rounds in the pool's favor.
         assertApproxEqAbs(staking.stakedOf(validator, alice), 375 ether, 1, "3/4 of the growth");
         assertApproxEqAbs(staking.stakedOf(validator, bob), 125 ether, 1, "1/4 of the growth");
-        // Shares and the stablecoin reward accumulator are untouched (first mint is scaled by
-        // the 1e6 virtual-share offset).
-        assertEq(staking.sharesOf(validator, alice), 300 ether * 1e6);
+        // Shares and the stablecoin reward accumulator are untouched (first mint scales by the
+        // 1e3 virtual-share offset).
+        assertEq(staking.sharesOf(validator, alice), 300 ether * 1e3);
         assertEq(staking.earned(validator, alice), 0);
     }
 
@@ -187,14 +187,15 @@ contract NVNMStakingTest is Test {
         vm.stopPrank();
 
         _stake(victim, validator, 100 ether);
-        // The virtual offset keeps the victim's mint proportional: they must own ~half of the
-        // ~200-ether pool, and the attacker cannot exit with more than they put in.
-        assertApproxEqRel(staking.stakedOf(validator, victim), 100 ether, 1e12);
+        // The virtual offset keeps the victim's mint proportional: they recover ~all of their
+        // 100-ether deposit (a bounded sub-0.1% griefing residual from the 1-wei-first-stake
+        // rounding), and the attacker cannot exit with more than they put in.
+        assertApproxEqRel(staking.stakedOf(validator, victim), 100 ether, 1e15); // within 0.1%
         uint256 attackerValue = staking.stakedOf(validator, attacker);
         assertLe(attackerValue, 100 ether + 1); // donation not recouped from the victim
 
         vm.prank(victim);
-        staking.unstake(validator, 99.99 ether); // victim can exit ~all of their stake
+        staking.unstake(validator, 99.9 ether); // victim can exit ~all of their stake
     }
 
     function test_stake_zeroSharesBackstopReverts() public {
