@@ -295,7 +295,7 @@ impl TempoHardfork {
             i -= 1;
             let activation = match chain_id {
                 4217 => variants[i].mainnet_activation_timestamp(),
-                787222 => variants[i].moderato_activation_timestamp(),
+                42431 => variants[i].moderato_activation_timestamp(),
                 _ => return None,
             };
             if let Some(ts) = activation
