@@ -112,6 +112,14 @@ pub enum TempoPrecompileError {
     #[error("ZoneFactory error: {0:?}")]
     ZoneFactoryError(ZoneFactoryError),
 
+    /// Revert carrying a plain Solidity `Error(string)` reason.
+    ///
+    /// Used by the anchoring precompile, which must reproduce the `x/anchoring` module's
+    /// reason text rather than tempo's usual typed custom errors.
+    #[error("Reverted: {0}")]
+    #[from(skip)]
+    Revert(String),
+
     /// Gas limit exceeded during precompile execution.
     #[error("Gas limit exceeded")]
     OutOfGas,
@@ -177,6 +185,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.selector(),
             Self::CurrentCommitteeError(e) => e.selector(),
             Self::ZoneFactoryError(e) => e.selector(),
+            Self::Revert(_) => alloy::sol_types::Revert::SELECTOR,
             Self::UnknownFunctionSelector(selector) => *selector,
             Self::Panic(_) | Self::StorageDeltaUnderflow(_) => Panic::SELECTOR,
             Self::OutOfGas | Self::Fatal(_) => [0, 0, 0, 0],
@@ -209,6 +218,7 @@ impl TempoPrecompileError {
             | Self::StorageCreditsError(_)
             | Self::CurrentCommitteeError(_)
             | Self::ZoneFactoryError(_)
+            | Self::Revert(_)
             | Self::UnknownFunctionSelector(_) => false,
         }
     }
@@ -272,6 +282,9 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.abi_encode().into(),
             Self::CurrentCommitteeError(e) => e.abi_encode().into(),
             Self::ZoneFactoryError(e) => e.abi_encode().into(),
+            Self::Revert(reason) => alloy::sol_types::Revert::from(reason.as_str())
+                .abi_encode()
+                .into(),
             Self::OutOfGas => {
                 return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir));
             }

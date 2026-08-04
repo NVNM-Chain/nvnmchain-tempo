@@ -25,6 +25,8 @@ pub struct EvmPrecompileStorageProvider<'a> {
     spec: TempoHardfork,
     amsterdam_eip8037_enabled: bool,
     is_static: bool,
+    /// Value sent with the current call, for precompiles that must reject payable calls.
+    call_value: U256,
     gas_params: GasParams,
     tip1060_storage_credits_enabled: bool,
     tip1060_storage_credit_minting_enabled: bool,
@@ -38,6 +40,7 @@ pub struct EvmPrecompileStorageProvider<'a> {
 
 impl<'a> EvmPrecompileStorageProvider<'a> {
     /// Creates a new storage provider with the given gas limit, hardfork, and static flag.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         internals: EvmInternals<'a>,
         gas_limit: u64,
@@ -46,9 +49,11 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         amsterdam_eip8037_enabled: bool,
         is_static: bool,
         gas_params: GasParams,
+        call_value: U256,
     ) -> Self {
         Self {
             internals,
+            call_value,
             gas_tracker: GasTracker::new(gas_limit, gas_limit, reservoir),
             spec,
             amsterdam_eip8037_enabled,
@@ -73,6 +78,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
             cfg.enable_amsterdam_eip8037,
             false,
             cfg.gas_params.clone(),
+            U256::ZERO,
         )
     }
 
@@ -91,6 +97,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
             cfg.enable_amsterdam_eip8037,
             false,
             cfg.gas_params.clone(),
+            U256::ZERO,
         )
     }
 
@@ -552,6 +559,14 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
         self.is_static
     }
 
+    fn tx_origin(&self) -> Address {
+        self.internals.tx_env().caller()
+    }
+
+    fn call_value(&self) -> U256 {
+        self.call_value
+    }
+
     #[inline]
     fn checkpoint(&mut self) -> JournalCheckpoint {
         let cp = self.internals.checkpoint();
@@ -793,6 +808,7 @@ mod tests {
                 amsterdam_eip8037_enabled,
                 false,
                 gas_params,
+                U256::ZERO,
             )
         }
 

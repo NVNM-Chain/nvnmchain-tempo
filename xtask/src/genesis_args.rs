@@ -55,6 +55,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS,
     account_keychain::AccountKeychain,
     address_registry::AddressRegistry,
+    anchoring::Anchoring,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
     signature_verifier::SignatureVerifier,
@@ -464,6 +465,9 @@ impl GenesisArgs {
 
         println!("Initializing TIP20 registry");
         initialize_address_registry(&mut evm)?;
+
+        println!("Initializing anchoring");
+        initialize_anchoring(validator_admin, &mut evm)?;
 
         if self.t3_time == 0 {
             println!("Initializing signature verifier (T3 active at genesis)");
@@ -1036,6 +1040,30 @@ fn initialize_address_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
         &ctx.tx,
         StorageActions::disabled(),
         || AddressRegistry::new().initialize(),
+    )?;
+
+    Ok(())
+}
+
+/// Initializes the [`Anchoring`] precompile, which is active at genesis.
+///
+/// `admin` becomes the module admin: the only account that can grant a registry admin without
+/// already holding that role. That break-glass path is what makes the "cannot revoke the last
+/// registry admin" rule recoverable, so leaving it unset would strand any registry whose admin
+/// key is lost.
+fn initialize_anchoring(admin: Address, evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || {
+            let mut anchoring = Anchoring::new();
+            anchoring.initialize()?;
+            anchoring.set_module_admin(admin)
+        },
     )?;
 
     Ok(())
