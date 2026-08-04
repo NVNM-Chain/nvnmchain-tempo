@@ -189,7 +189,7 @@ pub fn extend_tempo_precompiles(
             Some(TIP20ChannelReserve::create_precompile(&env))
         } else if *address == ADDRESS_REGISTRY_ADDRESS && env.cfg.spec.is_t3() {
             Some(AddressRegistry::create_precompile(&env))
-        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t10() {
+        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t9() {
             Some(Anchoring::create_precompile(&env))
         } else if *address == TIP403_REGISTRY_ADDRESS {
             Some(TIP403Registry::create_precompile(&env))
@@ -1118,23 +1118,23 @@ mod tests {
     /// The activation gate is invisible to the e2e suite, whose dev genesis has every fork
     /// live from block 0, so it is pinned here instead.
     #[test]
-    fn test_anchoring_registered_at_t10_only() {
-        let mut pre_t10 = CfgEnv::<TempoHardfork>::default();
-        pre_t10.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
+    fn test_anchoring_registered_at_t9_only() {
+        let mut pre_t9 = CfgEnv::<TempoHardfork>::default();
+        pre_t9.set_spec_and_mainnet_gas_params(TempoHardfork::T8);
         assert!(
-            test_tempo_precompiles(&pre_t10)
+            test_tempo_precompiles(&pre_t9)
                 .get(&ANCHORING_ADDRESS)
                 .is_none(),
-            "Anchoring must not be registered before T10"
+            "Anchoring must not be registered before T9"
         );
 
-        let mut t10 = CfgEnv::<TempoHardfork>::default();
-        t10.set_spec_and_mainnet_gas_params(TempoHardfork::T10);
+        let mut t9 = CfgEnv::<TempoHardfork>::default();
+        t9.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
         assert!(
-            test_tempo_precompiles(&t10)
+            test_tempo_precompiles(&t9)
                 .get(&ANCHORING_ADDRESS)
                 .is_some(),
-            "Anchoring should be registered at T10"
+            "Anchoring should be registered at T9"
         );
     }
 
