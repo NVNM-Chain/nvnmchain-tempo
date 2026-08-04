@@ -260,6 +260,7 @@ macro_rules! tempo_precompile {
                 amsterdam_eip8037_enabled,
                 $input.is_static,
                 gas_params.clone(),
+                $input.value,
             )
             .with_actions(actions.clone())
             .with_non_creditable_slots(non_creditable_slots.clone());

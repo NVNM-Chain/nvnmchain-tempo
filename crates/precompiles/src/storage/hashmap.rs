@@ -28,6 +28,7 @@ pub struct HashMapStorageProvider {
     spec: TempoHardfork,
     amsterdam_eip8037_enabled: bool,
     is_static: bool,
+    call_value: U256,
     gas_params: GasParams,
     gas_tracker: GasTracker,
     tip1060_storage_credits_enabled: bool,
@@ -81,6 +82,7 @@ impl HashMapStorageProvider {
             spec,
             amsterdam_eip8037_enabled: false,
             is_static: false,
+            call_value: U256::ZERO,
             gas_params: GasParams::new_spec(spec.into()),
             gas_tracker: GasTracker::new(u64::MAX, u64::MAX, 0),
             tip1060_storage_credits_enabled: spec.is_t7(),
@@ -102,6 +104,12 @@ impl HashMapStorageProvider {
     pub fn with_amsterdam_eip8037_enabled(mut self, enabled: bool) -> Self {
         self.amsterdam_eip8037_enabled = enabled;
         self.gas_params = GasParams::new_spec(self.spec.into());
+        self
+    }
+
+    /// Returns self with the current call's value overridden (builder pattern).
+    pub fn with_call_value(mut self, value: U256) -> Self {
+        self.call_value = value;
         self
     }
 
@@ -248,6 +256,10 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
 
     fn is_static(&self) -> bool {
         self.is_static
+    }
+
+    fn call_value(&self) -> U256 {
+        self.call_value
     }
 
     fn checkpoint(&mut self) -> JournalCheckpoint {

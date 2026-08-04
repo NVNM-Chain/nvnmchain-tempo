@@ -34,5 +34,8 @@ crate::sol! {
 
         /// The write would leave the commitment unchanged.
         error CommitmentUnchanged();
+
+        /// The call carried value. The precompile never holds a balance.
+        error ValueNotAccepted();
     }
 }
