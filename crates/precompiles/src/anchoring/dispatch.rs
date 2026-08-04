@@ -40,7 +40,6 @@ mod tests {
         primitives::{B256, Bytes, keccak256},
         sol_types::{SolCall, SolError, SolInterface, SolValue},
     };
-    use revm::precompile::{PrecompileHalt, PrecompileStatus};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{
         AnchoringError, IAnchoring::IAnchoringCalls, UnknownFunctionSelector,

@@ -19,32 +19,23 @@ pub mod dispatch;
 use crate::{
     ANCHORING_ADDRESS,
     error::Result,
-    storage::{Handler, Mapping},
+    storage::{Handler, Slot},
 };
-use alloy::primitives::{Address, B256, Bytes, keccak256};
+use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
 pub use tempo_contracts::precompiles::{AnchoringError, AnchoringEvent, IAnchoring};
 use tempo_precompiles_macros::contract;
 
+/// Domain tag for the head-slot derivation. Prefixing the preimage leaves the rest of the
+/// space free for future domains, so a later addition never collides with an existing head.
+const DOMAIN_HEAD: u8 = 0x01;
+
 /// Caller-partitioned commitment log.
 ///
-/// The struct fields define the on-chain storage layout; the `#[contract]` macro generates the
-/// storage handlers which provide an ergonomic way to interact with the EVM state.
+/// Storage is a single derived word per `(namespace, key)` rather than a declared mapping
+/// field, so it takes one keccak instead of the two a nested `Mapping` would — see
+/// [`Anchoring::head`].
 #[contract(addr = ANCHORING_ADDRESS)]
-pub struct Anchoring {
-    /// Maps `namespace → key → latest commitment`. Zero means never anchored.
-    ///
-    /// `heads` is the only storage field, so it occupies base slot 0 and resolves by
-    /// Solidity's two-level mapping rule — **not** a tagged one-shot hash:
-    ///
-    /// ```text
-    /// inner    = keccak256(pad32(ns) ‖ bytes32(0))
-    /// headSlot = keccak256(key ‖ bytes32(inner))
-    /// ```
-    ///
-    /// Indexers reconstructing slots must use this rule; see
-    /// `head_slot_derivation_is_pinned`, which pins it against a fixed vector.
-    heads: Mapping<Address, Mapping<B256, B256>>,
-}
+pub struct Anchoring {}
 
 impl Anchoring {
     /// Initializes the anchoring contract by setting its bytecode marker.
@@ -52,9 +43,29 @@ impl Anchoring {
         self.__initialize()
     }
 
+    /// The slot holding the latest commitment for `(namespace, key)`:
+    ///
+    /// ```text
+    /// headSlot(ns, key) = keccak256(0x01 ‖ pad32(ns) ‖ key)
+    /// ```
+    ///
+    /// One hash over a domain-tagged preimage, rather than the two a nested `Mapping` would
+    /// take. Reads and writes still go through [`Slot`], so they are metered and journalled
+    /// like any other precompile storage.
+    fn head(&self, namespace: Address, key: B256) -> Slot<B256> {
+        let mut preimage = [0u8; 65];
+        preimage[0] = DOMAIN_HEAD;
+        preimage[1..33].copy_from_slice(namespace.into_word().as_slice());
+        preimage[33..].copy_from_slice(key.as_slice());
+        Slot::new(
+            U256::from_be_bytes(keccak256(preimage).0),
+            ANCHORING_ADDRESS,
+        )
+    }
+
     /// Returns the latest commitment for `(namespace, key)`, or zero if never anchored.
     pub fn latest(&self, call: IAnchoring::latestCall) -> Result<B256> {
-        self.heads[call.namespace][call.key].read()
+        self.head(call.namespace, call.key).read()
     }
 
     /// Anchors `commitment` under `msg_sender`'s namespace at `key`.
@@ -90,11 +101,11 @@ impl Anchoring {
         commitment: B256,
         metadata: Bytes,
     ) -> Result<()> {
-        if self.heads[namespace][key].read()? == commitment {
+        if self.head(namespace, key).read()? == commitment {
             return Err(AnchoringError::commitment_unchanged().into());
         }
 
-        self.heads[namespace][key].write(commitment)?;
+        self.head(namespace, key).write(commitment)?;
         self.emit_event(AnchoringEvent::anchored(
             namespace, key, commitment, metadata,
         ))
@@ -163,29 +174,25 @@ mod tests {
         );
     }
 
-    /// Pins the head slot derivation. `heads` is the sole storage field, so it occupies base
-    /// slot 0 and resolves as a Solidity two-level mapping:
-    ///
-    /// ```text
-    /// inner    = keccak256(pad32(ns) ‖ bytes32(0))
-    /// headSlot = keccak256(key ‖ bytes32(inner))
-    /// ```
+    /// Pins the head slot derivation against the spec's reference vector. Off-chain tooling
+    /// reconstructs slots from this rule, so a change here breaks every such consumer.
     #[test]
     fn head_slot_derivation_is_pinned() -> eyre::Result<()> {
-        assert_eq!(slots::HEADS, U256::ZERO, "heads must stay at base slot 0");
-
-        let inner = keccak256([PINNED_NS.into_word().0, slots::HEADS.to_be_bytes()].concat());
-        let head = keccak256([PINNED_KEY.0, inner.0].concat());
+        let preimage = [
+            &[DOMAIN_HEAD][..],
+            PINNED_NS.into_word().as_slice(),
+            PINNED_KEY.as_slice(),
+        ]
+        .concat();
+        let expected = keccak256(preimage);
         assert_eq!(
-            head,
-            b256!("0x3ae3922cd83afe3a603950596017ca02c25d63cc2a8d573c98ad0d90ddb0502e")
+            expected,
+            b256!("0x68945f381cbccb13ba2b13540e8ac2e28d1e9d3ca33aecf37861f5ef565fd489")
         );
 
-        // The handler must resolve to the same slot, and an anchor must land in it.
-        let slot = U256::from_be_bytes(head.0);
+        // The accessor must resolve to the same slot, and an anchor must land in it.
+        let slot = U256::from_be_bytes(expected.0);
         with_anchoring(|mut anchoring| {
-            assert_eq!(anchoring.heads[PINNED_NS][PINNED_KEY].slot(), slot);
-
             let commitment = B256::repeat_byte(0xaa);
             anchoring.anchor(PINNED_NS, anchor_call(PINNED_KEY, commitment, b""))?;
 
