@@ -77,6 +77,9 @@ pub struct TempoGenesisInfo {
     /// Activation timestamp for T9 hardfork.
     #[serde(skip_serializing_if = "Option::is_none")]
     t9_time: Option<u64>,
+    /// Activation timestamp for T10 hardfork.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    t10_time: Option<u64>,
 }
 
 impl TempoGenesisInfo {
@@ -132,7 +135,7 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
-        "testnet" | "moderato" => MODERATO.clone(),
+        "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -155,7 +158,7 @@ impl reth_cli::chainspec::ChainSpecParser for TempoChainSpecParser {
 pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
-        42431 => Some(MODERATO.clone()),
+        787222 => Some(MODERATO.clone()),
         _ => None,
     }
 }
@@ -166,7 +169,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
 
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::testnet())
-        .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
+        .with_default_follow_url("wss://rpc.testnet.nvnm.xyz")
         .into()
 });
 
@@ -378,7 +381,7 @@ impl EthChainSpec for TempoChainSpec {
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
-            42431 => Some(moderato_nodes()),
+            787222 => Some(moderato_nodes()),
             _ => self.inner.bootnodes(),
         }
     }
@@ -862,8 +865,15 @@ mod tests {
             // At and after T8 activation
             assert!(cs.is_t8_active_at_timestamp(1785420000));
             assert_eq!(cs.tempo_hardfork_at(1785420000), TempoHardfork::T8);
-            assert!(!cs.is_t9_active_at_timestamp(u64::MAX));
-            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T8);
+            // Before T9 activation (1786024800 = Aug 6th 2026 16:00 CEST)
+            assert!(!cs.is_t9_active_at_timestamp(1786024799));
+            assert_eq!(cs.tempo_hardfork_at(1786024799), TempoHardfork::T8);
+
+            // At and after T9 activation
+            assert!(cs.is_t9_active_at_timestamp(1786024800));
+            assert_eq!(cs.tempo_hardfork_at(1786024800), TempoHardfork::T9);
+            assert!(!cs.is_t10_active_at_timestamp(u64::MAX));
+            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T9);
         }
 
         #[test]
@@ -951,8 +961,15 @@ mod tests {
             // At and after T8 activation
             assert!(cs.is_t8_active_at_timestamp(1785160800));
             assert_eq!(cs.tempo_hardfork_at(1785160800), TempoHardfork::T8);
-            assert!(!cs.is_t9_active_at_timestamp(u64::MAX));
-            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T8);
+            // Before T9 activation (1785938400 = Aug 5th 2026 16:00 CEST)
+            assert!(!cs.is_t9_active_at_timestamp(1785938399));
+            assert_eq!(cs.tempo_hardfork_at(1785938399), TempoHardfork::T8);
+
+            // At and after T9 activation
+            assert!(cs.is_t9_active_at_timestamp(1785938400));
+            assert_eq!(cs.tempo_hardfork_at(1785938400), TempoHardfork::T9);
+            assert!(!cs.is_t10_active_at_timestamp(u64::MAX));
+            assert_eq!(cs.tempo_hardfork_at(u64::MAX), TempoHardfork::T9);
         }
 
         #[test]

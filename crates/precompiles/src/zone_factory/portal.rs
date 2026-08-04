@@ -11,7 +11,7 @@ use crate::{
 use alloy::primitives::{Address, B256, Bytes, FixedBytes, U256, hex};
 use revm::state::Bytecode;
 use tempo_contracts::precompiles::{
-    IZoneFactory, ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZonePortalRole,
+    IZoneFactory, ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactoryError, ZonePortalRole,
 };
 use tempo_precompiles_macros::{Storable, contract};
 
@@ -40,11 +40,11 @@ pub struct PortalEncryptionKeyEntry {
 pub struct PortalWithdrawalQueue {
     head: U256,
     tail: U256,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     slots: Mapping<U256, B256>,
 }
 
-/// Canonical Solidity storage layout of the ZonePortal runtime installed at T9.
+/// Canonical Solidity storage layout of the ZonePortal runtime installed at T10.
 ///
 /// The generated handlers let the native factory initialize a portal without duplicating raw
 /// slot numbers. This contract type is deliberately absent from the EVM precompile map.
@@ -83,6 +83,12 @@ pub struct ZonePortalStorage {
     _reserved: FixedBytes<30>,
     /// Maximum Tempo gas rate, stored in `PORTAL_MAX_TEMPO_GAS_RATE_SLOT`.
     max_tempo_gas_rate: u128,
+    /// Active block-producing leader, stored in slot 23.
+    leader: Address,
+    /// Monotonic leadership transition epoch, packed after `leader` in slot 23.
+    leader_epoch: u64,
+    /// Tempo block at which the current leader became active, stored in slot 24.
+    leader_activation_tempo_block: u64,
 }
 
 impl ZonePortalStorage {
@@ -95,6 +101,10 @@ impl ZonePortalStorage {
         zone_id: u32,
         params: &IZoneFactory::CreateZoneParams,
     ) -> Result<()> {
+        if self.initialized.read()? {
+            return Err(ZoneFactoryError::already_initialized().into());
+        }
+
         self.storage.set_code(
             self.address,
             Bytecode::new_legacy(Bytes::from_static(&ZONE_PORTAL_PROXY_RUNTIME)),
@@ -118,6 +128,14 @@ impl ZonePortalStorage {
         }
         self.is_access_enforced.write(params.accessMode)?;
         self.is_gateway_enforced.write(params.gatewayMode)?;
+        let leader = *params
+            .sequencers
+            .first()
+            .ok_or_else(ZoneFactoryError::invalid_sequencer_set)?;
+        self.leader.write(leader)?;
+        self.leader_epoch.write(1)?;
+        self.leader_activation_tempo_block
+            .write(self.storage.block_number())?;
         for gateway in &params.zoneGateways {
             self.role[*gateway].write(ZonePortalRole::CallbackGateway as u8)?;
         }

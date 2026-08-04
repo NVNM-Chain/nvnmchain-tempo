@@ -189,7 +189,7 @@ pub fn extend_tempo_precompiles(
             Some(TIP20ChannelReserve::create_precompile(&env))
         } else if *address == ADDRESS_REGISTRY_ADDRESS && env.cfg.spec.is_t3() {
             Some(AddressRegistry::create_precompile(&env))
-        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t9() {
+        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t10() {
             Some(Anchoring::create_precompile(&env))
         } else if *address == TIP403_REGISTRY_ADDRESS {
             Some(TIP403Registry::create_precompile(&env))
@@ -213,7 +213,7 @@ pub fn extend_tempo_precompiles(
             Some(StorageCredits::create_precompile(&env))
         } else if *address == CURRENT_COMMITTEE_ADDRESS && env.cfg.spec.is_t8() {
             Some(CurrentCommittee::create_precompile(&env))
-        } else if *address == ZONE_FACTORY_ADDRESS && env.cfg.spec.is_t9() {
+        } else if *address == ZONE_FACTORY_ADDRESS && env.cfg.spec.is_t10() {
             Some(ZoneFactory::create_precompile(&env))
         } else {
             None
@@ -1115,22 +1115,45 @@ mod tests {
         );
     }
 
+    /// The activation gate is invisible to the e2e suite, whose dev genesis has every fork
+    /// live from block 0, so it is pinned here instead.
     #[test]
-    fn test_zone_factory_registered_at_t9_only() {
-        let mut pre_t9 = CfgEnv::<TempoHardfork>::default();
-        pre_t9.set_spec_and_mainnet_gas_params(TempoHardfork::T8);
+    fn test_anchoring_registered_at_t10_only() {
+        let mut pre_t10 = CfgEnv::<TempoHardfork>::default();
+        pre_t10.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
         assert!(
-            test_tempo_precompiles(&pre_t9)
+            test_tempo_precompiles(&pre_t10)
+                .get(&ANCHORING_ADDRESS)
+                .is_none(),
+            "Anchoring must not be registered before T10"
+        );
+
+        let mut t10 = CfgEnv::<TempoHardfork>::default();
+        t10.set_spec_and_mainnet_gas_params(TempoHardfork::T10);
+        assert!(
+            test_tempo_precompiles(&t10)
+                .get(&ANCHORING_ADDRESS)
+                .is_some(),
+            "Anchoring should be registered at T10"
+        );
+    }
+
+    #[test]
+    fn test_zone_factory_registered_at_t10_only() {
+        let mut pre_t10 = CfgEnv::<TempoHardfork>::default();
+        pre_t10.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
+        assert!(
+            test_tempo_precompiles(&pre_t10)
                 .get(&ZONE_FACTORY_ADDRESS)
                 .is_none()
         );
 
-        let mut t9 = CfgEnv::<TempoHardfork>::default();
-        t9.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
-        let precompiles = test_tempo_precompiles(&t9);
+        let mut t10 = CfgEnv::<TempoHardfork>::default();
+        t10.set_spec_and_mainnet_gas_params(TempoHardfork::T10);
+        let precompiles = test_tempo_precompiles(&t10);
         assert!(
             precompiles.get(&ZONE_FACTORY_ADDRESS).is_some(),
-            "ZoneFactory should be registered at T9"
+            "ZoneFactory should be registered at T10"
         );
         assert!(
             precompiles.get(&zone_factory::portal_address(1)).is_none(),

@@ -211,6 +211,10 @@ tempo_hardfork! (
         ///
         /// See <https://docs.tempo.xyz/docs/protocol/upgrades/t9>.
         T9,
+        /// T10 hardfork.
+        ///
+        /// See <https://docs.tempo.xyz/docs/protocol/upgrades/t10>.
+        T10,
     }
 );
 
@@ -295,7 +299,7 @@ impl TempoHardfork {
             i -= 1;
             let activation = match chain_id {
                 4217 => variants[i].mainnet_activation_timestamp(),
-                42431 => variants[i].moderato_activation_timestamp(),
+                787222 => variants[i].moderato_activation_timestamp(),
                 _ => return None,
             };
             if let Some(ts) = activation
@@ -325,6 +329,7 @@ impl TempoHardfork {
             Self::T7 => None,
             Self::T8 => None,
             Self::T9 => None,
+            Self::T10 => None,
         }
     }
 
@@ -345,7 +350,8 @@ impl TempoHardfork {
             Self::T6 => Some(MAINNET_T6_TIMESTAMP),
             Self::T7 => Some(MAINNET_T7_TIMESTAMP),
             Self::T8 => Some(MAINNET_T8_TIMESTAMP),
-            Self::T9 => None,
+            Self::T9 => Some(MAINNET_T9_TIMESTAMP),
+            Self::T10 => None,
         }
     }
 
@@ -367,6 +373,7 @@ impl TempoHardfork {
             Self::T7 => None,
             Self::T8 => None,
             Self::T9 => None,
+            Self::T10 => None,
         }
     }
 
@@ -387,7 +394,8 @@ impl TempoHardfork {
             Self::T6 => Some(MODERATO_T6_TIMESTAMP),
             Self::T7 => Some(MODERATO_T7_TIMESTAMP),
             Self::T8 => Some(MODERATO_T8_TIMESTAMP),
-            Self::T9 => None,
+            Self::T9 => Some(MODERATO_T9_TIMESTAMP),
+            Self::T10 => None,
         }
     }
 }
