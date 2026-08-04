@@ -189,7 +189,7 @@ pub fn extend_tempo_precompiles(
             Some(TIP20ChannelReserve::create_precompile(&env))
         } else if *address == ADDRESS_REGISTRY_ADDRESS && env.cfg.spec.is_t3() {
             Some(AddressRegistry::create_precompile(&env))
-        } else if *address == ANCHORING_ADDRESS {
+        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t9() {
             Some(Anchoring::create_precompile(&env))
         } else if *address == TIP403_REGISTRY_ADDRESS {
             Some(TIP403Registry::create_precompile(&env))

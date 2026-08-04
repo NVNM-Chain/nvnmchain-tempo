@@ -61,13 +61,13 @@ mod tests {
     }
 
     fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
-        with_spec(TempoHardfork::Genesis, f)
+        with_spec(TempoHardfork::T9, f)
     }
 
     /// A read-only context, as a `STATICCALL` would run in.
     fn with_static_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
         let mut storage =
-            HashMapStorageProvider::new_with_spec(1, TempoHardfork::Genesis).with_static(true);
+            HashMapStorageProvider::new_with_spec(1, TempoHardfork::T9).with_static(true);
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
     }
 
@@ -236,31 +236,5 @@ mod tests {
             assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
-    }
-
-    /// Calldata too short to carry a selector never reaches anchoring's dispatch: the
-    /// framework halts pre-T1 and reverts from T1 on. Pinned so the difference stays visible.
-    #[test]
-    fn calldata_without_a_selector_halts_pre_t1_and_reverts_after() -> eyre::Result<()> {
-        for (spec, expect_revert) in [(TempoHardfork::Genesis, false), (TempoHardfork::T1, true)] {
-            with_spec(spec, |mut anchoring| {
-                let output = anchoring.call(&[0x0a, 0x3b], Address::random())?;
-
-                if expect_revert {
-                    assert!(output.is_revert(), "{spec:?}");
-                } else {
-                    assert!(
-                        matches!(
-                            output.status,
-                            PrecompileStatus::Halt(PrecompileHalt::Other(_))
-                        ),
-                        "{spec:?}"
-                    );
-                }
-                assert!(anchoring.emitted_events().is_empty());
-                Ok(())
-            })?;
-        }
-        Ok(())
     }
 }

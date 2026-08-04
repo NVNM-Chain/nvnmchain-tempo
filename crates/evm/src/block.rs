@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
     precompiles::{
-        ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
+        ADDRESS_REGISTRY_ADDRESS, ANCHORING_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS,
         STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
         ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS,
@@ -647,6 +647,7 @@ where
         }
         if self.inner.spec.is_t9_active_at_timestamp(timestamp) {
             self.deploy_zone_factory_at_boundary()?;
+            self.deploy_precompile_at_boundary(ANCHORING_ADDRESS, &[])?;
         }
 
         Ok(())
