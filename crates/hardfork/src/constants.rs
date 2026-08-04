@@ -227,8 +227,8 @@ pub mod mainnet {
 }
 
 pub mod moderato {
-    //! Moderato testnet chain id and hardfork activation constants.
-    pub const MODERATO_CHAIN_ID: u64 = 42431;
+    //! Invenium testnet (Moderato) chain id and hardfork activation constants.
+    pub const MODERATO_CHAIN_ID: u64 = 787222;
 
     /// Genesis activation block.
     pub const MODERATO_GENESIS_BLOCK: u64 = 0;
