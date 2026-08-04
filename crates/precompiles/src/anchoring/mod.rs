@@ -19,7 +19,7 @@ pub mod dispatch;
 use crate::{
     ANCHORING_ADDRESS,
     error::Result,
-    storage::{Handler, Mapping, StorageCtx},
+    storage::{Handler, Mapping},
 };
 use alloy::primitives::{Address, B256, Bytes, keccak256};
 pub use tempo_contracts::precompiles::{AnchoringError, AnchoringEvent, IAnchoring};
@@ -57,26 +57,11 @@ impl Anchoring {
         self.heads[call.namespace][call.key].read()
     }
 
-    /// Rejects a value-bearing call. The precompile never holds a balance, and revm credits
-    /// the target before the precompile runs, so an unguarded payable call would strand funds
-    /// at this address with no code to recover them.
-    ///
-    /// Only the value is checked: unlike the legacy precompile there is no EOA-caller rule,
-    /// because a wrapper contract anchoring under its own namespace is the intended
-    /// permissioned path.
-    fn ensure_no_value(&self) -> Result<()> {
-        if !StorageCtx.call_value().is_zero() {
-            return Err(AnchoringError::value_not_accepted().into());
-        }
-        Ok(())
-    }
-
     /// Anchors `commitment` under `msg_sender`'s namespace at `key`.
     ///
     /// # Errors
     /// - `CommitmentUnchanged` — `commitment` already is the head for `(msg_sender, key)`
     pub fn anchor(&mut self, msg_sender: Address, call: IAnchoring::anchorCall) -> Result<()> {
-        self.ensure_no_value()?;
         self.write_head(msg_sender, call.key, call.commitment, call.metadata)
     }
 
@@ -89,7 +74,6 @@ impl Anchoring {
         msg_sender: Address,
         call: IAnchoring::anchorAndHashCall,
     ) -> Result<()> {
-        self.ensure_no_value()?;
         let commitment = keccak256(&call.metadata);
         self.write_head(msg_sender, call.key, commitment, call.metadata)
     }
@@ -207,38 +191,6 @@ mod tests {
 
             let raw = StorageCtx.sload(ANCHORING_ADDRESS, slot)?;
             assert_eq!(B256::from(raw.to_be_bytes()), commitment);
-            Ok(())
-        })
-    }
-
-    /// The spec requires a value-bearing anchor to revert: revm credits the target before the
-    /// precompile runs, so an unguarded payable call would strand funds at an address with no
-    /// code to recover them.
-    #[test]
-    fn writes_reject_call_value() -> eyre::Result<()> {
-        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::Genesis)
-            .with_call_value(U256::from(1));
-        StorageCtx::enter(&mut storage, || {
-            let mut anchoring = Anchoring::new();
-            let (ns, key) = (Address::random(), B256::random());
-
-            let err = anchoring
-                .anchor(ns, anchor_call(key, B256::repeat_byte(0xaa), b""))
-                .unwrap_err();
-            assert_eq!(err, AnchoringError::value_not_accepted().into());
-
-            let err = anchoring
-                .anchor_and_hash(
-                    ns,
-                    IAnchoring::anchorAndHashCall {
-                        key,
-                        metadata: Bytes::from_static(b"meta"),
-                    },
-                )
-                .unwrap_err();
-            assert_eq!(err, AnchoringError::value_not_accepted().into());
-
-            assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
     }

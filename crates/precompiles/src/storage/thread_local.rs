@@ -249,11 +249,6 @@ impl StorageCtx {
         Self::with_storage(|s| s.is_static())
     }
 
-    /// Returns the value sent with the current call.
-    pub fn call_value(&self) -> U256 {
-        Self::with_storage(|s| s.call_value())
-    }
-
     /// Enables or disables TIP-1060 storage-credit accounting for subsequent storage writes.
     pub fn set_tip1060_storage_credits(&mut self, enabled: bool) {
         Self::with_storage(|s| s.set_tip1060_storage_credits(enabled))
