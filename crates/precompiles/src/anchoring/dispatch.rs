@@ -1,8 +1,6 @@
 //! ABI dispatch for the [`Anchoring`] precompile.
 
-use crate::{
-    Precompile, anchoring::Anchoring, charge_input_cost, dispatch, mutate, mutate_void, view,
-};
+use crate::{Precompile, anchoring::Anchoring, charge_input_cost, dispatch, mutate_void, view};
 use alloy::primitives::Address;
 use revm::precompile::PrecompileResult;
 use tempo_contracts::precompiles::IAnchoring;
@@ -17,22 +15,246 @@ impl Precompile for Anchoring {
             calldata,
             |call| match call {
                 IAnchoring::IAnchoringCalls {
-                    // Writes. `mutate*` rejects STATICCALL; each handler starts with
-                    // `ensure_eoa_write`, which rejects value-bearing and non-EOA calls.
-                    addRegistry(call) => mutate(call, msg_sender, |s, c| self.add_registry(s, c)),
-                    addRecord(call) => mutate(call, msg_sender, |s, c| self.add_record(s, c)),
-                    updateRecordStatus(call) => mutate_void(call, msg_sender, |s, c| {
-                        self.update_record_status(s, c)
+                    // Writes: the caller is the namespace, so no authorization check exists.
+                    anchor(call) => mutate_void(call, msg_sender, |s, c| self.anchor(s, c)),
+                    anchorAndHash(call) => mutate_void(call, msg_sender, |s, c| {
+                        self.anchor_and_hash(s, c)
                     }),
-                    grantRole(call) => mutate_void(call, msg_sender, |s, c| self.grant_role(s, c)),
-                    revokeRole(call) => mutate_void(call, msg_sender, |s, c| {
-                        self.revoke_role(s, c)
-                    }),
-                    // Queries, unrestricted.
-                    records(call) => view(call, |c| self.records(c)),
-                    registries(call) => view(call, |c| self.registries(c)),
+                    // View
+                    latest(call) => view(call, |c| self.latest(c))
                 }
             }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        dispatch::StaticCallNotAllowed,
+        storage::{StorageCtx, hashmap::HashMapStorageProvider},
+        test_util::{assert_full_coverage, check_selector_coverage},
+    };
+    use alloy::{
+        primitives::{B256, Bytes, keccak256},
+        sol_types::{SolCall, SolError, SolInterface, SolValue},
+    };
+    use revm::precompile::{PrecompileHalt, PrecompileStatus};
+    use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_contracts::precompiles::{
+        AnchoringError, IAnchoring::IAnchoringCalls, UnknownFunctionSelector,
+    };
+
+    /// `records(uint64,string,uint64,uint64,(bytes,uint64,uint64,bool,bool))` — the paginated
+    /// record query the `x/anchoring` precompile served at this address; the tuple is its
+    /// `PageRequest`. Any retired selector would do; this one is calldata a stale integration
+    /// might genuinely still send.
+    const LEGACY_SELECTOR: [u8; 4] = alloy::hex!("0xc7be5e37");
+
+    fn with_spec<T>(
+        spec: TempoHardfork,
+        is_static: bool,
+        f: impl FnOnce(Anchoring) -> eyre::Result<T>,
+    ) -> eyre::Result<T> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, spec).with_static(is_static);
+        StorageCtx::enter(&mut storage, || f(Anchoring::new()))
+    }
+
+    fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
+        with_spec(TempoHardfork::Genesis, false, f)
+    }
+
+    #[test]
+    fn selector_coverage() {
+        with_anchoring(|mut anchoring| {
+            assert_full_coverage([check_selector_coverage(
+                &mut anchoring,
+                IAnchoringCalls::SELECTORS,
+                "IAnchoring",
+                IAnchoringCalls::name_by_selector,
+            )]);
+            Ok(())
+        })
+        .unwrap()
+    }
+
+    /// Both writes go in as calldata and come back out through `latest`, which is the only
+    /// path a real caller has. `msg_sender` becomes the namespace, so the read uses a
+    /// different caller to prove the head is keyed on the writer rather than the reader.
+    #[test]
+    fn writes_round_trip_through_calldata() -> eyre::Result<()> {
+        let metadata = Bytes::from_static(b"self-verifying payload");
+        let commitment = B256::repeat_byte(0xab);
+
+        for (write, expected) in [
+            (
+                IAnchoring::anchorCall {
+                    key: B256::ZERO,
+                    commitment,
+                    metadata: metadata.clone(),
+                }
+                .abi_encode(),
+                commitment,
+            ),
+            (
+                IAnchoring::anchorAndHashCall {
+                    key: B256::ZERO,
+                    metadata: metadata.clone(),
+                }
+                .abi_encode(),
+                keccak256(&metadata),
+            ),
+        ] {
+            with_anchoring(|mut anchoring| {
+                let sender = Address::random();
+
+                let output = anchoring.call(&write, sender)?;
+                assert!(output.is_success());
+                assert!(output.bytes.is_empty(), "writes return no data");
+
+                let output = anchoring.call(
+                    &IAnchoring::latestCall {
+                        namespace: sender,
+                        key: B256::ZERO,
+                    }
+                    .abi_encode(),
+                    Address::random(),
+                )?;
+                assert!(output.is_success());
+                assert_eq!(
+                    IAnchoring::latestCall::abi_decode_returns(&output.bytes)?,
+                    expected
+                );
+                Ok(())
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn commitment_unchanged_reverts_with_the_typed_error() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            let sender = Address::random();
+            let calldata = IAnchoring::anchorCall {
+                key: B256::random(),
+                commitment: B256::repeat_byte(0xcd),
+                metadata: Bytes::new(),
+            }
+            .abi_encode();
+
+            assert!(anchoring.call(&calldata, sender)?.is_success());
+
+            let output = anchoring.call(&calldata, sender)?;
+            assert!(output.is_revert());
+            assert_eq!(
+                output.bytes,
+                AnchoringError::commitment_unchanged().abi_encode()
+            );
+            Ok(())
+        })
+    }
+
+    /// Writes must reject `STATICCALL`; `latest` must still serve reads.
+    #[test]
+    fn static_context_rejects_writes_but_serves_latest() -> eyre::Result<()> {
+        with_spec(TempoHardfork::Genesis, true, |mut anchoring| {
+            let sender = Address::random();
+            let key = B256::random();
+
+            for calldata in [
+                IAnchoring::anchorCall {
+                    key,
+                    commitment: B256::repeat_byte(0xef),
+                    metadata: Bytes::new(),
+                }
+                .abi_encode(),
+                IAnchoring::anchorAndHashCall {
+                    key,
+                    metadata: Bytes::from_static(b"nope"),
+                }
+                .abi_encode(),
+            ] {
+                let output = anchoring.call(&calldata, sender)?;
+                assert!(output.is_revert());
+                assert!(StaticCallNotAllowed::abi_decode(&output.bytes).is_ok());
+            }
+
+            assert!(anchoring.emitted_events().is_empty());
+
+            let output = anchoring.call(
+                &IAnchoring::latestCall {
+                    namespace: sender,
+                    key,
+                }
+                .abi_encode(),
+                sender,
+            )?;
+            assert!(output.is_success());
+            assert_eq!(
+                IAnchoring::latestCall::abi_decode_returns(&output.bytes)?,
+                B256::ZERO
+            );
+            Ok(())
+        })
+    }
+
+    /// The address is reused, the ABI is not: legacy calldata must fail loudly.
+    #[test]
+    fn legacy_selector_reverts_unknown_function_selector() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            let mut calldata = LEGACY_SELECTOR.to_vec();
+            calldata.extend_from_slice(&(0u64, 10u64).abi_encode());
+
+            let output = anchoring.call(&calldata, Address::random())?;
+            assert!(output.is_revert());
+            assert_eq!(
+                UnknownFunctionSelector::abi_decode(&output.bytes)?.selector,
+                LEGACY_SELECTOR
+            );
+            assert!(anchoring.emitted_events().is_empty());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn malformed_calldata_reverts_without_side_effects() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            // A known selector with truncated arguments.
+            let mut truncated = IAnchoring::anchorCall::SELECTOR.to_vec();
+            truncated.extend_from_slice(&[0u8; 31]);
+            let output = anchoring.call(&truncated, Address::random())?;
+            assert!(output.is_revert());
+            assert!(output.bytes.is_empty(), "ABI-decode failure reverts empty");
+
+            assert!(anchoring.emitted_events().is_empty());
+            Ok(())
+        })
+    }
+
+    /// Calldata too short to carry a selector never reaches anchoring's dispatch: the
+    /// framework halts pre-T1 and reverts from T1 on. Pinned so the difference stays visible.
+    #[test]
+    fn calldata_without_a_selector_halts_pre_t1_and_reverts_after() -> eyre::Result<()> {
+        for (spec, expect_revert) in [(TempoHardfork::Genesis, false), (TempoHardfork::T1, true)] {
+            with_spec(spec, false, |mut anchoring| {
+                let output = anchoring.call(&[0x0a, 0x3b], Address::random())?;
+
+                if expect_revert {
+                    assert!(output.is_revert(), "{spec:?}");
+                } else {
+                    assert!(
+                        matches!(
+                            output.status,
+                            PrecompileStatus::Halt(PrecompileHalt::Other(_))
+                        ),
+                        "{spec:?}"
+                    );
+                }
+                assert!(anchoring.emitted_events().is_empty());
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 }

@@ -1513,7 +1513,6 @@ where
                 amsterdam_eip8037_enabled,
                 false,
                 gas_params,
-                U256::ZERO,
             )
             .with_actions(actions.clone());
             provider.set_tip1060_storage_credits(false);

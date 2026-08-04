@@ -249,16 +249,6 @@ impl StorageCtx {
         Self::with_storage(|s| s.is_static())
     }
 
-    /// Returns `tx.origin` — the EOA that signed the enclosing transaction.
-    pub fn tx_origin(&self) -> Address {
-        Self::with_storage(|s| s.tx_origin())
-    }
-
-    /// Returns the value sent with the current call.
-    pub fn call_value(&self) -> U256 {
-        Self::with_storage(|s| s.call_value())
-    }
-
     /// Enables or disables TIP-1060 storage-credit accounting for subsequent storage writes.
     pub fn set_tip1060_storage_credits(&mut self, enabled: bool) {
         Self::with_storage(|s| s.set_tip1060_storage_credits(enabled))
@@ -528,11 +518,6 @@ impl StorageCtx {
     /// NOTE: assumes storage tests always use the `HashMapStorageProvider`
     pub fn set_timestamp(&mut self, timestamp: U256) {
         self.as_hashmap().set_timestamp(timestamp)
-    }
-
-    /// NOTE: assumes storage tests always use the `HashMapStorageProvider`
-    pub fn set_tx_origin(&mut self, origin: Address) {
-        self.as_hashmap().set_tx_origin(origin)
     }
 
     /// NOTE: assumes storage tests always use the `HashMapStorageProvider`

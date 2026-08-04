@@ -150,18 +150,6 @@ pub trait PrecompileStorageProvider {
     /// Returns whether the current call context is static.
     fn is_static(&self) -> bool;
 
-    /// Returns `tx.origin` — the EOA that signed the enclosing transaction.
-    ///
-    /// Defaults to zero for providers with no transaction context (tests, genesis).
-    fn tx_origin(&self) -> Address {
-        Address::ZERO
-    }
-
-    /// Returns the value sent with the current call. Defaults to zero.
-    fn call_value(&self) -> U256 {
-        U256::ZERO
-    }
-
     /// Creates a new journal checkpoint so that all subsequent state-changing
     /// operations can be atomically committed ([`checkpoint_commit`](Self::checkpoint_commit))
     /// or reverted ([`checkpoint_revert`](Self::checkpoint_revert)).

@@ -467,7 +467,7 @@ impl GenesisArgs {
         initialize_address_registry(&mut evm)?;
 
         println!("Initializing anchoring");
-        initialize_anchoring(validator_admin, &mut evm)?;
+        initialize_anchoring(&mut evm)?;
 
         if self.t3_time == 0 {
             println!("Initializing signature verifier (T3 active at genesis)");
@@ -1046,12 +1046,7 @@ fn initialize_address_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
 }
 
 /// Initializes the [`Anchoring`] precompile, which is active at genesis.
-///
-/// `admin` becomes the module admin: the only account that can grant a registry admin without
-/// already holding that role. That break-glass path is what makes the "cannot revoke the last
-/// registry admin" rule recoverable, so leaving it unset would strand any registry whose admin
-/// key is lost.
-fn initialize_anchoring(admin: Address, evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+fn initialize_anchoring(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -1059,11 +1054,7 @@ fn initialize_anchoring(admin: Address, evm: &mut TempoEvm<CacheDB<EmptyDB>>) ->
         &ctx.cfg,
         &ctx.tx,
         StorageActions::disabled(),
-        || {
-            let mut anchoring = Anchoring::new();
-            anchoring.initialize()?;
-            anchoring.set_module_admin(admin)
-        },
+        || Anchoring::new().initialize(),
     )?;
 
     Ok(())

@@ -28,8 +28,6 @@ pub struct HashMapStorageProvider {
     spec: TempoHardfork,
     amsterdam_eip8037_enabled: bool,
     is_static: bool,
-    tx_origin: Address,
-    call_value: U256,
     gas_params: GasParams,
     gas_tracker: GasTracker,
     tip1060_storage_credits_enabled: bool,
@@ -83,8 +81,6 @@ impl HashMapStorageProvider {
             spec,
             amsterdam_eip8037_enabled: false,
             is_static: false,
-            tx_origin: Address::ZERO,
-            call_value: U256::ZERO,
             gas_params: GasParams::new_spec(spec.into()),
             gas_tracker: GasTracker::new(u64::MAX, u64::MAX, 0),
             tip1060_storage_credits_enabled: spec.is_t7(),
@@ -106,18 +102,6 @@ impl HashMapStorageProvider {
     pub fn with_amsterdam_eip8037_enabled(mut self, enabled: bool) -> Self {
         self.amsterdam_eip8037_enabled = enabled;
         self.gas_params = GasParams::new_spec(self.spec.into());
-        self
-    }
-
-    /// Returns self with `tx.origin` overridden (builder pattern).
-    pub fn with_tx_origin(mut self, origin: Address) -> Self {
-        self.tx_origin = origin;
-        self
-    }
-
-    /// Returns self with the current call's value overridden (builder pattern).
-    pub fn with_call_value(mut self, value: U256) -> Self {
-        self.call_value = value;
         self
     }
 
@@ -266,14 +250,6 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
         self.is_static
     }
 
-    fn tx_origin(&self) -> Address {
-        self.tx_origin
-    }
-
-    fn call_value(&self) -> U256 {
-        self.call_value
-    }
-
     fn checkpoint(&mut self) -> JournalCheckpoint {
         let idx = self.snapshots.len();
         self.snapshots.push(Snapshot {
@@ -405,10 +381,6 @@ impl HashMapStorageProvider {
     }
 
     /// Overrides the block timestamp.
-    pub fn set_tx_origin(&mut self, origin: Address) {
-        self.tx_origin = origin;
-    }
-
     pub fn set_timestamp(&mut self, timestamp: U256) {
         self.block_env.timestamp = timestamp;
     }
