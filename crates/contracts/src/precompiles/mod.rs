@@ -78,6 +78,12 @@ pub const SYSTEM_PRECOMPILES: &[(Address, TempoHardfork)] = &[
     (VALIDATOR_CONFIG_ADDRESS, TempoHardfork::Genesis),
     (VALIDATOR_CONFIG_V2_ADDRESS, TempoHardfork::Genesis),
     (TIP20_FACTORY_ADDRESS, TempoHardfork::Genesis),
+    // The only post-launch addition at `Genesis` rather than a new hardfork. NVM is a fork
+    // that launches from its own genesis, so the precompile can be allocated there directly
+    // instead of installed at a fork boundary the way ZONE_FACTORY is at T9. Anything ported
+    // back to a chain whose genesis has already been produced needs a hardfork variant and a
+    // `deploy_precompile_at_boundary` call instead — editing a live chain's genesis alloc
+    // changes its genesis hash.
     (ANCHORING_ADDRESS, TempoHardfork::Genesis),
     (ADDRESS_REGISTRY_ADDRESS, TempoHardfork::T3),
     (SIGNATURE_VERIFIER_ADDRESS, TempoHardfork::T3),
