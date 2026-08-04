@@ -27,9 +27,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Clock, ContextCell, Handle, IoBuf, Metrics as _, Spawner, spawn_cell};
-use commonware_utils::{
-    Acknowledgement, N3f1, NZU32, TryFromIterator as _, acknowledgement::Exact, ordered,
-};
+use commonware_utils::{Acknowledgement, N3f1, NZU32, acknowledgement::Exact, ordered};
 
 use eyre::{OptionExt as _, WrapErr as _, bail, ensure, eyre};
 use futures::{
@@ -1622,50 +1620,6 @@ fn determine_next_players_at_hash(
     node: &TempoFullNode,
     hash: B256,
 ) -> eyre::Result<ordered::Set<PublicKey>> {
-    // With a staking election configured in genesis, the next players are the elected
-    // committee (intersected with the registry, which holds the consensus keys). All inputs
-    // are read at `hash`, so every node computes the identical set. On any shortfall —
-    // read failure or a committee below the minimum — fall back to the full registry so a
-    // mis-configured election cannot halt the chain.
-    if let Some(contract) = node.chain_spec().info.staking_election() {
-        let registry = crate::validators::read_active_validator_keys_at_block_hash(node, hash)
-            .wrap_err("failed reading validator config v2")?;
-        match crate::validators::read_elected_committee_at_block_hash(node, hash, contract) {
-            Ok(elected) => {
-                if let Some(players) =
-                    crate::validators::filter_elected_players(&registry, &elected)
-                {
-                    // A duplicate consensus key is deterministic across nodes (all read the same
-                    // registry), so falling back here is consistent — never a partial halt. This
-                    // is unreachable while the ValidatorConfigV2 precompile enforces key
-                    // uniqueness, but the contract says "any shortfall falls back," so honor it.
-                    match ordered::Set::try_from_iter(players) {
-                        Ok(next_players) => {
-                            debug!(
-                                ?next_players,
-                                "determined next players from staking election"
-                            );
-                            return Ok(next_players);
-                        }
-                        Err(error) => warn!(
-                            %error,
-                            "elected committee has duplicate keys; falling back to full registry"
-                        ),
-                    }
-                } else {
-                    warn!(
-                        elected = elected.len(),
-                        registry = registry.len(),
-                        "elected committee below minimum; falling back to full registry"
-                    );
-                }
-            }
-            Err(error) => {
-                warn!(%error, "failed reading elected committee; falling back to full registry");
-            }
-        }
-    }
-
     let next_players =
         read_active_and_known_peers_at_block_hash(node, &ordered::Set::default(), hash)
             .wrap_err("failed reading peers from  validator config v2")?

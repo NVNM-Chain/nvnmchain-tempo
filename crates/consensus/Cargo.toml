@@ -20,15 +20,12 @@ tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-consensus-config.workspace = true
 tempo-dkg-onchain-artifacts.workspace = true
 tempo-node.workspace = true
-tempo-revm.workspace = true
 tempo-primitives = { workspace = true, features = ["reth"] }
 tempo-payload-types.workspace = true
 tempo-precompiles.workspace = true
 tempo-telemetry-util.workspace = true
 
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
-alloy-sol-types.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-client = { workspace = true, features = ["ws-base"] }
 alloy-rpc-types-engine.workspace = true
