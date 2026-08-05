@@ -1,4 +1,4 @@
-//! Caller-partitioned commitment log precompile. Enabled at `TempoHardfork::Genesis`.
+//! Caller-partitioned commitment log precompile. Enabled at `TempoHardfork::T10`.
 //!
 //! The caller *is* the namespace, so there is no authorization logic: permissionless by
 //! construction, and permissioned on demand by routing writes through a wrapper contract whose
@@ -129,7 +129,7 @@ mod tests {
     const PINNED_NS: Address = address!("0x1111111111111111111111111111111111111111");
 
     fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
-        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::Genesis);
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T10);
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
     }
 

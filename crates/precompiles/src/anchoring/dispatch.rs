@@ -60,13 +60,13 @@ mod tests {
     }
 
     fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
-        with_spec(TempoHardfork::T9, f)
+        with_spec(TempoHardfork::T10, f)
     }
 
     /// A read-only context, as a `STATICCALL` would run in.
     fn with_static_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
         let mut storage =
-            HashMapStorageProvider::new_with_spec(1, TempoHardfork::T9).with_static(true);
+            HashMapStorageProvider::new_with_spec(1, TempoHardfork::T10).with_static(true);
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
     }
 

@@ -647,11 +647,9 @@ where
         if self.inner.spec.is_t8_active_at_timestamp(timestamp) {
             self.deploy_precompile_at_boundary(CURRENT_COMMITTEE_ADDRESS, &[])?;
         }
-        if self.inner.spec.is_t9_active_at_timestamp(timestamp) {
-            self.deploy_precompile_at_boundary(ANCHORING_ADDRESS, &[])?;
-        }
         if self.inner.spec.is_t10_active_at_timestamp(timestamp) {
             self.deploy_zone_factory_at_boundary()?;
+            self.deploy_precompile_at_boundary(ANCHORING_ADDRESS, &[])?;
         }
         if self.inner.spec.is_t12_active_at_timestamp(timestamp) {
             self.upgrade_zone_runtimes_at_boundary()?;
