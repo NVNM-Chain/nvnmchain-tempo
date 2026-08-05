@@ -22,7 +22,7 @@ use revm::{
 use tempo_contracts::{
     TempoHardfork,
     precompiles::{
-        AccountKeychainError, AddrRegistryError, CurrentCommitteeError, FeeManagerError,
+        AccountKeychainError, AddrRegistryError, AnchoringError, CurrentCommitteeError, FeeManagerError,
         NonceError, ReceivePolicyGuardError, RolesAuthError, SignatureVerifierError,
         StablecoinDEXError, StorageCreditsError, TIP20ChannelReserveError, TIP20FactoryError,
         TIP403RegistryError, TIPFeeAMMError, UnknownFunctionSelector, ValidatorConfigError,
@@ -115,6 +115,10 @@ pub enum TempoPrecompileError {
     #[error("ZoneFactory error: {0:?}")]
     ZoneFactoryError(ZoneFactoryError),
 
+    /// Error from the anchoring precompile
+    #[error("Anchoring error: {0:?}")]
+    AnchoringError(AnchoringError),
+
     /// Gas limit exceeded during precompile execution.
     #[error("Gas limit exceeded")]
     OutOfGas,
@@ -180,6 +184,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.selector(),
             Self::CurrentCommitteeError(e) => e.selector(),
             Self::ZoneFactoryError(e) => e.selector(),
+            Self::AnchoringError(e) => e.selector(),
             Self::UnknownFunctionSelector(selector) => *selector,
             Self::Panic(_) | Self::StorageDeltaUnderflow(_) => Panic::SELECTOR,
             Self::OutOfGas | Self::Fatal(_) => [0, 0, 0, 0],
@@ -212,6 +217,7 @@ impl TempoPrecompileError {
             | Self::StorageCreditsError(_)
             | Self::CurrentCommitteeError(_)
             | Self::ZoneFactoryError(_)
+            | Self::AnchoringError(_)
             | Self::UnknownFunctionSelector(_) => false,
         }
     }
@@ -275,6 +281,7 @@ impl TempoPrecompileError {
             Self::StorageCreditsError(e) => e.abi_encode().into(),
             Self::CurrentCommitteeError(e) => e.abi_encode().into(),
             Self::ZoneFactoryError(e) => e.abi_encode().into(),
+            Self::AnchoringError(e) => e.abi_encode().into(),
             Self::OutOfGas => {
                 return Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, reservoir));
             }
@@ -353,6 +360,7 @@ pub fn error_decoder_registry() -> TempoPrecompileErrorRegistry {
     add_errors_to_registry(&mut registry, TempoPrecompileError::StorageCreditsError);
     add_errors_to_registry(&mut registry, TempoPrecompileError::CurrentCommitteeError);
     add_errors_to_registry(&mut registry, TempoPrecompileError::ZoneFactoryError);
+    add_errors_to_registry(&mut registry, TempoPrecompileError::AnchoringError);
 
     registry
 }
