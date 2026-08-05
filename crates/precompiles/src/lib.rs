@@ -14,6 +14,7 @@ pub(crate) mod ip_validation;
 
 pub mod account_keychain;
 pub mod address_registry;
+pub mod anchoring;
 pub mod current_committee;
 pub mod nonce;
 pub mod receive_policy_guard;
@@ -35,6 +36,7 @@ pub mod test_util;
 use crate::{
     account_keychain::AccountKeychain,
     address_registry::AddressRegistry,
+    anchoring::Anchoring,
     current_committee::CurrentCommittee,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
@@ -67,13 +69,13 @@ use revm::{
 };
 
 pub use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS,
-    DEFAULT_FEE_TOKEN, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS,
-    SIGNATURE_VERIFIER_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
-    SYSTEM_PRECOMPILES, TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-    TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, VALIDATOR_CONFIG_ADDRESS,
-    VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS,
-    ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ADDRESS_REGISTRY_ADDRESS, ANCHORING_ADDRESS,
+    CURRENT_COMMITTEE_ADDRESS, DEFAULT_FEE_TOKEN, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS,
+    RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS, STABLECOIN_DEX_ADDRESS,
+    STORAGE_CREDITS_ADDRESS, SYSTEM_PRECOMPILES, TIP_FEE_MANAGER_ADDRESS,
+    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS,
+    ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
 };
 
 // Re-export storage layout helpers for read-only contexts (e.g., pool validation)
@@ -187,6 +189,8 @@ pub fn extend_tempo_precompiles(
             Some(TIP20ChannelReserve::create_precompile(&env))
         } else if *address == ADDRESS_REGISTRY_ADDRESS && env.cfg.spec.is_t3() {
             Some(AddressRegistry::create_precompile(&env))
+        } else if *address == ANCHORING_ADDRESS && env.cfg.spec.is_t9() {
+            Some(Anchoring::create_precompile(&env))
         } else if *address == TIP403_REGISTRY_ADDRESS {
             Some(TIP403Registry::create_precompile(&env))
         } else if *address == TIP_FEE_MANAGER_ADDRESS {
@@ -277,6 +281,13 @@ impl AddressRegistry {
     /// Creates the EVM precompile for this type.
     pub fn create_precompile(env: &PrecompileEnv) -> DynPrecompile {
         tempo_precompile!("AddressRegistry", env: env, |input| { Self::new() })
+    }
+}
+
+impl Anchoring {
+    /// Creates the EVM precompile for this type.
+    pub fn create_precompile(env: &PrecompileEnv) -> DynPrecompile {
+        tempo_precompile!("Anchoring", env: env, |input| { Self::new() })
     }
 }
 
@@ -1101,6 +1112,29 @@ mod tests {
         assert!(
             precompiles.get(&SIGNATURE_VERIFIER_ADDRESS).is_none(),
             "SignatureVerifier should NOT be registered before T3"
+        );
+    }
+
+    /// The activation gate is invisible to the e2e suite, whose dev genesis has every fork
+    /// live from block 0, so it is pinned here instead.
+    #[test]
+    fn test_anchoring_registered_at_t9_only() {
+        let mut pre_t9 = CfgEnv::<TempoHardfork>::default();
+        pre_t9.set_spec_and_mainnet_gas_params(TempoHardfork::T8);
+        assert!(
+            test_tempo_precompiles(&pre_t9)
+                .get(&ANCHORING_ADDRESS)
+                .is_none(),
+            "Anchoring must not be registered before T9"
+        );
+
+        let mut t9 = CfgEnv::<TempoHardfork>::default();
+        t9.set_spec_and_mainnet_gas_params(TempoHardfork::T9);
+        assert!(
+            test_tempo_precompiles(&t9)
+                .get(&ANCHORING_ADDRESS)
+                .is_some(),
+            "Anchoring should be registered at T9"
         );
     }
 
