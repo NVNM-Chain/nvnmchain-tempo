@@ -12994,6 +12994,7 @@ dependencies = [
  "tempo-ext",
  "tempo-eyre",
  "tempo-faucet",
+ "tempo-indexer",
  "tempo-node",
  "tempo-precompiles",
  "tempo-primitives",
@@ -13342,6 +13343,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-indexer"
+version = "1.11.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "async-trait",
+ "eyre",
+ "futures",
+ "jsonrpsee",
+ "reth-ethereum",
+ "reth-execution-types",
+ "reth-node-api",
+ "reth-node-core",
+ "reth-primitives-traits",
+ "reth-rpc-eth-api",
+ "serde",
+ "tempfile",
+ "tempo-alloy",
+ "tempo-primitives",
+ "tracing",
+ "tx-index",
+]
+
+[[package]]
 name = "tempo-node"
 version = "1.11.0"
 dependencies = [
@@ -13399,6 +13424,7 @@ dependencies = [
  "tempo-contracts",
  "tempo-e2e",
  "tempo-evm",
+ "tempo-indexer",
  "tempo-payload-builder",
  "tempo-payload-types",
  "tempo-precompiles",
@@ -14494,6 +14520,16 @@ dependencies = [
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "tx-index"
+version = "0.1.0"
+source = "git+https://github.com/mmsqe/tempo-indexer?rev=a77949e76765a2d08ef279e63682358eba4e43fc#a77949e76765a2d08ef279e63682358eba4e43fc"
+dependencies = [
+ "alloy-primitives",
+ "eyre",
+ "rocksdb",
 ]
 
 [[package]]

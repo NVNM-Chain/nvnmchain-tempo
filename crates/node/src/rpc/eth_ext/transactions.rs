@@ -24,3 +24,19 @@ pub struct TransactionsFilter {
     #[serde(rename = "type")]
     type_: Option<TempoTxType>,
 }
+
+/// Read accessors, so a backend in another crate can apply the filter without the
+/// fields becoming part of the wire type's public shape.
+impl TransactionsFilter {
+    pub const fn from(&self) -> Option<Address> {
+        self.from
+    }
+
+    pub const fn to(&self) -> Option<Address> {
+        self.to
+    }
+
+    pub const fn tx_type(&self) -> Option<TempoTxType> {
+        self.type_
+    }
+}

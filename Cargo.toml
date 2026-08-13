@@ -26,6 +26,7 @@ members = [
   "crates/hardfork",
   "crates/e2e",
   "crates/faucet",
+  "crates/indexer",
   "crates/node",
   "crates/payload/builder",
   "crates/payload/types",
@@ -131,6 +132,8 @@ tempo-consensus-config = { path = "crates/consensus-config", default-features = 
 tempo-dkg-onchain-artifacts = { path = "crates/dkg-onchain-artifacts", default-features = false }
 tempo-e2e = { path = "crates/e2e" }
 tempo-faucet = { path = "crates/faucet", default-features = false }
+tempo-indexer = { path = "crates/indexer" }
+tx-index = { git = "https://github.com/mmsqe/tempo-indexer", rev = "a77949e76765a2d08ef279e63682358eba4e43fc" }
 tempo-evm = { path = "crates/evm", default-features = false }
 tempo-eyre = { path = "crates/eyre", default-features = false }
 tempo-hardfork = { path = "crates/hardfork", default-features = false }

@@ -96,6 +96,13 @@ pub struct TempoNodeArgs {
     )]
     pub engine_disable_execution_cache_sharing_with_builder: bool,
 
+    /// Maintain a transaction index and serve `eth_getTransactions` from it.
+    ///
+    /// Off by default: the index is a second write path on every committed block,
+    /// and the method reports itself unimplemented without it exactly as before.
+    #[arg(long = "indexer", default_value_t = false)]
+    pub indexer: bool,
+
     /// Initial estimate of total replayable payload build work divided by work
     /// at transaction cutoff.
     ///
@@ -119,6 +126,7 @@ impl Default for TempoNodeArgs {
             builder_parallel: false,
             engine_disable_execution_cache_sharing_with_builder: false,
             builder_build_time_multiplier: DEFAULT_BUILD_TIME_MULTIPLIER,
+            indexer: false,
         }
     }
 }
@@ -158,6 +166,8 @@ pub struct TempoNode {
     payload_builder_builder: TempoPayloadBuilderBuilder,
     /// Validator public key for `admin_validatorKey` RPC method.
     validator_key: Option<B256>,
+    /// Read handle on the transaction index, when one is running.
+    index: Option<tempo_indexer::Reader>,
 }
 
 impl TempoNode {
@@ -167,7 +177,16 @@ impl TempoNode {
             pool_builder: args.pool_builder(),
             payload_builder_builder: args.payload_builder_builder(),
             validator_key,
+            index: None,
         }
+    }
+
+    /// Serve `eth_getTransactions` from `index` rather than reporting it
+    /// unimplemented. The ExEx that fills the index is installed at the launch site,
+    /// which owns the datadir the store lives in.
+    pub fn with_index(mut self, index: tempo_indexer::Reader) -> Self {
+        self.index = Some(index);
+        self
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a regular Tempo node.
@@ -261,6 +280,8 @@ pub struct TempoAddOns<N: FullNodeTypes<Types = TempoNode>> {
         Identity,
     >,
     validator_key: Option<B256>,
+    /// Read handle on the transaction index, when one is running.
+    index: Option<tempo_indexer::Reader>,
 }
 
 impl<N> TempoAddOns<N>
@@ -269,6 +290,11 @@ where
 {
     /// Creates a new instance from the inner `RpcAddOns`.
     pub fn new(validator_key: Option<B256>) -> Self {
+        Self::with_index(validator_key, None)
+    }
+
+    /// As [`Self::new`], serving `eth_getTransactions` from `index` when there is one.
+    pub fn with_index(validator_key: Option<B256>, index: Option<tempo_indexer::Reader>) -> Self {
         Self {
             inner: RpcAddOns::new(
                 TempoEthApiBuilder::new(validator_key),
@@ -279,6 +305,7 @@ where
                 Default::default(),
             ),
             validator_key,
+            index,
         }
     }
 }
@@ -298,6 +325,9 @@ where
             ctx.node.components.evm_config.clone(),
         );
 
+        // Moved into the closure: the add-ons callback is 'static, so it cannot
+        // borrow `self`.
+        let index = self.index.clone();
         self.inner
             .launch_add_ons_with(ctx, move |container| {
                 let reth_node_builder::rpc::RpcModuleContainer {
@@ -306,7 +336,10 @@ where
 
                 let eth_api = registry.eth_api().clone();
                 let token = TempoToken::new(eth_api.clone());
-                let eth_ext = TempoEthExt::new(eth_api.clone());
+                let eth_ext = match index {
+                    Some(index) => TempoEthExt::with_index(eth_api.clone(), index),
+                    None => TempoEthExt::new(eth_api.clone()),
+                };
                 let simulate = TempoSimulate::new(eth_api);
                 let admin = TempoAdminApi::new(self.validator_key);
                 let operator = TempoOperatorRpc::new(registry.admin_api());
@@ -372,7 +405,7 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        TempoAddOns::new(self.validator_key)
+        TempoAddOns::with_index(self.validator_key, self.index.clone())
     }
 }
 
