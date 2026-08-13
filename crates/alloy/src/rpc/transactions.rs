@@ -1,3 +1,9 @@
+//! `eth_getTransactions` types.
+//!
+//! Beside [`super::pagination`] rather than in the node, because they are schema: a
+//! backend serving this method has to build the response, and it should not have to
+//! reach into the node crate that happens to declare the trait.
+
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use tempo_primitives::{TempoTxEnvelope, TempoTxType};
@@ -17,26 +23,10 @@ pub struct TransactionsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TransactionsFilter {
     /// Filter by sender address (from)
-    from: Option<Address>,
+    pub from: Option<Address>,
     /// Filter by recipient address (to)
-    to: Option<Address>,
+    pub to: Option<Address>,
     /// Transaction type
     #[serde(rename = "type")]
-    type_: Option<TempoTxType>,
-}
-
-/// Read accessors, so a backend in another crate can apply the filter without the
-/// fields becoming part of the wire type's public shape.
-impl TransactionsFilter {
-    pub const fn from(&self) -> Option<Address> {
-        self.from
-    }
-
-    pub const fn to(&self) -> Option<Address> {
-        self.to
-    }
-
-    pub const fn tx_type(&self) -> Option<TempoTxType> {
-        self.type_
-    }
+    pub type_: Option<TempoTxType>,
 }

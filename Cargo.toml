@@ -133,7 +133,7 @@ tempo-dkg-onchain-artifacts = { path = "crates/dkg-onchain-artifacts", default-f
 tempo-e2e = { path = "crates/e2e" }
 tempo-faucet = { path = "crates/faucet", default-features = false }
 tempo-indexer = { path = "crates/indexer" }
-tx-index = { git = "https://github.com/mmsqe/tempo-indexer", rev = "a77949e76765a2d08ef279e63682358eba4e43fc" }
+tx-index = { git = "https://github.com/mmsqe/tempo-indexer", rev = "747b279901f82c8a4e4dcc9a7f3dc075896d01b6" }
 tempo-evm = { path = "crates/evm", default-features = false }
 tempo-eyre = { path = "crates/eyre", default-features = false }
 tempo-hardfork = { path = "crates/hardfork", default-features = false }

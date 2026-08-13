@@ -1,31 +1,27 @@
 //! `eth_getTransactions`, served from the ExEx-maintained index.
 //!
-//! This fills in the trait tempo already declares (`crates/node/src/rpc/eth_ext`)
-//! rather than restating its schema. allegro, which cannot depend on tempo, mirrors
-//! `PaginationParams` and the response envelope by hand and carries a comment about
-//! keeping them in step; inside tempo that copy would be the second definition of a
-//! wire contract that has one, so there is none here.
+//! This fills in the trait the node already declares (`crates/node/src/rpc/eth_ext`)
+//! rather than restating its schema. The trait itself has to stay there — it is what
+//! the node merges into reth's RPC server — but everything under it is here, so the
+//! node's handler is a flag check and one call.
 //!
-//! The split of work is the same on both: the index answers *which* transactions
-//! match, reth answers what each one is. Bodies are never stored.
+//! The split of work: the index answers *which* transactions match, reth answers what
+//! each one is. Bodies are never stored. Paging is the index's too — clamping, the
+//! look-ahead and the cursor live in `tx-index` beside the tests that pin them.
 
 use futures::future::try_join_all;
 use jsonrpsee::core::RpcResult;
 use reth_node_core::rpc::result::internal_rpc_err;
 use reth_rpc_eth_api::helpers::EthTransactions;
-use reth_rpc_eth_api::{EthApiTypes, RpcTransaction};
+use reth_rpc_eth_api::{EthApiTypes, RpcTypes};
 use tempo_alloy::rpc::pagination::{PaginationParams, SortOrder};
+use tempo_alloy::rpc::transactions::{Transaction, TransactionsFilter, TransactionsResponse};
 
-use crate::store::{Filter, Order, Position, Reader};
+use crate::store::{Filter, Order, Reader};
 
-/// Page size when the caller does not ask for one, and the ceiling on one that does.
-///
-/// Both are the schema's: `PaginationParams::limit` documents "Defaults to 10.
-/// Maximum is 100". The ceiling is also what stops one request asking the node to
-/// serialize the world.
-const DEFAULT_LIMIT: usize = 10;
-const MAX_LIMIT: usize = 100;
-
+/// A free function rather than `From`: both types are foreign here, so the orphan
+/// rule forbids the impl. allegro can write one only because it declares its own
+/// `SortOrder` locally.
 fn order_of(sort: SortOrder) -> Order {
     match sort {
         SortOrder::Asc => Order::Ascending,
@@ -48,62 +44,41 @@ impl<EthApi> IndexerRpc<EthApi> {
 
 impl<EthApi> IndexerRpc<EthApi>
 where
-    EthApi: EthTransactions + EthApiTypes + 'static,
+    // The index hands back whatever this node's eth API calls a transaction; the bound
+    // says that is the one the method declares, rather than converting between two
+    // spellings of the same type.
+    EthApi: EthTransactions
+        + EthApiTypes<NetworkTypes: RpcTypes<TransactionResponse = Transaction>>
+        + 'static,
 {
-    /// One page: the rows the index selects, hydrated through reth.
-    ///
-    /// Returns the transactions and the cursor to resume from, so the caller builds
-    /// whichever response envelope it declares.
-    pub async fn page<F>(
+    pub async fn transactions(
         &self,
-        params: PaginationParams<F>,
-        filter_of: impl FnOnce(F) -> Filter,
-    ) -> RpcResult<(Vec<RpcTransaction<EthApi::NetworkTypes>>, Option<String>)>
-    where
-        F: Default,
-    {
-        let filter = filter_of(params.filters.unwrap_or_default());
-        let order = order_of(params.sort.map(|sort| sort.order).unwrap_or_default());
-        // Floor of 1, not just a ceiling: a zero limit returns no rows, so it has no
-        // last row to cut a cursor from, and the caller is told the page is final
-        // while a further page exists -- a walk that ends one page in.
-        let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        params: PaginationParams<TransactionsFilter>,
+    ) -> RpcResult<TransactionsResponse> {
+        let filters = params.filters.unwrap_or_default();
+        let filter = Filter {
+            from: filters.from,
+            to: filters.to,
+            tx_type: filters.type_.map(|ty| ty as u8),
+        };
+        let order = order_of(params.sort.unwrap_or_default().order);
 
-        let after = params
-            .cursor
-            .as_deref()
-            .map(|cursor| {
-                Position::decode(cursor)
-                    .ok_or_else(|| internal_rpc_err(format!("malformed cursor: {cursor}")))
-            })
-            .transpose()?;
-
-        // One extra row tells us whether a further page exists. Counting instead would
-        // promise a next page that turns out empty at an exact multiple of the limit.
-        let mut found = self
+        let page = self
             .store
-            .query(&filter, after, order, limit.saturating_add(1))
-            .map_err(|e| internal_rpc_err(format!("index query failed: {e}")))?;
-
-        let has_more = found.len() > limit;
-        found.truncate(limit);
-        // The cursor names the last row returned, not the extra one peeked at.
-        let next_cursor = found
-            .last()
-            .filter(|_| has_more)
-            .map(|entry| entry.position.encode());
+            .page(&filter, params.cursor.as_deref(), order, params.limit)
+            .map_err(|e| internal_rpc_err(e.to_string()))?;
 
         // The lookups are independent, so overlap them instead of awaiting one at a
         // time -- a full page is up to 100. `try_join_all` keeps the rows in order.
         let sources = try_join_all(
-            found
+            page.rows
                 .iter()
-                .map(|entry| EthTransactions::transaction_by_hash(&self.eth_api, entry.hash)),
+                .map(|row| EthTransactions::transaction_by_hash(&self.eth_api, row.hash)),
         )
         .await
         .map_err(|e| internal_rpc_err(format!("failed to load transaction: {e}")))?;
 
-        let mut transactions = Vec::with_capacity(found.len());
+        let mut transactions = Vec::with_capacity(page.rows.len());
         // The index can name a transaction reth has since pruned; skip it rather than
         // failing the whole page.
         for source in sources.into_iter().flatten() {
@@ -113,6 +88,9 @@ where
             transactions.push(tx);
         }
 
-        Ok((transactions, next_cursor))
+        Ok(TransactionsResponse {
+            next_cursor: page.next_cursor,
+            transactions,
+        })
     }
 }

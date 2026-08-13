@@ -1,12 +1,9 @@
-use crate::rpc::eth_ext::transactions::TransactionsResponse;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_node_core::rpc::result::internal_rpc_err;
 use reth_rpc_eth_api::{EthApiTypes, RpcNodeCore, RpcTypes, helpers::EthTransactions};
 use tempo_alloy::rpc::pagination::PaginationParams;
-use tempo_indexer::{IndexerRpc, Reader, store::Filter};
-
-pub mod transactions;
-pub use transactions::TransactionsFilter;
+use tempo_alloy::rpc::transactions::{Transaction, TransactionsFilter, TransactionsResponse};
+use tempo_indexer::{IndexerRpc, Reader};
 
 #[rpc(server, namespace = "eth")]
 pub trait TempoEthExtApi {
@@ -20,7 +17,7 @@ pub trait TempoEthExtApi {
     ) -> RpcResult<TransactionsResponse>;
 }
 
-/// The JSON-RPC handlers for the `dex_` namespace.
+/// The JSON-RPC handlers for the `eth_` extension namespace.
 #[derive(Debug, Clone, Default)]
 pub struct TempoEthExt<EthApi> {
     eth_api: EthApi,
@@ -57,7 +54,7 @@ where
     // spellings of the same type.
     EthApi: RpcNodeCore
         + EthTransactions
-        + EthApiTypes<NetworkTypes: RpcTypes<TransactionResponse = transactions::Transaction>>
+        + EthApiTypes<NetworkTypes: RpcTypes<TransactionResponse = Transaction>>
         + Clone
         + 'static,
 {
@@ -73,17 +70,7 @@ where
                 "eth_getTransactions needs the transaction index, which is off by default; restart the node with --indexer",
             ));
         };
-        let (transactions, next_cursor) = index
-            .page(params, |filters| Filter {
-                from: filters.from(),
-                to: filters.to(),
-                tx_type: filters.tx_type().map(|ty| ty as u8),
-            })
-            .await?;
-        Ok(TransactionsResponse {
-            next_cursor,
-            transactions,
-        })
+        index.transactions(params).await
     }
 }
 

@@ -14525,7 +14525,7 @@ dependencies = [
 [[package]]
 name = "tx-index"
 version = "0.1.0"
-source = "git+https://github.com/mmsqe/tempo-indexer?rev=a77949e76765a2d08ef279e63682358eba4e43fc#a77949e76765a2d08ef279e63682358eba4e43fc"
+source = "git+https://github.com/mmsqe/tempo-indexer?rev=747b279901f82c8a4e4dcc9a7f3dc075896d01b6#747b279901f82c8a4e4dcc9a7f3dc075896d01b6"
 dependencies = [
  "alloy-primitives",
  "eyre",

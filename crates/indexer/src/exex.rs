@@ -21,7 +21,7 @@ use tracing::{debug, info};
 
 use tempo_primitives::TempoPrimitives;
 
-use crate::store::{IndexedTx, Position, Store, Tip};
+use crate::store::{IndexedTx, Plan, Position, Store, Tip};
 
 /// Flatten a chain's blocks into index rows.
 ///
@@ -54,19 +54,6 @@ fn rows_of(chain: &Chain<TempoPrimitives>) -> Vec<IndexedTx> {
     rows
 }
 
-/// Everything one notification means for the index.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Plan {
-    /// Drop this block and everything above it.
-    pub revert_from: Option<u64>,
-    /// Rows to insert, in chain order.
-    pub rows: Vec<IndexedTx>,
-    /// Where the index stands afterwards -- the resume head after a restart.
-    pub tip: Option<Tip>,
-    /// The committed tip, set only when blocks were committed. `None` for a pure revert,
-    /// which is what stops one from acknowledging a height (rule 2).
-    pub committed: Option<Tip>,
-}
 
 fn tip_of(chain: &Chain<TempoPrimitives>) -> Tip {
     let num_hash = chain.tip().num_hash();
@@ -148,7 +135,7 @@ where
         let plan = plan(&notification?);
 
         // Write first; only then acknowledge. See rule 2 in the module docs.
-        store.apply(plan.revert_from, &plan.rows, plan.tip)?;
+        store.apply(&plan)?;
 
         if let Some(from) = plan.revert_from {
             debug!(target: "tempo::indexer", from, "reverted index");
@@ -231,7 +218,7 @@ mod tests {
 
     /// Apply a plan the way [`run`] does, so the tests exercise that same shuffle.
     fn apply(store: &mut Store, plan: Plan) {
-        store.apply(plan.revert_from, &plan.rows, plan.tip).unwrap();
+        store.apply(&plan).unwrap();
     }
 
     /// A throwaway on-disk store; RocksDB has no in-memory mode.
