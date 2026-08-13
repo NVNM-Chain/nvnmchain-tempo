@@ -12,7 +12,7 @@
 // `Transaction` for `to()`, `Typed2718` for `ty()`.
 use alloy_consensus::transaction::TxHashRef as _;
 use alloy_consensus::{BlockHeader as _, Transaction as _, Typed2718 as _};
-use futures::StreamExt;
+use futures::{FutureExt as _, StreamExt};
 use reth_ethereum::exex::{ExExContext, ExExEvent, ExExHead, ExExNotification};
 use reth_ethereum::provider::BlockHashReader;
 use reth_execution_types::Chain;
@@ -131,20 +131,51 @@ where
     );
     ctx.set_notifications_with_head(head);
 
-    while let Some(notification) = ctx.notifications.next().await {
-        let plan = plan(&notification?);
+    // How many queued notifications may fold into one write. At sub-second block
+    // times the chain outruns a write-per-block loop, so everything already queued
+    // merges into the same atomic `apply` — one batch write and one acknowledgement
+    // instead of one of each per block. The cap only bounds memory while far
+    // behind; caught up, the queue is empty and batches are naturally size one.
+    const MAX_BATCH: usize = 256;
+
+    let mut ended = false;
+    while !ended {
+        let Some(notification) = ctx.notifications.next().await else {
+            break;
+        };
+        let mut merged = plan(&notification?);
+        let mut batched = 1;
+
+        while batched < MAX_BATCH {
+            // Only what is already queued: `now_or_never` never waits, so folding
+            // adds no latency when the indexer is keeping up.
+            match ctx.notifications.next().now_or_never() {
+                Some(Some(notification)) => {
+                    merged.merge(plan(&notification?));
+                    batched += 1;
+                }
+                Some(None) => {
+                    // Stream ended mid-batch; write what we have, then stop —
+                    // without polling a finished stream again.
+                    ended = true;
+                    break;
+                }
+                None => break,
+            }
+        }
 
         // Write first; only then acknowledge. See rule 2 in the module docs.
-        store.apply(&plan)?;
+        store.apply(&merged)?;
 
-        if let Some(from) = plan.revert_from {
+        if let Some(from) = merged.revert_from {
             debug!(target: "tempo::indexer", from, "reverted index");
         }
-        if let Some(committed) = plan.committed {
+        if let Some(committed) = merged.committed {
             debug!(
                 target: "tempo::indexer",
                 block = committed.block_num,
-                transactions = plan.rows.len(),
+                transactions = merged.rows.len(),
+                batched,
                 "indexed committed chain",
             );
             ctx.events.send(ExExEvent::FinishedHeight(
