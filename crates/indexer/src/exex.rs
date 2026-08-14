@@ -9,32 +9,71 @@
 //!    sending it early turns a retryable error into silent, permanent loss.
 //! 3. Resume with a head ([`resume_head`]), or reth never backfills what was missed.
 
-// `Transaction` for `to()`, `Typed2718` for `ty()`.
+// `Typed2718` for `ty()`.
 use alloy_consensus::transaction::TxHashRef as _;
-use alloy_consensus::{BlockHeader as _, Transaction as _, Typed2718 as _};
+use alloy_consensus::{BlockHeader as _, Typed2718 as _};
+use alloy_primitives::{Address, TxKind};
 use futures::{FutureExt as _, StreamExt};
 use reth_ethereum::exex::{ExExContext, ExExEvent, ExExHead, ExExNotification};
 use reth_ethereum::provider::BlockHashReader;
 use reth_execution_types::Chain;
 use reth_node_api::{FullNodeComponents, NodeTypes};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use tempo_primitives::TempoPrimitives;
+use tempo_primitives::{TempoPrimitives, TempoTxEnvelope};
 
 use crate::store::{IndexedTx, Plan, Position, Store, Tip};
+
+/// Every address a transaction calls, in call order and without repeats.
+///
+/// A native tempo transaction is a *batch*, and `TempoTxEnvelope::kind()` answers with
+/// the first call's target only. Indexing that alone meant a `to` filter on any later
+/// call's address came back empty -- indistinguishable, to the caller, from there being
+/// no such transactions. `calls()` gives the whole batch, and one call each for the
+/// ordinary transaction types, so both shapes read the same way here.
+///
+/// A creation targets no existing address and so contributes nothing, which is what
+/// leaves a pure creation with an empty list.
+fn targets_of(tx: &TempoTxEnvelope) -> Vec<Address> {
+    let mut targets = Vec::new();
+    for (kind, _) in tx.calls() {
+        if let TxKind::Call(to) = kind
+            && !targets.contains(&to)
+        {
+            targets.push(to);
+        }
+    }
+    targets
+}
+
+/// Who paid for `tx` — the sponsor where one signed, the sender otherwise.
+///
+/// Only a sponsored transaction costs a signature recovery: `fee_payer` returns the
+/// sender outright when there is no fee-payer signature to recover from.
+///
+/// A recovery that fails leaves the column unset rather than failing the whole batch.
+/// Execution already accepted the transaction, so this should not happen; if it does,
+/// one unindexed column is a smaller loss than an indexer that stops.
+fn fee_payer_of(tx: &TempoTxEnvelope, sender: Address) -> Option<Address> {
+    match tx.fee_payer(sender) {
+        Ok(payer) => Some(payer),
+        Err(error) => {
+            warn!(
+                target: "tempo::indexer",
+                %error,
+                hash = ?tx.tx_hash(),
+                "fee payer did not recover; leaving it unindexed",
+            );
+            None
+        }
+    }
+}
 
 /// Flatten a chain's blocks into index rows.
 ///
 /// Concrete in [`TempoPrimitives`] rather than generic over `NodePrimitives`: the
 /// generic form needs a pile of bounds to say "transactions have a hash and a type",
 /// and tempo is only ever a tempo-primitives node.
-///
-/// `to` is the transaction's own answer -- `TempoTxEnvelope` resolves it through
-/// `TempoTransaction::kind()`, which for the native batched transaction is the *first*
-/// call's target. A transaction whose second call reaches an address is therefore not
-/// found by a `to` filter on it. That matches the rest of the stack (the explorer's
-/// `tx_to_addr`, tempo-e2e's `_recipient`), so the three agree; indexing every call
-/// target instead is a deliberate change to make together, not one to drift into.
 fn rows_of(chain: &Chain<TempoPrimitives>) -> Vec<IndexedTx> {
     let mut rows = Vec::new();
     for block in chain.blocks_iter() {
@@ -46,14 +85,15 @@ fn rows_of(chain: &Chain<TempoPrimitives>) -> Vec<IndexedTx> {
                 position: Position::new(block_num, tx_index as u32),
                 hash: *tx.tx_hash(),
                 from: *sender,
-                to: tx.to(),
+                to: targets_of(tx),
                 tx_type: tx.ty(),
+                fee_token: tx.fee_token(),
+                fee_payer: fee_payer_of(tx, *sender),
             });
         }
     }
     rows
 }
-
 
 fn tip_of(chain: &Chain<TempoPrimitives>) -> Tip {
     let num_hash = chain.tip().num_hash();
@@ -279,34 +319,107 @@ mod tests {
         assert_eq!(plan.rows[0].from, Address::from([0xaa; 20]));
     }
 
-    #[test]
-    fn a_batched_transaction_is_indexed_under_its_first_call() {
-        // The decision the port had to make, pinned rather than left to be discovered:
-        // a native transaction is a batch, and `to` is the first call's target. A `to`
-        // filter on the second call's address finds nothing.
-        //
-        // Every backend agrees on this today -- the explorer's `tx_to_addr` and
-        // tempo-e2e's `_recipient` read the same way -- and tempo-e2e cannot tell the
-        // readings apart, because it only ever sends single-call transactions.
-        let aa = TempoTransaction {
+    /// An AA transaction carrying `calls`, signed well enough to be indexed.
+    fn aa(calls: Vec<Call>) -> TempoTxEnvelope {
+        let tx = TempoTransaction {
             chain_id: 1337,
-            calls: vec![call_to(0xc1), call_to(0xc2)],
+            calls,
             ..Default::default()
         };
         let signature =
             TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
-        let signed = TempoTxEnvelope::AA(AASigned::new_unhashed(aa, signature));
+        TempoTxEnvelope::AA(AASigned::new_unhashed(tx, signature))
+    }
 
+    #[test]
+    fn a_batched_transaction_is_indexed_under_every_call() {
+        // A native transaction is a batch. Indexing only `kind()` -- the first call --
+        // meant a `to` filter on any later target came back empty, which a caller
+        // cannot tell apart from there being no such transactions.
         let notification = ExExNotification::ChainCommitted {
-            new: chain(vec![block(1, 0xaa, vec![signed])]),
+            new: chain(vec![block(
+                1,
+                0xaa,
+                vec![aa(vec![call_to(0xc1), call_to(0xc2)])],
+            )]),
         };
         let rows = plan(&notification).rows;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].to,
-            Some(Address::from([0xc1; 20])),
-            "the first call's target is the transaction's `to`",
+            vec![Address::from([0xc1; 20]), Address::from([0xc2; 20])],
+            "every call's target belongs to the transaction",
+        );
+    }
+
+    #[test]
+    fn a_repeated_call_target_is_listed_once() {
+        let notification = ExExNotification::ChainCommitted {
+            new: chain(vec![block(
+                1,
+                0xaa,
+                vec![aa(vec![call_to(0xc1), call_to(0xc1)])],
+            )]),
+        };
+        assert_eq!(
+            plan(&notification).rows[0].to,
+            vec![Address::from([0xc1; 20])],
+        );
+    }
+
+    #[test]
+    fn an_ordinary_transaction_has_one_target() {
+        // `calls()` reads the same for both shapes, so the single-call types come
+        // through as a one-element list rather than needing their own path.
+        let notification = ExExNotification::ChainCommitted {
+            new: chain(vec![block(1, 0xaa, vec![eip1559(1)])]),
+        };
+        assert_eq!(
+            plan(&notification).rows[0].to,
+            vec![Address::from([0xbb; 20])],
+        );
+    }
+
+    #[test]
+    fn a_creation_targets_no_address() {
+        let notification = ExExNotification::ChainCommitted {
+            new: chain(vec![block(
+                1,
+                0xaa,
+                vec![aa(vec![Call {
+                    to: TxKind::Create,
+                    value: U256::ZERO,
+                    input: Default::default(),
+                }])],
+            )]),
+        };
+        assert!(plan(&notification).rows[0].to.is_empty());
+    }
+
+    #[test]
+    fn the_sender_pays_unless_someone_signed_for_it() {
+        // "Who paid" is recorded for every transaction, not only sponsored ones: a
+        // column that answered for some and stayed empty for the rest could not be
+        // filtered on honestly.
+        let notification = ExExNotification::ChainCommitted {
+            new: chain(vec![block(
+                1,
+                0xaa,
+                vec![eip1559(1), aa(vec![call_to(0xc1)])],
+            )]),
+        };
+        let rows = plan(&notification).rows;
+        for row in &rows {
+            assert_eq!(
+                row.fee_payer,
+                Some(Address::from([0xaa; 20])),
+                "unsponsored, the sender paid",
+            );
+        }
+        assert!(
+            rows.iter().all(|row| row.fee_token.is_none()),
+            "no fee token was named, so gas was paid in the native currency",
         );
     }
 
