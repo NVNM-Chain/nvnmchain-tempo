@@ -17,7 +17,7 @@ use reth_rpc_eth_api::{EthApiTypes, RpcTypes};
 use tempo_alloy::rpc::pagination::{PaginationParams, SortOrder};
 use tempo_alloy::rpc::transactions::{Transaction, TransactionsFilter, TransactionsResponse};
 
-use crate::store::{Filter, Order, Reader};
+use crate::store::{BlockRange, Filter, Order, Reader};
 
 /// A free function rather than `From`: both types are foreign here, so the orphan
 /// rule forbids the impl. allegro can write one only because it declares its own
@@ -56,16 +56,27 @@ where
         params: PaginationParams<TransactionsFilter>,
     ) -> RpcResult<TransactionsResponse> {
         let filters = params.filters.unwrap_or_default();
+        let blocks = filters.block_number.unwrap_or_default();
         let filter = Filter {
             from: filters.from,
             to: filters.to,
+            address: filters.address,
             tx_type: filters.type_.map(|ty| ty as u8),
+            fee_token: filters.fee_token,
+            fee_payer: filters.fee_payer,
+            blocks: BlockRange::new(blocks.min, blocks.max),
         };
         let order = order_of(params.sort.unwrap_or_default().order);
 
         let page = self
             .store
             .page(&filter, params.cursor.as_deref(), order, params.limit)
+            .map_err(|e| internal_rpc_err(e.to_string()))?;
+        // Whether the index counts this combination at all, not how many it found:
+        // `None` here becomes a null `total` rather than a zero.
+        let total = self
+            .store
+            .count(&filter)
             .map_err(|e| internal_rpc_err(e.to_string()))?;
 
         // The lookups are independent, so overlap them instead of awaiting one at a
@@ -90,6 +101,7 @@ where
 
         Ok(TransactionsResponse {
             next_cursor: page.next_cursor,
+            total,
             transactions,
         })
     }
