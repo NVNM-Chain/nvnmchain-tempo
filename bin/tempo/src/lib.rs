@@ -491,14 +491,39 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
             url => Some(url.to_string()),
         };
 
+        // Opened here because the launch site owns the datadir, and handed to both
+        // halves: the ExEx that fills the index and the RPC add-on that reads it. One
+        // store, so the reader cannot be pointed at a different directory than the
+        // writer and quietly answer from an empty index.
+        let index = args
+            .node_args
+            .indexer
+            .then(|| {
+                let datadir = builder
+                    .config()
+                    .datadir
+                    .clone()
+                    .resolve_datadir(builder.config().chain.chain());
+                tempo_indexer::open_store(datadir.data_dir())
+            })
+            .transpose()
+            .wrap_err("failed to open the transaction index")?;
+        let (index_store, index_reader) = match index {
+            Some((store, reader)) => (Some(store), Some(reader)),
+            None => (None, None),
+        };
+
         let NodeHandle {
             node,
             node_exit_future,
         } = builder
-            .node(overrides.apply_tempo_node(TempoNode::new(
-                &args.node_args,
-                validator_key,
-            )))
+            .node(overrides.apply_tempo_node({
+                let node = TempoNode::new(&args.node_args, validator_key);
+                match index_reader {
+                    Some(index) => node.with_index(index),
+                    None => node,
+                }
+            }))
             .apply(|mut builder: WithLaunchContext<_>| {
                 // Enable discv5 peer discovery
                 builder
@@ -518,6 +543,16 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
 
                 let has_consensus_engine =
                     args.has_consensus_engine(builder.config().dev.dev);
+
+                // After `.node()`, which is what gives the ExEx components to attach to.
+                let builder = match index_store {
+                    Some(store) => {
+                        builder.install_exex("tempo-indexer", move |ctx| async move {
+                            Ok(tempo_indexer::exex::run(ctx, store))
+                        })
+                    }
+                    None => builder,
+                };
 
                 builder.extend_rpc_modules(move |ctx| {
                     if faucet_args.enabled {
