@@ -83,13 +83,19 @@ pub struct TempoGenesisInfo {
 }
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
+    /// Extract Tempo genesis info from genesis extra_fields.
+    ///
+    /// Fails fast rather than silently defaulting. These fields are consensus-critical
+    /// (`epochLength`, hardfork times), so a node quietly falling back on a
+    /// typo'd value would disagree with its peers, with no genesis-hash mismatch to catch it.
+    /// Empty `extra_fields` still deserializes to the default, so an error here is genuinely
+    /// malformed input.
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
             .config
             .extra_fields
             .deserialize_as::<Self>()
-            .unwrap_or_default()
+            .expect("malformed Tempo genesis extra_fields (consensus-critical config)")
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -582,6 +588,33 @@ mod tests {
 
         let chainspec = super::TempoChainSpec::from_genesis(genesis);
         assert!(chainspec.network_identity.is_none());
+    }
+
+    #[test]
+    fn empty_extra_fields_parses_to_default_genesis_info() {
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1234 },
+            "alloc": {}
+        }))
+        .unwrap();
+        // No extra_fields => clean default (PoA, no election), not a parse error.
+        assert_eq!(
+            super::TempoGenesisInfo::extract_from(&genesis),
+            super::TempoGenesisInfo::default()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed Tempo genesis extra_fields")]
+    fn malformed_field_panics_instead_of_defaulting() {
+        // A typo'd consensus-critical field must fail fast. Defaulting would leave the node
+        // disagreeing with its peers, with no genesis-hash mismatch to catch it.
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1234, "epochLength": "not-a-number" },
+            "alloc": {}
+        }))
+        .unwrap();
+        let _ = super::TempoGenesisInfo::extract_from(&genesis);
     }
 
     #[test]
