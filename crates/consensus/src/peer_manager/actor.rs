@@ -30,7 +30,10 @@ use tracing::{Span, debug, error, info_span, instrument, warn};
 use crate::{
     consensus::Digest,
     utils::public_key_to_b256,
-    validators::{DecodedValidatorV2, ExecutionNode, read_validator_config_at_block_hash},
+    validators::{
+        DecodedValidatorV2, ExecutionNode, decoded_active_validators,
+        read_validator_config_at_block_hash,
+    },
 };
 
 /// The interval on which the peer set is update during bootstrapping.
@@ -388,23 +391,10 @@ impl PeersBuilder {
             hash,
             |config: &ValidatorConfigV2| {
                 let mut active_validators = HashMap::new();
-                for (i, raw) in config
-                    .get_active_validators()
-                    .wrap_err("failed reading active validator set from contract")?
-                    .into_iter()
-                    .enumerate()
-                {
-                    if let Ok(decoded) =
-                        DecodedValidatorV2::decode_from_contract(raw).inspect_err(|error| {
-                            warn!(
-                                    %error,
-                                    position = i,
-                                    "failed decoding active validator in contract",
-                            )
-                        })
-                        && active_validators
-                            .insert(decoded.public_key().clone(), decoded.to_p2p_address())
-                            .is_some()
+                for decoded in decoded_active_validators(config)? {
+                    if active_validators
+                        .insert(decoded.public_key().clone(), decoded.to_p2p_address())
+                        .is_some()
                     {
                         warn!(
                             duplicate = %decoded.public_key(),

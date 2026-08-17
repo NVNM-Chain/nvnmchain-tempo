@@ -48,7 +48,7 @@ use tracing::{Level, Span, debug, info, info_span, instrument, warn, warn_span};
 
 use crate::{
     consensus::{Digest, block::Block},
-    validators::{read_active_and_known_peers_at_block_hash, read_validator_config_at_block_hash},
+    validators::{next_players_at_block_hash, read_validator_config_at_block_hash},
 };
 
 mod state;
@@ -1185,9 +1185,19 @@ where
             "determined if the next epoch will be a reshare or full re-dkg process",
         );
 
-        let next_players =
-            determine_next_players_at_hash(&self.config.execution_node, request.digest.0)
-                .wrap_err("could not determine who the next players are supposed to be")?;
+        // Pure function of the digest, so cached beside the DKG outcome: proposals and
+        // verifications across views repeat the same boundary digest, and each uncached read
+        // builds an EVM synchronously inside this actor loop.
+        let next_players = match storage.get_next_players(&state.epoch, &request.digest) {
+            Some(players) => players.clone(),
+            None => {
+                let players =
+                    determine_next_players_at_hash(&self.config.execution_node, request.digest.0)
+                        .wrap_err("could not determine who the next players are supposed to be")?;
+                storage.cache_next_players(state.epoch, request.digest, players.clone());
+                players
+            }
+        };
 
         request
             .response
@@ -1620,13 +1630,17 @@ fn determine_next_players_at_hash(
     node: &TempoFullNode,
     hash: B256,
 ) -> eyre::Result<ordered::Set<PublicKey>> {
-    let next_players =
-        read_active_and_known_peers_at_block_hash(node, &ordered::Set::default(), hash)
-            .wrap_err("failed reading peers from  validator config v2")?
-            .into_keys();
-
-    debug!(?next_players, "determined next players");
-    Ok(next_players)
+    // With a staking election configured in genesis, the next players are the committee it
+    // elects, intersected with the registry that holds the consensus keys; otherwise — or
+    // whenever the election cannot seat a committee — the full registry. The policy lives in
+    // `next_players_at_block_hash` so no caller can pick the wrong half of it.
+    let info = &node.chain_spec().info;
+    next_players_at_block_hash(
+        node,
+        hash,
+        info.staking_election(),
+        info.staking_election_time(),
+    )
 }
 
 /// Reads the `nextFullDkgCeremony` epoch value from one of the validator config contracts.

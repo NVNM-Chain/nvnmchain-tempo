@@ -26,6 +26,8 @@ tempo-precompiles.workspace = true
 tempo-telemetry-util.workspace = true
 
 alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-sol-types.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-client = { workspace = true, features = ["ws-base"] }
 alloy-rpc-types-engine.workspace = true
