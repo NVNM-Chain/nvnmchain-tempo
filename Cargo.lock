@@ -13085,11 +13085,13 @@ version = "1.11.0"
 dependencies = [
  "age",
  "alloy-consensus",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-client",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "axum",
  "bytes",
  "clap",

@@ -35,6 +35,17 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// Staking-election contract: when set, each epoch's validator set is the committee
+    /// elected by this contract's `computeCommittee()` (intersected with the
+    /// ValidatorConfigV2 registry). Consensus-critical — must be identical on all nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election: Option<Address>,
+    /// Activation timestamp for the staking election, in the same style as the hardfork
+    /// times: the election is consulted only for blocks at or after it. Unset activates it
+    /// from genesis. Gives a live chain a coordination point — config and binaries roll out
+    /// ahead of time, and every node starts electing at the same block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election_time: Option<u64>,
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
@@ -86,7 +97,7 @@ impl TempoGenesisInfo {
     /// Extract Tempo genesis info from genesis extra_fields.
     ///
     /// Fails fast rather than silently defaulting. These fields are consensus-critical
-    /// (`epochLength`, hardfork times), so a node quietly falling back on a
+    /// (`epochLength`, `stakingElection`, hardfork times), so a node quietly falling back on a
     /// typo'd value would disagree with its peers, with no genesis-hash mismatch to catch it.
     /// Empty `extra_fields` still deserializes to the default, so an error here is genuinely
     /// malformed input.
@@ -100,6 +111,16 @@ impl TempoGenesisInfo {
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    /// The staking-election contract selecting each epoch's validator set, if configured.
+    pub fn staking_election(&self) -> Option<Address> {
+        self.staking_election
+    }
+
+    /// The timestamp the staking election activates at; `None` means from genesis.
+    pub fn staking_election_time(&self) -> Option<u64> {
+        self.staking_election_time
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
