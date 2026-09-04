@@ -1,39 +1,92 @@
-//! Caller-partitioned commitment log precompile. Enabled at `TempoHardfork::T10`.
+//! Caller-partitioned MMR precompile. Enabled at `TempoHardfork::T10`; see [`IAnchoring`] for
+//! what it serves and how it hashes.
 //!
-//! The caller *is* the namespace, so there is no authorization logic: permissionless by
-//! construction, and permissioned on demand by routing writes through a wrapper contract whose
-//! own address then becomes the namespace.
+//! State per namespace is the leaf count and one slot per peak height. A peak that merges away
+//! is left in its slot rather than cleared — the count's bits say which are live — so a height
+//! pays state creation once, when it is first reached, and every append after that only
+//! overwrites. That is what makes an append need no witness: `log n` slots hold a tree of any
+//! size, where a slot per key made every key cost a fresh one.
 //!
-//! State is one word per `(namespace, key)` — the latest commitment; history, payloads, and
-//! version order live in the `Anchored` log for indexers to derive. Re-writing the stored
-//! commitment reverts with `CommitmentUnchanged`, the single protocol invariant: every
-//! successful anchor changes state, so every event is a distinct change.
-//!
-//! Inherited from the `x/anchoring` precompile at the same address but not
-//! ABI-compatible with it. Its record and registry reads become indexer queries over the log;
-//! its roles have no successor here at all — there is no `grantRole`/`hasRole` and no role
-//! state, so any permissioning is an application concern in a calling contract.
+//! Inherited from the `x/anchoring` precompile at the same address but not ABI-compatible with
+//! it. Its records and registries become leaves a wrapper contract shapes and an indexer reads
+//! back out of the log; its roles have no successor here at all.
 
 pub mod dispatch;
 
 use crate::{
     ANCHORING_ADDRESS,
-    error::Result,
+    error::{Result, TempoPrecompileError},
     storage::{Handler, Slot},
 };
-use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy::primitives::{Address, B256, U256, keccak256};
 pub use tempo_contracts::precompiles::{AnchoringError, AnchoringEvent, IAnchoring};
 use tempo_precompiles_macros::contract;
 
-/// Domain tag for the head-slot derivation. Prefixing the preimage leaves the rest of the
-/// space free for future domains, so a later addition never collides with an existing head.
-const DOMAIN_HEAD: u8 = 0x01;
+/// Domain tag for the slot derivation. Prefixing the preimage leaves the rest of the space
+/// free for future domains, so a later addition never collides with a namespace's MMR.
+const DOMAIN_MMR: u8 = 0x01;
 
-/// Caller-partitioned commitment log.
+/// Gas per hash of the tree, mirroring `KECCAK256` on a three-word input (30 + 6 per word),
+/// so a merge is never cheaper here than the same hash in a contract. Charged for the work
+/// that grows with the tree — each merge, and each step of bagging the peaks; the one leaf
+/// hash a call makes rides with the calldata it came in on.
+const HASH_COST: u64 = 48;
+
+/// `keccak256("leaf" ‖ commitment)`.
+pub fn hash_leaf(commitment: B256) -> B256 {
+    keccak256([b"leaf" as &[u8], commitment.as_slice()].concat())
+}
+
+/// `keccak256("merge" ‖ left ‖ right)`.
+pub fn hash_merge(left: B256, right: B256) -> B256 {
+    keccak256([b"merge" as &[u8], left.as_slice(), right.as_slice()].concat())
+}
+
+/// The peaks bagged from the highest down; zero when there are none.
+pub fn bag(peaks: &[B256]) -> B256 {
+    let Some((first, rest)) = peaks.split_first() else {
+        return B256::ZERO;
+    };
+    rest.iter().fold(*first, |acc, peak| {
+        keccak256([b"bag" as &[u8], acc.as_slice(), peak.as_slice()].concat())
+    })
+}
+
+/// Where `namespace`'s MMR lives:
 ///
-/// Storage is a single derived word per `(namespace, key)` rather than a declared mapping
-/// field, so it takes one keccak instead of the two a nested `Mapping` would — see
-/// [`Anchoring::head`].
+/// ```text
+/// base(ns)          = keccak256(0x01 ‖ pad32(ns))    the leaf count
+/// base(ns) + 1 + h                                    the peak of height h
+/// ```
+///
+/// Derived once per call and passed down, rather than per slot: it is a keccak, and a call
+/// touching eight peaks would otherwise take it eight times over.
+fn base(namespace: Address) -> U256 {
+    let mut preimage = [0u8; 33];
+    preimage[0] = DOMAIN_MMR;
+    preimage[1..].copy_from_slice(namespace.into_word().as_slice());
+    U256::from_be_bytes(keccak256(preimage).0)
+}
+
+fn count_slot(base: U256) -> Slot<U256> {
+    Slot::new(base, ANCHORING_ADDRESS)
+}
+
+/// Wrapping, so a base near the top of the space still addresses 256 peaks. Two namespaces
+/// colliding there needs a keccak collision.
+fn peak_slot(base: U256, height: usize) -> Slot<B256> {
+    Slot::new(base.wrapping_add(U256::from(1 + height)), ANCHORING_ADDRESS)
+}
+
+/// One namespace's MMR: the leaf count, and the live peaks highest first — one per set bit
+/// of the count, which is what says the height each sits at.
+struct Mmr {
+    count: U256,
+    peaks: Vec<B256>,
+}
+
+/// Caller-partitioned MMR. Its storage is derived rather than declared, so it has no fields
+/// of its own — see [`base`] for the layout.
 #[contract(addr = ANCHORING_ADDRESS)]
 pub struct Anchoring {}
 
@@ -43,72 +96,140 @@ impl Anchoring {
         self.__initialize()
     }
 
-    /// The slot holding the latest commitment for `(namespace, key)`:
-    ///
-    /// ```text
-    /// headSlot(ns, key) = keccak256(0x01 ‖ pad32(ns) ‖ key)
-    /// ```
-    ///
-    /// One hash over a domain-tagged preimage, rather than the two a nested `Mapping` would
-    /// take. Reads and writes still go through [`Slot`], so they are metered and journalled
-    /// like any other precompile storage.
-    fn head(&self, namespace: Address, key: B256) -> Slot<B256> {
-        let mut preimage = [0u8; 65];
-        preimage[0] = DOMAIN_HEAD;
-        preimage[1..33].copy_from_slice(namespace.into_word().as_slice());
-        preimage[33..].copy_from_slice(key.as_slice());
-        Slot::new(
-            U256::from_be_bytes(keccak256(preimage).0),
-            ANCHORING_ADDRESS,
-        )
+    /// Reads `base`'s MMR. Reads go through [`Slot`], so they are metered and journalled like
+    /// any other precompile storage.
+    fn open(&self, base: U256) -> Result<Mmr> {
+        let count = count_slot(base).read()?;
+        let peaks = (0..256)
+            .rev()
+            .filter(|height| count.bit(*height))
+            .map(|height| peak_slot(base, height).read())
+            .collect::<Result<_>>()?;
+        Ok(Mmr { count, peaks })
     }
 
-    /// Returns the latest commitment for `(namespace, key)`, or zero if never anchored.
-    pub fn latest(&self, call: IAnchoring::latestCall) -> Result<B256> {
-        self.head(call.namespace, call.key).read()
+    /// The root over `peaks`, charged for the merges bagging them takes: one per peak after
+    /// the first, and none at all for an empty MMR.
+    fn bagged(&mut self, peaks: &[B256]) -> Result<B256> {
+        let merges = peaks.len().saturating_sub(1) as u64;
+        self.storage.deduct_gas(HASH_COST * merges)?;
+        Ok(bag(peaks))
     }
 
-    /// Anchors `commitment` under `msg_sender`'s namespace at `key`.
-    ///
-    /// # Errors
-    /// - `CommitmentUnchanged` — `commitment` already is the head for `(msg_sender, key)`
-    pub fn anchor(&mut self, msg_sender: Address, call: IAnchoring::anchorCall) -> Result<()> {
-        self.write_head(msg_sender, call.key, call.commitment, call.metadata)
+    /// Returns the root of `namespace`'s MMR, or zero if nothing was ever appended.
+    pub fn root(&mut self, call: IAnchoring::rootCall) -> Result<B256> {
+        let mmr = self.open(base(call.namespace))?;
+        self.bagged(&mmr.peaks)
     }
 
-    /// Anchors `keccak256(metadata)`, which makes the emitted event self-verifying.
-    ///
-    /// # Errors
-    /// - `CommitmentUnchanged` — the metadata digest already is the head for `(msg_sender, key)`
-    pub fn anchor_and_hash(
+    /// Returns the leaf count and the peaks of `namespace`'s MMR.
+    pub fn state(&self, call: IAnchoring::stateCall) -> Result<IAnchoring::stateReturn> {
+        let mmr = self.open(base(call.namespace))?;
+        Ok(IAnchoring::stateReturn {
+            count: mmr.count,
+            peaks: mmr.peaks,
+        })
+    }
+
+    /// Appends one leaf to `msg_sender`'s MMR.
+    pub fn append_leaf(
         &mut self,
         msg_sender: Address,
-        call: IAnchoring::anchorAndHashCall,
-    ) -> Result<()> {
-        let commitment = keccak256(&call.metadata);
-        self.write_head(msg_sender, call.key, commitment, call.metadata)
+        call: IAnchoring::appendLeafCall,
+    ) -> Result<B256> {
+        let base = base(msg_sender);
+        let mut mmr = self.open(base)?;
+        let first = mmr.count;
+
+        self.push(base, &mut mmr, 0, hash_leaf(call.commitment))?;
+        let root = self.close(base, &mmr)?;
+
+        self.emit_event(AnchoringEvent::leaf_appended(
+            msg_sender,
+            first,
+            call.commitment,
+            root,
+            mmr.peaks,
+            call.metadata,
+        ))?;
+        Ok(root)
     }
 
-    /// Writes the head for `(namespace, key)` and emits `Anchored`.
+    /// Appends a batch of aligned perfect subtrees to `msg_sender`'s MMR.
     ///
-    /// Rejects no-op writes so that every emitted event corresponds to a real state change.
-    /// Zero is a legal commitment — it resets the head — and is rejected only when the head is
-    /// already zero.
-    fn write_head(
+    /// # Errors
+    /// - `ChunksMismatch` — the roots and heights differ in length
+    /// - `ChunkNotAligned` — a chunk would land at a count that is not a multiple of its size
+    pub fn append_leaves(
         &mut self,
-        namespace: Address,
-        key: B256,
-        commitment: B256,
-        metadata: Bytes,
-    ) -> Result<()> {
-        if self.head(namespace, key).read()? == commitment {
-            return Err(AnchoringError::commitment_unchanged().into());
+        msg_sender: Address,
+        call: IAnchoring::appendLeavesCall,
+    ) -> Result<B256> {
+        if call.chunkRoots.len() != call.chunkHeights.len() {
+            return Err(AnchoringError::chunks_mismatch().into());
+        }
+        let base = base(msg_sender);
+        let mut mmr = self.open(base)?;
+        let first = mmr.count;
+
+        for (chunk, height) in call.chunkRoots.iter().zip(&call.chunkHeights) {
+            self.push(base, &mut mmr, *height, *chunk)?;
+        }
+        let root = self.close(base, &mmr)?;
+
+        self.emit_event(AnchoringEvent::leaves_appended(
+            msg_sender,
+            first,
+            mmr.count,
+            call.chunkRoots,
+            call.chunkHeights,
+            root,
+            mmr.peaks,
+            call.metadata,
+        ))?;
+        Ok(root)
+    }
+
+    /// Merges `node`, a perfect subtree of `height`, into `mmr` at the low end, carrying
+    /// through every peak of consecutive height, and stores it where it lands.
+    ///
+    /// The peaks it merged are left in their slots, stale — the count no longer names them —
+    /// which is what keeps a height from paying state creation more than once.
+    ///
+    /// # Errors
+    /// - `ChunkNotAligned` — `mmr` holds a count that is not a multiple of the chunk's size
+    fn push(&mut self, base: U256, mmr: &mut Mmr, height: u8, node: B256) -> Result<()> {
+        let size = U256::ONE << usize::from(height);
+        if mmr.count & (size - U256::ONE) != U256::ZERO {
+            return Err(AnchoringError::chunk_not_aligned(mmr.count, U256::from(height)).into());
         }
 
-        self.head(namespace, key).write(commitment)?;
-        self.emit_event(AnchoringEvent::anchored(
-            namespace, key, commitment, metadata,
-        ))
+        // The set bits from `height` up are the peaks below this chunk, and the alignment
+        // check says there are none under it — so each is the lowest peak, at the tail.
+        let (mut node, mut height) = (node, usize::from(height));
+        while mmr.count.bit(height) {
+            let peak = mmr
+                .peaks
+                .pop()
+                .ok_or_else(TempoPrecompileError::under_overflow)?;
+            self.storage.deduct_gas(HASH_COST)?;
+            node = hash_merge(peak, node);
+            height += 1;
+        }
+
+        peak_slot(base, height).write(node)?;
+        mmr.peaks.push(node);
+        mmr.count = mmr
+            .count
+            .checked_add(size)
+            .ok_or_else(TempoPrecompileError::under_overflow)?;
+        Ok(())
+    }
+
+    /// Stores the new count and bags the live peaks into the root.
+    fn close(&mut self, base: U256, mmr: &Mmr) -> Result<B256> {
+        count_slot(base).write(mmr.count)?;
+        self.bagged(&mmr.peaks)
     }
 }
 
@@ -117,56 +238,123 @@ mod tests {
     use super::*;
     use crate::storage::{StorageCtx, hashmap::HashMapStorageProvider};
     use alloy::{
-        primitives::{U256, address, b256},
+        primitives::{Bytes, U256, address, b256},
         sol_types::{SolCall, SolEvent},
     };
     use tempo_chainspec::hardfork::TempoHardfork;
 
-    /// `keccak256("sha256:aa11bb22cc33")` — the key pinned by the anchoring spec.
-    const PINNED_KEY: B256 =
-        b256!("0x67f62d0f6aeb3832ec7bddf22daf97ee7538761d2fdb89e6e5ba36bd5ed0c213");
-    /// The namespace pinned by the anchoring spec.
+    /// The namespace pinned by the reference vectors.
     const PINNED_NS: Address = address!("0x1111111111111111111111111111111111111111");
+
+    /// Roots computed independently, in Python with keccak, over the commitments
+    /// `bytes32(1)`, `bytes32(2)`, … appended in that order. The Solidity verifier's suite
+    /// pins the same sixteen, which is what keeps the two implementations agreeing.
+    const ROOTS: [B256; 16] = [
+        b256!("0x5786039c2502cb1b5ff9a9f0b0b6957bb8b3f6489d20080f677236b2dd590dcd"),
+        b256!("0x9950fe45570c3e4c9c0241de506d53ba63bb5b4ceb7b3c0032148e32f1ab3d9d"),
+        b256!("0x036e11a04c28d071bc9b3961be683ff7eac4aad9234b6a21904de44b952cb3c9"),
+        b256!("0x9a444d98cfab773b89efcfe3749342cd1b072e8f2276f9f822fb1e19edabb77b"),
+        b256!("0xbbd0ad9fcc22a20f7adc962f214aba7710aed4d06063e7d722d65d07920a269d"),
+        b256!("0x950d9243a18618ebce2f7906ead2e5c9cfe719359d7b8635cf52ee4995c53631"),
+        b256!("0x237757481f6015968d2dd6b7784aa544f822d29f6a520bfae222c79c16051c14"),
+        b256!("0x2a43055cc8a7bb9202beebc4603c13e920c9c7f7e3bf26ca5178aad751d5b29e"),
+        b256!("0x8948ab91036932c2798daf8808b183438f08a6acb56cae4fe3d0db2ff999fd11"),
+        b256!("0x0dcc0e544f9c3d0d78a0b030257eb964bc1756e786ede2c565c24817885bee6c"),
+        b256!("0xbbe8d27929385c3988405fe38bf7a82136581ef7ea7a2f71634d9785eddaf1d7"),
+        b256!("0xd3ebf5629b714dde40059d9dd0bb940d3748ead5953aa63d5d7cc867354b28fa"),
+        b256!("0xbc438a6c52d1d3f2abea81fdd299bdfb9c8961b03e2adbeeff075db74971b2ae"),
+        b256!("0xd41583f4d63289dafc25e7b5beaefe0f1e453fe2b9f0ba50cdfa96e27689c9fe"),
+        b256!("0x7d75dea0b9798ddaa25f8a0d0e6222784f6ad299617a9128e7d75af3bf5eb81e"),
+        b256!("0xc60e652673b4bff570b066c5513bf939b9a69b21c5ad6802f3579166b660c2c2"),
+    ];
 
     fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T10);
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
     }
 
-    fn anchor_call(key: B256, commitment: B256, metadata: &[u8]) -> IAnchoring::anchorCall {
-        IAnchoring::anchorCall {
-            key,
-            commitment,
-            metadata: Bytes::copy_from_slice(metadata),
+    fn c(i: u64) -> B256 {
+        B256::from(U256::from(i))
+    }
+
+    fn root_of(anchoring: &mut Anchoring, namespace: Address) -> Result<B256> {
+        anchoring.root(IAnchoring::rootCall { namespace })
+    }
+
+    fn state_of(anchoring: &Anchoring, namespace: Address) -> Result<(U256, Vec<B256>)> {
+        let state = anchoring.state(IAnchoring::stateCall { namespace })?;
+        Ok((state.count, state.peaks))
+    }
+
+    /// Appends `c(from)..=c(to)` one by one.
+    fn append_all(anchoring: &mut Anchoring, ns: Address, from: u64, to: u64) -> eyre::Result<()> {
+        for i in from..=to {
+            anchoring.append_leaf(
+                ns,
+                IAnchoring::appendLeafCall {
+                    commitment: c(i),
+                    metadata: Bytes::new(),
+                },
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The root of a perfect tree over commitments `from .. from+size`, as a caller cuts a batch.
+    fn perfect(from: u64, size: u64) -> B256 {
+        let mut nodes: Vec<B256> = (0..size).map(|i| hash_leaf(c(from + i))).collect();
+        while nodes.len() > 1 {
+            nodes = nodes
+                .chunks(2)
+                .map(|pair| hash_merge(pair[0], pair[1]))
+                .collect();
+        }
+        nodes[0]
+    }
+
+    fn leaves_call(chunks: &[(u64, u64, u8)]) -> IAnchoring::appendLeavesCall {
+        IAnchoring::appendLeavesCall {
+            chunkRoots: chunks
+                .iter()
+                .map(|(from, size, _)| perfect(*from, *size))
+                .collect(),
+            chunkHeights: chunks.iter().map(|(_, _, h)| *h).collect(),
+            metadata: Bytes::new(),
         }
     }
 
-    fn latest_of(anchoring: &Anchoring, namespace: Address, key: B256) -> Result<B256> {
-        anchoring.latest(IAnchoring::latestCall { namespace, key })
-    }
-
-    /// Reference vectors from the spec. A change here is an ABI break for every indexer.
+    /// Reference vectors. A change here is an ABI break for every indexer.
     #[test]
     fn abi_constants_are_pinned() {
         assert_eq!(
-            IAnchoring::anchorCall::SELECTOR,
-            alloy::hex!("0x0a3bd8ec"),
-            "anchor(bytes32,bytes32,bytes)"
+            IAnchoring::appendLeafCall::SELECTOR,
+            alloy::hex!("0xe5435d9a"),
+            "appendLeaf(bytes32,bytes)"
         );
         assert_eq!(
-            IAnchoring::anchorAndHashCall::SELECTOR,
-            alloy::hex!("0x875d07f6"),
-            "anchorAndHash(bytes32,bytes)"
+            IAnchoring::appendLeavesCall::SELECTOR,
+            alloy::hex!("0x1afcfa4f"),
+            "appendLeaves(bytes32[],uint8[],bytes)"
         );
         assert_eq!(
-            IAnchoring::latestCall::SELECTOR,
-            alloy::hex!("0x68205bc3"),
-            "latest(address,bytes32)"
+            IAnchoring::rootCall::SELECTOR,
+            alloy::hex!("0x6e5ac882"),
+            "root(address)"
         );
         assert_eq!(
-            IAnchoring::Anchored::SIGNATURE_HASH,
-            b256!("0x778db4d46fc7a84c4e5105dcb250cb47092b78648868d3efaf18e1205b25801d"),
-            "Anchored(address,bytes32,bytes32,bytes)"
+            IAnchoring::stateCall::SELECTOR,
+            alloy::hex!("0x31e658a5"),
+            "state(address)"
+        );
+        assert_eq!(
+            IAnchoring::LeafAppended::SIGNATURE_HASH,
+            b256!("0x299ee3fc8eecbb10ce273b5329c6e4f095c550dc1bc7e1756bd6303da53cf12a"),
+            "LeafAppended(address,uint256,bytes32,bytes32,bytes32[],bytes)"
+        );
+        assert_eq!(
+            IAnchoring::LeavesAppended::SIGNATURE_HASH,
+            b256!("0x07d3a61ef7a792265f84d9a96ef8168c654dd0d610d83034971ce6c68c30a378"),
+            "LeavesAppended(address,uint256,uint256,bytes32[],uint8[],bytes32,bytes32[],bytes)"
         );
         assert_eq!(
             ANCHORING_ADDRESS,
@@ -174,197 +362,221 @@ mod tests {
         );
     }
 
-    /// Pins the head slot derivation against the spec's reference vector. Off-chain tooling
-    /// reconstructs slots from this rule, so a change here breaks every such consumer.
+    /// Pins the slot layout. Off-chain tooling reconstructs slots from this rule, so a
+    /// change here breaks every such consumer.
     #[test]
-    fn head_slot_derivation_is_pinned() -> eyre::Result<()> {
-        let preimage = [
-            &[DOMAIN_HEAD][..],
-            PINNED_NS.into_word().as_slice(),
-            PINNED_KEY.as_slice(),
-        ]
-        .concat();
-        let expected = keccak256(preimage);
+    fn slot_layout_is_pinned() -> eyre::Result<()> {
+        let preimage = [&[DOMAIN_MMR][..], PINNED_NS.into_word().as_slice()].concat();
+        let base = keccak256(preimage);
         assert_eq!(
-            expected,
-            b256!("0x68945f381cbccb13ba2b13540e8ac2e28d1e9d3ca33aecf37861f5ef565fd489")
+            base,
+            b256!("0xb33ae4174b6ee0d698ac7fb0b98c2e8dd60d6062831f17c8355acb09a12e0c4f")
         );
 
-        // The accessor must resolve to the same slot, and an anchor must land in it.
-        let slot = U256::from_be_bytes(expected.0);
+        // Three leaves: count 3 = peaks at heights 1 and 0, the height-0 slot written twice.
+        let base = U256::from_be_bytes(base.0);
         with_anchoring(|mut anchoring| {
-            let commitment = B256::repeat_byte(0xaa);
-            anchoring.anchor(PINNED_NS, anchor_call(PINNED_KEY, commitment, b""))?;
+            append_all(&mut anchoring, PINNED_NS, 1, 3)?;
 
-            let raw = StorageCtx.sload(ANCHORING_ADDRESS, slot)?;
-            assert_eq!(B256::from(raw.to_be_bytes()), commitment);
+            assert_eq!(
+                StorageCtx.sload(ANCHORING_ADDRESS, base)?,
+                U256::from(3),
+                "count"
+            );
+            let peak = |h: u64| StorageCtx.sload(ANCHORING_ADDRESS, base + U256::from(1 + h));
+            assert_eq!(B256::from(peak(0)?.to_be_bytes()), hash_leaf(c(3)));
+            assert_eq!(
+                B256::from(peak(1)?.to_be_bytes()),
+                hash_merge(hash_leaf(c(1)), hash_leaf(c(2)))
+            );
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[2]);
             Ok(())
         })
     }
 
     #[test]
-    fn untouched_key_reads_zero() -> eyre::Result<()> {
-        with_anchoring(|anchoring| {
+    fn untouched_namespace_reads_empty() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            let ns = Address::random();
+            assert_eq!(root_of(&mut anchoring, ns)?, B256::ZERO);
+            assert_eq!(state_of(&anchoring, ns)?, (U256::ZERO, vec![]));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn sequential_appends_reach_the_reference_roots() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            for i in 1..=16u64 {
+                let root = anchoring.append_leaf(
+                    PINNED_NS,
+                    IAnchoring::appendLeafCall {
+                        commitment: c(i),
+                        metadata: Bytes::new(),
+                    },
+                )?;
+                assert_eq!(
+                    root,
+                    ROOTS[i as usize - 1],
+                    "root after leaf {i}, as returned"
+                );
+                assert_eq!(root_of(&mut anchoring, PINNED_NS)?, root, "as read");
+                let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
+                assert_eq!(count, U256::from(i));
+                assert_eq!(peaks.len(), i.count_ones() as usize);
+                assert_eq!(bag(&peaks), root, "the peaks bag to the root");
+            }
+            Ok(())
+        })
+    }
+
+    /// A peak that merged away stays in its slot, and the count is what says it is stale:
+    /// the fourth leaf leaves heights 0 and 1 holding old values that no read returns.
+    #[test]
+    fn stale_peaks_are_left_in_place_and_never_read() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            append_all(&mut anchoring, PINNED_NS, 1, 4)?;
+            let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
+            assert_eq!(count, U256::from(4));
+            assert_eq!(peaks, vec![perfect(1, 4)], "one live peak");
+
+            let base = base(PINNED_NS);
+            let stale = StorageCtx.sload(ANCHORING_ADDRESS, base + U256::ONE)?;
             assert_eq!(
-                latest_of(&anchoring, Address::random(), B256::random())?,
-                B256::ZERO
+                B256::from(stale.to_be_bytes()),
+                hash_leaf(c(3)),
+                "left behind"
+            );
+
+            // The next leaf overwrites height 0 rather than creating it.
+            append_all(&mut anchoring, PINNED_NS, 5, 5)?;
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[4]);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_batch_from_empty_reaches_the_sequential_root() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            // 13 leaves cut aligned from zero: sizes 8, 4, 1.
+            let root = anchoring
+                .append_leaves(PINNED_NS, leaves_call(&[(1, 8, 3), (9, 4, 2), (13, 1, 0)]))?;
+            assert_eq!(root, ROOTS[12], "one call, thirteen leaves");
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[12]);
+            assert_eq!(state_of(&anchoring, PINNED_NS)?.0, U256::from(13));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_batch_after_a_prefix_is_cut_to_the_alignment() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            // Five leaves one by one, then eight more: [5,6) h0, [6,8) h1, [8,12) h2, [12,13) h0.
+            append_all(&mut anchoring, PINNED_NS, 1, 5)?;
+            anchoring.append_leaves(
+                PINNED_NS,
+                leaves_call(&[(6, 1, 0), (7, 2, 1), (9, 4, 2), (13, 1, 0)]),
+            )?;
+            assert_eq!(
+                root_of(&mut anchoring, PINNED_NS)?,
+                ROOTS[12],
+                "sizes rise to the boundary and fall after it"
             );
             Ok(())
         })
     }
 
     #[test]
-    fn successive_anchors_update_head_and_emit_one_event_each() -> eyre::Result<()> {
+    fn a_chunk_off_the_alignment_is_refused() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-            let (first, second) = (B256::repeat_byte(0x11), B256::repeat_byte(0x22));
+            append_all(&mut anchoring, PINNED_NS, 1, 5)?;
+            anchoring.clear_emitted_events();
+            let before = root_of(&mut anchoring, PINNED_NS)?;
 
-            anchoring.anchor(ns, anchor_call(key, first, b"v1"))?;
-            assert_eq!(latest_of(&anchoring, ns, key)?, first);
-
-            anchoring.anchor(ns, anchor_call(key, second, b"v2"))?;
-            assert_eq!(latest_of(&anchoring, ns, key)?, second);
-
-            // One event per anchor, in order — the exact list, so a stray event fails here too.
-            anchoring.assert_emitted_events(vec![
-                AnchoringEvent::anchored(ns, key, first, Bytes::from_static(b"v1")),
-                AnchoringEvent::anchored(ns, key, second, Bytes::from_static(b"v2")),
-            ]);
+            // A pair at count 5: 5 % 2 != 0.
+            let err = anchoring
+                .append_leaves(PINNED_NS, leaves_call(&[(6, 2, 1)]))
+                .unwrap_err();
+            assert_eq!(
+                err,
+                AnchoringError::chunk_not_aligned(U256::from(5), U256::from(1)).into()
+            );
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
+            assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
     }
 
-    /// The single protocol invariant: an anchor must change the commitment.
     #[test]
-    fn re_anchoring_the_current_commitment_reverts_without_side_effects() -> eyre::Result<()> {
+    fn mismatched_chunk_lists_are_refused() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-            let commitment = B256::repeat_byte(0x33);
+            let mut call = leaves_call(&[(1, 1, 0)]);
+            call.chunkHeights.clear();
+            let err = anchoring.append_leaves(PINNED_NS, call).unwrap_err();
+            assert_eq!(err, AnchoringError::chunks_mismatch().into());
+            Ok(())
+        })
+    }
 
-            anchoring.anchor(ns, anchor_call(key, commitment, b"first"))?;
+    /// Both events carry the peaks and where the leaves landed, so a proof needs the log
+    /// and nothing else.
+    #[test]
+    fn events_carry_the_mmr_state() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            append_all(&mut anchoring, PINNED_NS, 1, 5)?;
             anchoring.clear_emitted_events();
 
-            // Different metadata must not rescue an unchanged commitment.
-            let err = anchoring
-                .anchor(ns, anchor_call(key, commitment, b"different metadata"))
-                .unwrap_err();
-            assert_eq!(err, AnchoringError::commitment_unchanged().into());
-
-            assert_eq!(latest_of(&anchoring, ns, key)?, commitment);
-            assert!(anchoring.emitted_events().is_empty());
-            Ok(())
-        })
-    }
-
-    /// Only the *current* head is rejected — an older commitment is a real state change.
-    #[test]
-    fn an_older_commitment_can_be_anchored_again() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-            let (first, second) = (B256::repeat_byte(0x44), B256::repeat_byte(0x55));
-
-            anchoring.anchor(ns, anchor_call(key, first, b""))?;
-            anchoring.anchor(ns, anchor_call(key, second, b""))?;
-            anchoring.anchor(ns, anchor_call(key, first, b""))?;
-
-            assert_eq!(latest_of(&anchoring, ns, key)?, first);
-            assert_eq!(anchoring.emitted_events().len(), 3);
-            Ok(())
-        })
-    }
-
-    /// Zero is a legal commitment; it resets a head and is rejected only when already zero.
-    #[test]
-    fn zero_commitment_is_a_reset_not_a_special_case() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-
-            let err = anchoring
-                .anchor(ns, anchor_call(key, B256::ZERO, b""))
-                .unwrap_err();
-            assert_eq!(err, AnchoringError::commitment_unchanged().into());
-            assert!(anchoring.emitted_events().is_empty());
-
-            anchoring.anchor(ns, anchor_call(key, B256::repeat_byte(0x66), b""))?;
-            anchoring.anchor(ns, anchor_call(key, B256::ZERO, b""))?;
-
-            assert_eq!(latest_of(&anchoring, ns, key)?, B256::ZERO);
-            assert_eq!(anchoring.emitted_events().len(), 2);
-            Ok(())
-        })
-    }
-
-    #[test]
-    fn anchor_and_hash_commits_the_metadata_digest() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-            let metadata = Bytes::from_static(br#"{"v":1,"kind":"content"}"#);
-
-            anchoring.anchor_and_hash(
-                ns,
-                IAnchoring::anchorAndHashCall {
-                    key,
-                    metadata: metadata.clone(),
+            let root = anchoring.append_leaf(
+                PINNED_NS,
+                IAnchoring::appendLeafCall {
+                    commitment: c(6),
+                    metadata: Bytes::from_static(b"provenance"),
                 },
             )?;
+            assert_eq!(root, ROOTS[5]);
+            let (_, peaks) = state_of(&anchoring, PINNED_NS)?;
+            anchoring.assert_emitted_events(vec![AnchoringEvent::leaf_appended(
+                PINNED_NS,
+                U256::from(5),
+                c(6),
+                ROOTS[5],
+                peaks,
+                Bytes::from_static(b"provenance"),
+            )]);
+            anchoring.clear_emitted_events();
 
-            let digest = keccak256(&metadata);
-            assert_eq!(latest_of(&anchoring, ns, key)?, digest);
-            anchoring
-                .assert_emitted_events(vec![AnchoringEvent::anchored(ns, key, digest, metadata)]);
+            // Seven more, as [6,8) h1, [8,12) h2, [12,13) h0, to thirteen.
+            let call = leaves_call(&[(7, 2, 1), (9, 4, 2), (13, 1, 0)]);
+            let (chunk_roots, chunk_heights) = (call.chunkRoots.clone(), call.chunkHeights.clone());
+            anchoring.append_leaves(PINNED_NS, call)?;
+            let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
+            assert_eq!(count, U256::from(13));
+            anchoring.assert_emitted_events(vec![AnchoringEvent::leaves_appended(
+                PINNED_NS,
+                U256::from(6),
+                U256::from(13),
+                chunk_roots,
+                chunk_heights,
+                ROOTS[12],
+                peaks,
+                Bytes::new(),
+            )]);
             Ok(())
         })
     }
 
-    /// Two legacy rows differing only in an envelope discriminator must both replay.
+    /// Namespaces are partitioned by `msg_sender`: one account's appends never reach another's,
+    /// and each starts from empty.
     #[test]
-    fn anchor_and_hash_distinguishes_metadata_that_differs_only_in_seq() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            let ns = Address::random();
-            let key = B256::random();
-
-            for seq in [1, 2] {
-                anchoring.anchor_and_hash(
-                    ns,
-                    IAnchoring::anchorAndHashCall {
-                        key,
-                        metadata: format!(r#"{{"seq":{seq},"checksum":"0xabc"}}"#)
-                            .into_bytes()
-                            .into(),
-                    },
-                )?;
-            }
-
-            assert_eq!(anchoring.emitted_events().len(), 2);
-            Ok(())
-        })
-    }
-
-    /// Heads are partitioned on both axes: the namespace (`msg_sender`, so one account cannot
-    /// reach another's) and the key. The no-op rule applies per partition, so the *same*
-    /// commitment written into a different one is a real state change rather than a revert.
-    #[test]
-    fn heads_are_isolated_per_namespace_and_key() -> eyre::Result<()> {
+    fn namespaces_are_isolated() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             let (alice, bob) = (Address::random(), Address::random());
-            let (key_a, key_b) = (B256::random(), B256::random());
-            let commitment = B256::repeat_byte(0x77);
+            append_all(&mut anchoring, alice, 1, 3)?;
+            append_all(&mut anchoring, bob, 1, 1)?;
 
-            anchoring.anchor(alice, anchor_call(key_a, commitment, b""))?;
-            // Neither a different namespace nor a different key collides with Alice's head.
-            anchoring.anchor(bob, anchor_call(key_a, commitment, b""))?;
-            anchoring.anchor(alice, anchor_call(key_b, commitment, b""))?;
-
-            for (ns, key) in [(alice, key_a), (bob, key_a), (alice, key_b)] {
-                assert_eq!(latest_of(&anchoring, ns, key)?, commitment);
-            }
-            assert_eq!(latest_of(&anchoring, bob, key_b)?, B256::ZERO);
-            assert_eq!(anchoring.emitted_events().len(), 3);
+            assert_eq!(root_of(&mut anchoring, alice)?, ROOTS[2]);
+            assert_eq!(root_of(&mut anchoring, bob)?, ROOTS[0]);
+            assert_eq!(anchoring.emitted_events().len(), 4);
             Ok(())
         })
     }
