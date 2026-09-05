@@ -222,6 +222,7 @@ impl Mmr {
 mod tests {
     use super::*;
     use alloy::primitives::b256;
+    use proptest::prelude::*;
 
     fn c(i: u64) -> B256 {
         B256::from(U256::from(i))
@@ -246,6 +247,18 @@ mod tests {
         b256!("0x7d75dea0b9798ddaa25f8a0d0e6222784f6ad299617a9128e7d75af3bf5eb81e"),
         b256!("0xc60e652673b4bff570b066c5513bf939b9a69b21c5ad6802f3579166b660c2c2"),
     ];
+
+    /// Root of a perfect tree over the given leaf hashes.
+    fn root_of_leaves(leaves: &[B256]) -> B256 {
+        let mut nodes = leaves.to_vec();
+        while nodes.len() > 1 {
+            nodes = nodes
+                .chunks(2)
+                .map(|pair| hash_merge(pair[0], pair[1]))
+                .collect();
+        }
+        nodes[0]
+    }
 
     /// Root of a perfect tree over commitments `from..from+size`.
     fn perfect(from: u64, size: u64) -> B256 {
@@ -283,6 +296,46 @@ mod tests {
                     "aligned_at({count}, {size}) must match `leafCount % 2^height = 0`"
                 );
             }
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn sequential_appends_preserve_invariants(
+            leaves in prop::collection::vec(any::<[u8; 32]>().prop_map(B256::from), 0..64),
+        ) {
+            let mut mmr = Mmr::empty();
+            for leaf in leaves {
+                mmr.append_leaf(leaf).unwrap();
+                prop_assert_eq!(mmr.peaks.len(), mmr.leaf_count.count_ones());
+                prop_assert_eq!(mmr.root(), bag(&mmr.peaks));
+            }
+        }
+
+        #[test]
+        fn aligned_batch_matches_sequential_appends(
+            leaves in prop::collection::vec(any::<[u8; 32]>().prop_map(B256::from), 0..128),
+        ) {
+            let mut sequential = Mmr::empty();
+            for &leaf in &leaves {
+                sequential.append_leaf(leaf).unwrap();
+            }
+
+            let mut chunks = Vec::new();
+            let mut offset = 0usize;
+            let mut remaining = leaves.len();
+            while remaining > 0 {
+                let height = remaining.ilog2() as usize;
+                let size = 1usize << height;
+                chunks.push((height as u8, root_of_leaves(&leaves[offset..offset + size])));
+                offset += size;
+                remaining -= size;
+            }
+
+            let mut batched = Mmr::empty();
+            batched.append_peaks(&chunks).unwrap();
+            prop_assert_eq!(batched.clone(), sequential.clone());
+            prop_assert_eq!(batched.root(), sequential.root());
         }
     }
 

@@ -31,7 +31,7 @@ impl Precompile for Anchoring {
 mod tests {
     use super::*;
     use crate::{
-        anchoring::{bag, hash_leaf},
+        anchoring::{bag, hash_leaf, hash_merge},
         dispatch::StaticCallNotAllowed,
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
@@ -40,6 +40,7 @@ mod tests {
         primitives::{B256, Bytes, U256},
         sol_types::{SolCall, SolError, SolInterface, SolValue},
     };
+    use proptest::prelude::*;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{
         AnchoringError, IAnchoring::IAnchoringCalls, UnknownFunctionSelector,
@@ -88,6 +89,90 @@ mod tests {
 
     fn root_call(namespace: Address) -> Vec<u8> {
         IAnchoring::rootCall { namespace }.abi_encode()
+    }
+
+    fn root_of_leaves(leaves: &[B256]) -> B256 {
+        let mut nodes = leaves.to_vec();
+        while nodes.len() > 1 {
+            nodes = nodes
+                .chunks(2)
+                .map(|pair| hash_merge(pair[0], pair[1]))
+                .collect();
+        }
+        nodes[0]
+    }
+
+    /// Builds the aligned chunks for appending `commitments` from an empty MMR.
+    fn chunks_from_commitments(commitments: &[B256]) -> Vec<IAnchoring::Chunk> {
+        let leaves: Vec<_> = commitments.iter().copied().map(hash_leaf).collect();
+        let mut chunks = Vec::new();
+        let mut offset = 0usize;
+        let mut remaining = leaves.len();
+        while remaining > 0 {
+            let height = remaining.ilog2() as usize;
+            let size = 1usize << height;
+            chunks.push(IAnchoring::Chunk {
+                root: root_of_leaves(&leaves[offset..offset + size]),
+                height: height as u8,
+            });
+            offset += size;
+            remaining -= size;
+        }
+        chunks
+    }
+
+    proptest! {
+        #[test]
+        fn append_leaves_calldata_roundtrips(
+            chunks in prop::collection::vec((any::<[u8; 32]>(), 0u8..=8), 0..32),
+            metadata in prop::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let chunks: Vec<_> = chunks
+                .into_iter()
+                .map(|(root, height)| IAnchoring::Chunk {
+                    root: B256::from(root),
+                    height,
+                })
+                .collect();
+            let call = IAnchoring::appendLeavesCall {
+                chunks: chunks.clone(),
+                metadata: Bytes::from(metadata),
+            };
+            let decoded = IAnchoring::appendLeavesCall::abi_decode(&call.abi_encode()).unwrap();
+            prop_assert_eq!(decoded.chunks, chunks);
+            prop_assert_eq!(decoded.metadata, call.metadata);
+        }
+
+        #[test]
+        fn append_leaves_via_abi_matches_sequential_appends(
+            commitments in prop::collection::vec(any::<[u8; 32]>(), 1..32),
+        ) {
+            let commitments: Vec<_> = commitments.into_iter().map(B256::from).collect();
+            let chunks = chunks_from_commitments(&commitments);
+
+            let sequential_root = with_anchoring(|mut anchoring| {
+                let sender = Address::random();
+                let mut root = B256::ZERO;
+                for commitment in &commitments {
+                    let output = anchoring.call(&leaf(*commitment), sender)?;
+                    assert!(output.is_success());
+                    root = IAnchoring::appendLeafCall::abi_decode_returns(&output.bytes)?;
+                }
+                Ok(root)
+            })
+            .unwrap();
+
+            let batch_root = with_anchoring(|mut anchoring| {
+                let output = anchoring.call(&leaves(chunks), Address::random())?;
+                assert!(output.is_success());
+                Ok(IAnchoring::appendLeavesCall::abi_decode_returns(
+                    &output.bytes,
+                )?)
+            })
+            .unwrap();
+
+            prop_assert_eq!(sequential_root, batch_root);
+        }
     }
 
     #[test]
