@@ -10,8 +10,15 @@
 //! Inherited from the `x/anchoring` precompile at the same address but not ABI-compatible with
 //! it. Its records and registries become leaves a wrapper contract shapes and an indexer reads
 //! back out of the log; its roles have no successor here at all.
+//!
+//! The append algorithm itself lives in [`mmr`] and is pure: no storage, ABI structs, events,
+//! or gas. This module is the EVM/ABI boundary — it loads a [`Mmr`] from EVM slots, runs the
+//! pure operations, persists the result, and maps ABI calls/events.
 
 pub mod dispatch;
+pub mod mmr;
+
+pub use mmr::{Mmr, MmrError, bag, hash_leaf, hash_merge};
 
 use crate::{
     ANCHORING_ADDRESS,
@@ -31,26 +38,6 @@ const DOMAIN_MMR: u8 = 0x01;
 /// that grows with the tree — each merge, and each step of bagging the peaks; the one leaf
 /// hash a call makes rides with the calldata it came in on.
 const HASH_COST: u64 = 48;
-
-/// `keccak256("leaf" ‖ commitment)`.
-pub fn hash_leaf(commitment: B256) -> B256 {
-    keccak256([b"leaf" as &[u8], commitment.as_slice()].concat())
-}
-
-/// `keccak256("merge" ‖ left ‖ right)`.
-pub fn hash_merge(left: B256, right: B256) -> B256 {
-    keccak256([b"merge" as &[u8], left.as_slice(), right.as_slice()].concat())
-}
-
-/// The peaks bagged from the highest down; zero when there are none.
-pub fn bag(peaks: &[B256]) -> B256 {
-    let Some((first, rest)) = peaks.split_first() else {
-        return B256::ZERO;
-    };
-    rest.iter().fold(*first, |acc, peak| {
-        keccak256([b"bag" as &[u8], acc.as_slice(), peak.as_slice()].concat())
-    })
-}
 
 /// Where `namespace`'s MMR lives:
 ///
@@ -78,13 +65,6 @@ fn peak_slot(base: U256, height: usize) -> Slot<B256> {
     Slot::new(base.wrapping_add(U256::from(1 + height)), ANCHORING_ADDRESS)
 }
 
-/// One namespace's MMR: the leaf count, and the live peaks highest first — one per set bit
-/// of the count, which is what says the height each sits at.
-struct Mmr {
-    count: U256,
-    peaks: Vec<B256>,
-}
-
 /// Caller-partitioned MMR. Its storage is derived rather than declared, so it has no fields
 /// of its own — see [`base`] for the layout.
 #[contract(addr = ANCHORING_ADDRESS)]
@@ -100,12 +80,14 @@ impl Anchoring {
     /// any other precompile storage.
     fn open(&self, base: U256) -> Result<Mmr> {
         let count = count_slot(base).read()?;
+        // The pure accumulator stores peaks by increasing height, matching the Lean spec.
+        // The EVM slot layout already stores each live peak at its own height; walking the
+        // count's set bits in ascending order gives the spec's ordering for free.
         let peaks = (0..256)
-            .rev()
             .filter(|height| count.bit(*height))
             .map(|height| peak_slot(base, height).read())
-            .collect::<Result<_>>()?;
-        Ok(Mmr { count, peaks })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Mmr::from_parts(count, peaks))
     }
 
     /// The root over `peaks`, charged for the merges bagging them takes: one per peak after
@@ -113,21 +95,24 @@ impl Anchoring {
     fn bagged(&mut self, peaks: &[B256]) -> Result<B256> {
         let merges = peaks.len().saturating_sub(1) as u64;
         self.storage.deduct_gas(HASH_COST * merges)?;
-        Ok(bag(peaks))
+        Ok(bag(peaks.iter()))
     }
 
     /// Returns the root of `namespace`'s MMR, or zero if nothing was ever appended.
     pub fn root(&mut self, call: IAnchoring::rootCall) -> Result<B256> {
         let mmr = self.open(base(call.namespace))?;
-        self.bagged(&mmr.peaks)
+        let merges = mmr.peaks_newest_first().len().saturating_sub(1) as u64;
+        self.storage.deduct_gas(HASH_COST * merges)?;
+        Ok(mmr.root())
     }
 
     /// Returns the leaf count and the peaks of `namespace`'s MMR.
     pub fn state(&self, call: IAnchoring::stateCall) -> Result<IAnchoring::stateReturn> {
         let mmr = self.open(base(call.namespace))?;
+        let count = mmr.leaf_count();
         Ok(IAnchoring::stateReturn {
-            count: mmr.count,
-            peaks: mmr.peaks,
+            count,
+            peaks: mmr.into_peaks_highest_first(),
         })
     }
 
@@ -139,17 +124,25 @@ impl Anchoring {
     ) -> Result<B256> {
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
-        let first = mmr.count;
+        let first = mmr.leaf_count();
 
-        self.push(base, &mut mmr, 0, hash_leaf(call.commitment))?;
-        let root = self.close(base, &mmr)?;
+        let outcome = mmr
+            .append_leaf_tracked(hash_leaf(call.commitment))
+            .map_err(mmr_error)?;
+        self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
+        peak_slot(base, outcome.height).write(outcome.peak)?;
+
+        let count = mmr.leaf_count();
+        let peaks = mmr.into_peaks_highest_first();
+        let root = self.bagged(&peaks)?;
+        count_slot(base).write(count)?;
 
         self.emit_event(AnchoringEvent::leaf_appended(
             msg_sender,
             first,
             call.commitment,
             root,
-            mmr.peaks,
+            peaks,
             call.metadata,
         ))?;
         Ok(root)
@@ -176,68 +169,48 @@ impl Anchoring {
         if call.chunkRoots.contains(&B256::ZERO) {
             return Err(AnchoringError::zero_chunk_root().into());
         }
+
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
-        let first = mmr.count;
+        let first = mmr.leaf_count();
 
-        for (chunk, height) in call.chunkRoots.iter().zip(&call.chunkHeights) {
-            self.push(base, &mut mmr, *height, *chunk)?;
+        // Each push reports exactly the slot it lands in. A peak merged away by a later
+        // push is left stale in its slot; the count's bits no longer name it.
+        //
+        // If a later chunk turns out to be misaligned, earlier peak slots may already be
+        // written; the EVM journal reverts the whole precompile frame on the returned error.
+        for (root, height) in call.chunkRoots.iter().zip(&call.chunkHeights) {
+            let outcome = mmr.append_peak_tracked(*height, *root).map_err(mmr_error)?;
+            self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
+            peak_slot(base, outcome.height).write(outcome.peak)?;
         }
-        let root = self.close(base, &mmr)?;
+
+        let count = mmr.leaf_count();
+        let peaks = mmr.into_peaks_highest_first();
+        let root = self.bagged(&peaks)?;
+        count_slot(base).write(count)?;
 
         self.emit_event(AnchoringEvent::leaves_appended(
             msg_sender,
             first,
-            mmr.count,
+            count,
             call.chunkRoots,
             call.chunkHeights,
             root,
-            mmr.peaks,
+            peaks,
             call.metadata,
         ))?;
         Ok(root)
     }
+}
 
-    /// Merges `node`, a perfect subtree of `height`, into `mmr` at the low end, carrying
-    /// through every peak of consecutive height, and stores it where it lands.
-    ///
-    /// The peaks it merged are left in their slots, stale — the count no longer names them —
-    /// which is what keeps a height from paying state creation more than once.
-    ///
-    /// # Errors
-    /// - `ChunkNotAligned` — `mmr` holds a count that is not a multiple of the chunk's size
-    fn push(&mut self, base: U256, mmr: &mut Mmr, height: u8, node: B256) -> Result<()> {
-        let size = U256::ONE << usize::from(height);
-        if mmr.count & (size - U256::ONE) != U256::ZERO {
-            return Err(AnchoringError::chunk_not_aligned(mmr.count, U256::from(height)).into());
+/// Maps a pure accumulator error to the precompile's top-level error type.
+fn mmr_error(err: MmrError) -> TempoPrecompileError {
+    match err {
+        MmrError::ChunkNotAligned { leaf_count, height } => {
+            AnchoringError::chunk_not_aligned(leaf_count, U256::from(height)).into()
         }
-
-        // The set bits from `height` up are the peaks below this chunk, and the alignment
-        // check says there are none under it — so each is the lowest peak, at the tail.
-        let (mut node, mut height) = (node, usize::from(height));
-        while mmr.count.bit(height) {
-            let peak = mmr
-                .peaks
-                .pop()
-                .ok_or_else(TempoPrecompileError::under_overflow)?;
-            self.storage.deduct_gas(HASH_COST)?;
-            node = hash_merge(peak, node);
-            height += 1;
-        }
-
-        peak_slot(base, height).write(node)?;
-        mmr.peaks.push(node);
-        mmr.count = mmr
-            .count
-            .checked_add(size)
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        Ok(())
-    }
-
-    /// Stores the new count and bags the live peaks into the root.
-    fn close(&mut self, base: U256, mmr: &Mmr) -> Result<B256> {
-        count_slot(base).write(mmr.count)?;
-        self.bagged(&mmr.peaks)
+        MmrError::CountOverflow => TempoPrecompileError::under_overflow(),
     }
 }
 
@@ -432,7 +405,7 @@ mod tests {
                 let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
                 assert_eq!(count, U256::from(i));
                 assert_eq!(peaks.len(), i.count_ones() as usize);
-                assert_eq!(bag(&peaks), root, "the peaks bag to the root");
+                assert_eq!(bag(peaks.iter()), root, "the peaks bag to the root");
             }
             Ok(())
         })
@@ -510,6 +483,42 @@ mod tests {
                 AnchoringError::chunk_not_aligned(U256::from(5), U256::from(1)).into()
             );
             assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
+            assert!(anchoring.emitted_events().is_empty());
+            Ok(())
+        })
+    }
+
+    /// A later chunk failing alignment leaves partial writes when calling the in-memory API
+    /// directly, but an outer EVM journal snapshot reverts the whole frame.  Simulate that
+    /// snapshot here with an explicit checkpoint.
+    #[test]
+    fn a_later_misaligned_chunk_is_reverted_by_a_snapshot() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            append_all(&mut anchoring, PINNED_NS, 1, 5)?;
+            anchoring.clear_emitted_events();
+            let before = root_of(&mut anchoring, PINNED_NS)?;
+            let (before_count, before_peaks) = state_of(&anchoring, PINNED_NS)?;
+
+            let err = {
+                let mut ctx = StorageCtx;
+                let _guard = ctx.checkpoint();
+                anchoring
+                    .append_leaves(
+                        PINNED_NS,
+                        leaves_call(&[(6, 1, 0), (7, 2, 1), (9, 2, 1), (11, 4, 2)]),
+                    )
+                    .unwrap_err()
+            };
+            assert_eq!(
+                err,
+                AnchoringError::chunk_not_aligned(U256::from(10), U256::from(2)).into()
+            );
+
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
+            assert_eq!(
+                state_of(&anchoring, PINNED_NS)?,
+                (before_count, before_peaks)
+            );
             assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
