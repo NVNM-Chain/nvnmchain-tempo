@@ -153,7 +153,6 @@ impl Anchoring {
     /// Appends a batch of aligned perfect subtrees to `msg_sender`'s MMR.
     ///
     /// # Errors
-    /// - `EmptyBatch` — no chunks
     /// - `ZeroChunkRoot` — a zero chunk root, which nothing hashes to
     /// - `ChunkNotAligned` — a chunk would land at a count that is not a multiple of its size
     pub fn append_leaves(
@@ -162,7 +161,8 @@ impl Anchoring {
         call: IAnchoring::appendLeavesCall,
     ) -> Result<B256> {
         if call.chunks.is_empty() {
-            return Err(AnchoringError::empty_batch().into());
+            let mmr = self.open(base(msg_sender))?;
+            return self.bagged(&mmr.peaks);
         }
         if call.chunks.iter().any(|chunk| chunk.root.is_zero()) {
             return Err(AnchoringError::zero_chunk_root().into());
@@ -525,18 +525,19 @@ mod tests {
         })
     }
 
-    /// The two shapes that still say nothing: no chunks would change nothing but the log,
-    /// and a zero chunk root would read back as an empty tree's.
+    /// An empty batch is a no-op returning the current root; a zero chunk root is still
+    /// refused because nothing hashes to it.
     #[test]
-    fn an_empty_batch_and_a_zero_chunk_root_are_refused() -> eyre::Result<()> {
+    fn empty_batch_is_a_noop_and_zero_chunk_root_is_refused() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             append_all(&mut anchoring, PINNED_NS, 1, 2)?;
             anchoring.clear_emitted_events();
 
-            let err = anchoring
-                .append_leaves(PINNED_NS, leaves_call(&[]))
-                .unwrap_err();
-            assert_eq!(err, AnchoringError::empty_batch().into());
+            let root = anchoring.append_leaves(PINNED_NS, leaves_call(&[]))?;
+            assert_eq!(root, ROOTS[1], "empty batch returns current root");
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[1], "unchanged");
+            assert_eq!(state_of(&anchoring, PINNED_NS)?.0, U256::from(2));
+            assert!(anchoring.emitted_events().is_empty());
 
             let mut call = leaves_call(&[(3, 1, 0)]);
             call.chunks[0].root = B256::ZERO;

@@ -28,7 +28,8 @@ crate::sol! {
 
         /// Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk of
         /// height `h` merges only when the count is a multiple of `2^h`, which is what makes
-        /// the batch reach the root the leaves reach one by one.
+        /// the batch reach the root the leaves reach one by one.  An empty batch is a no-op
+        /// that returns the current root without changing state.
         function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external returns (bytes32 root);
 
         /// The root of `namespace`'s MMR, or zero if nothing was ever appended.
@@ -45,8 +46,6 @@ crate::sol! {
 
         /// A chunk of `height` at `count`, which is not a multiple of its size.
         error ChunkNotAligned(uint256 count, uint256 height);
-        /// `appendLeaves` was given no chunks.
-        error EmptyBatch();
         /// A zero chunk root, which nothing hashes to.
         error ZeroChunkRoot();
     }
