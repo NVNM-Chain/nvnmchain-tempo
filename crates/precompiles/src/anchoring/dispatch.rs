@@ -177,7 +177,10 @@ mod tests {
         with_static_anchoring(|mut anchoring| {
             let sender = Address::random();
 
-            for calldata in [leaf(B256::repeat_byte(0xef)), leaves(vec![], vec![])] {
+            for calldata in [
+                leaf(B256::repeat_byte(0xef)),
+                leaves(vec![B256::repeat_byte(0xef)], vec![0]),
+            ] {
                 let output = anchoring.call(&calldata, sender)?;
                 assert!(output.is_revert());
                 assert!(StaticCallNotAllowed::abi_decode(&output.bytes).is_ok());

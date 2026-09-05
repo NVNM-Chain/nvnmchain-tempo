@@ -159,6 +159,8 @@ impl Anchoring {
     ///
     /// # Errors
     /// - `ChunksMismatch` — the roots and heights differ in length
+    /// - `EmptyBatch` — no chunks
+    /// - `ZeroChunkRoot` — a zero chunk root, which nothing hashes to
     /// - `ChunkNotAligned` — a chunk would land at a count that is not a multiple of its size
     pub fn append_leaves(
         &mut self,
@@ -167,6 +169,12 @@ impl Anchoring {
     ) -> Result<B256> {
         if call.chunkRoots.len() != call.chunkHeights.len() {
             return Err(AnchoringError::chunks_mismatch().into());
+        }
+        if call.chunkRoots.is_empty() {
+            return Err(AnchoringError::empty_batch().into());
+        }
+        if call.chunkRoots.contains(&B256::ZERO) {
+            return Err(AnchoringError::zero_chunk_root().into());
         }
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
@@ -514,6 +522,30 @@ mod tests {
             call.chunkHeights.clear();
             let err = anchoring.append_leaves(PINNED_NS, call).unwrap_err();
             assert_eq!(err, AnchoringError::chunks_mismatch().into());
+            Ok(())
+        })
+    }
+
+    /// The two shapes that pass the length check and still say nothing: no chunks would
+    /// change nothing but the log, and a zero chunk root would read back as an empty tree's.
+    #[test]
+    fn an_empty_batch_and_a_zero_chunk_root_are_refused() -> eyre::Result<()> {
+        with_anchoring(|mut anchoring| {
+            append_all(&mut anchoring, PINNED_NS, 1, 2)?;
+            anchoring.clear_emitted_events();
+
+            let err = anchoring
+                .append_leaves(PINNED_NS, leaves_call(&[]))
+                .unwrap_err();
+            assert_eq!(err, AnchoringError::empty_batch().into());
+
+            let mut call = leaves_call(&[(3, 1, 0)]);
+            call.chunkRoots[0] = B256::ZERO;
+            let err = anchoring.append_leaves(PINNED_NS, call).unwrap_err();
+            assert_eq!(err, AnchoringError::zero_chunk_root().into());
+
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[1], "untouched");
+            assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
     }

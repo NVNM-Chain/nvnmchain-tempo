@@ -41,5 +41,9 @@ crate::sol! {
         error ChunkNotAligned(uint256 count, uint256 height);
         /// `chunkRoots` and `chunkHeights` differ in length.
         error ChunksMismatch();
+        /// `appendLeaves` was given no chunks.
+        error EmptyBatch();
+        /// A zero chunk root, which nothing hashes to.
+        error ZeroChunkRoot();
     }
 }
