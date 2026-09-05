@@ -3,8 +3,9 @@
 //! This module mirrors the minimal MMR from [lean-mmr](https://github.com/yihuang/lean-mmr):
 //!
 //! * an accumulator stores only `leaf_count` and `peaks`;
-//! * `peaks` are ordered by increasing height, i.e. newest/rightmost first, so the
-//!   smallest live peak is at the front;
+//! * `peaks` are stored highest-first (oldest/leftmost first) so a `Vec` can use O(1)
+//!   `push`/`pop` on the end where appends and carries happen; this is the reverse of
+//!   Lean's `Acc.peaks` ordering but the same carry-merge algorithm;
 //! * appending a subtree of `height` is the binary carry-merge
 //!   `mergeCarry (trailingOnes (leaf_count / 2^height))`;
 //! * the aligned precondition (`leaf_count % 2^height = 0`) is what makes a push the
@@ -28,17 +29,22 @@ pub fn hash_merge(left: B256, right: B256) -> B256 {
 }
 
 /// The peaks bagged from the highest down; zero when there are none.
-///
-/// Accepts any iterator of peak references, so callers can avoid materializing an
-/// ABI-order Vec and do not need to copy the peaks out of their backing storage.
-pub fn bag<'a>(peaks: impl IntoIterator<Item = &'a B256>) -> B256 {
-    let mut peaks = peaks.into_iter();
-    let Some(first) = peaks.next() else {
+pub fn bag(peaks: &[B256]) -> B256 {
+    let Some((first, rest)) = peaks.split_first() else {
         return B256::ZERO;
     };
-    peaks.fold(*first, |acc, peak| {
+    rest.iter().fold(*first, |acc, peak| {
         keccak256([b"bag" as &[u8], acc.as_slice(), peak.as_slice()].concat())
     })
+}
+
+/// Returns whether `leaf_count` is a multiple of subtree `size` (`2^height`).
+///
+/// This is the aligned condition from the Lean spec, `leaf_count % 2^height = 0`.  The
+/// bitmask form is equivalent because `size` is a power of two.
+#[inline]
+pub fn aligned_at(leaf_count: U256, size: U256) -> bool {
+    leaf_count & (size - U256::ONE) == U256::ZERO
 }
 
 /// Pure algorithm error.  These are deliberately separate from the ABI's `AnchoringError`
@@ -50,6 +56,8 @@ pub enum MmrError {
     ChunkNotAligned { leaf_count: U256, height: u8 },
     /// Adding the chunk would make the leaf count overflow `U256`.
     CountOverflow,
+    /// Internal invariant violation: the peak list did not contain a live peak.
+    InvalidState,
 }
 
 /// The slot write produced by one append: the peak that must be persisted at `height`.
@@ -68,14 +76,15 @@ pub struct AppendPeakOutcome {
 
 /// A minimal MMR accumulator.
 ///
-/// `peaks` are ordered by increasing height, matching `MMR.Acc` in the Lean
-/// formalization: the newest/rightmost peak is first and the oldest/leftmost peak is
-/// last.  This is the reverse of the ABI's `state()` ordering, which returns peaks
-/// highest first for proofs and Solidity convenience.
+/// `peaks` are ordered highest-first to match the ABI/event ordering and to let `Vec`
+/// append/carry with O(1) `push`/`pop`.  The Lean `MMR.Acc` uses the reverse order; the
+/// algorithm is otherwise identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mmr {
-    leaf_count: U256,
-    peaks: Vec<B256>,
+    /// The number of leaves appended so far.
+    pub leaf_count: U256,
+    /// Live peaks ordered highest-first.
+    pub peaks: Vec<B256>,
 }
 
 impl Default for Mmr {
@@ -93,54 +102,14 @@ impl Mmr {
         Self::default()
     }
 
-    /// Creates an MMR from stored state.
-    ///
-    /// `peaks` must already be ordered by increasing height (newest first).  The EVM
-    /// load path constructs this order from the count's set bits.
-    pub(crate) fn from_parts(leaf_count: U256, peaks: Vec<B256>) -> Self {
-        debug_assert_eq!(
-            peaks.len(),
-            leaf_count.count_ones(),
-            "live peak count must equal popcount(leaf_count)"
-        );
-        Self { leaf_count, peaks }
-    }
-
-    /// The number of leaves appended so far.
-    pub const fn leaf_count(&self) -> U256 {
-        self.leaf_count
-    }
-
-    /// Live peaks ordered by increasing height (newest/rightmost first).
-    pub fn peaks_newest_first(&self) -> &[B256] {
-        &self.peaks
-    }
-
-    /// Live peaks ordered highest first, the ABI `state()` and event ordering.
-    pub fn peaks_highest_first(&self) -> Vec<B256> {
-        self.peaks.iter().rev().copied().collect()
-    }
-
-    /// Consumes the MMR and returns its peaks highest first without cloning.
-    ///
-    /// This reverses the owned peak Vec in place.  It is intended for ABI/event
-    /// construction at the end of an EVM call, after no further pure operations run.
-    pub fn into_peaks_highest_first(mut self) -> Vec<B256> {
-        self.peaks.reverse();
-        self.peaks
-    }
-
     /// The canonical root: the live peaks bagged highest first; zero when empty.
-    ///
-    /// This iterates the internal slice in reverse instead of allocating an ABI-order Vec.
     pub fn root(&self) -> B256 {
-        bag(self.peaks.iter().rev())
+        bag(&self.peaks)
     }
 
     /// Whether a subtree of `height` is aligned with this accumulator.
     pub fn is_aligned(&self, height: u8) -> bool {
-        let size = U256::ONE << usize::from(height);
-        self.leaf_count & (size - U256::ONE) == U256::ZERO
+        aligned_at(self.leaf_count, U256::ONE << usize::from(height))
     }
 
     /// The `ValidChunk` predicate from the Lean spec: every chunk must be aligned at the
@@ -157,7 +126,7 @@ impl Mmr {
         let mut count = self.leaf_count;
         for &(height, _) in chunks {
             let size = U256::ONE << usize::from(height);
-            if count & (size - U256::ONE) != U256::ZERO {
+            if !aligned_at(count, size) {
                 return Err(MmrError::ChunkNotAligned {
                     leaf_count: count,
                     height,
@@ -200,7 +169,7 @@ impl Mmr {
         let height = usize::from(height);
         let size = U256::ONE << height;
 
-        if self.leaf_count & (size - U256::ONE) != U256::ZERO {
+        if !aligned_at(self.leaf_count, size) {
             return Err(MmrError::ChunkNotAligned {
                 leaf_count: self.leaf_count,
                 height: height as u8,
@@ -216,14 +185,14 @@ impl Mmr {
         let mut merges = 0;
         let mut carry_height = height;
         while self.leaf_count.bit(carry_height) {
-            // `peaks` is increasing-height, so the peak being absorbed is at the front.
-            let left = self.peaks.remove(0);
+            // `peaks` is highest-first, so the low peak being absorbed is at the end.
+            let left = self.peaks.pop().ok_or(MmrError::InvalidState)?;
             node = hash_merge(left, node);
             merges += 1;
             carry_height += 1;
         }
 
-        self.peaks.insert(0, node);
+        self.peaks.push(node);
         self.leaf_count = new_leaf_count;
         Ok(AppendPeakOutcome {
             merges,
@@ -291,10 +260,37 @@ mod tests {
     }
 
     #[test]
+    fn aligned_at_matches_the_lean_modulo_spec() {
+        let counts = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(2u64),
+            U256::from(3u64),
+            U256::from(4u64),
+            U256::from(5u64),
+            U256::from(7u64),
+            U256::from(8u64),
+            U256::from(13u64),
+            U256::from(255u64),
+            U256::from(256u64),
+        ];
+        for count in counts {
+            for height in 0..=8u8 {
+                let size = U256::ONE << usize::from(height);
+                assert_eq!(
+                    aligned_at(count, size),
+                    count % size == U256::ZERO,
+                    "aligned_at({count}, {size}) must match `leafCount % 2^height = 0`"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn empty_mmr_has_zero_root_and_accepts_any_alignment() {
         let mmr = Mmr::empty();
-        assert_eq!(mmr.leaf_count(), U256::ZERO);
-        assert!(mmr.peaks_newest_first().is_empty());
+        assert_eq!(mmr.leaf_count, U256::ZERO);
+        assert!(mmr.peaks.is_empty());
         assert_eq!(mmr.root(), B256::ZERO);
         assert!(mmr.is_aligned(0));
         assert!(mmr.is_aligned(1));
@@ -308,26 +304,21 @@ mod tests {
             mmr.append_leaf(hash_leaf(c(i))).unwrap();
             assert_eq!(mmr.root(), ROOTS[i as usize - 1]);
         }
-        assert_eq!(mmr.leaf_count(), U256::from(16));
+        assert_eq!(mmr.leaf_count, U256::from(16));
     }
 
     #[test]
-    fn peaks_are_kept_in_increasing_height_order() {
+    fn peaks_are_kept_in_highest_first_order() {
         let mut mmr = Mmr::empty();
         for i in 1..=5u64 {
             mmr.append_leaf(hash_leaf(c(i))).unwrap();
         }
 
-        // count 5 (0b101): live peaks are heights 0 and 2.
-        assert_eq!(mmr.leaf_count(), U256::from(5));
-        assert_eq!(mmr.peaks_newest_first().len(), 2);
-        assert_eq!(mmr.peaks_highest_first().len(), 2);
-        assert_eq!(mmr.peaks_highest_first()[0], perfect(1, 4));
-        assert_eq!(mmr.peaks_highest_first()[1], hash_leaf(c(5)));
-
-        // Peaks are increasing-height: height 0 first, then height 2.
-        assert_eq!(mmr.peaks_newest_first()[0], hash_leaf(c(5)));
-        assert_eq!(mmr.peaks_newest_first()[1], perfect(1, 4));
+        // count 5 (0b101): live peaks are heights 2 and 0, highest first.
+        assert_eq!(mmr.leaf_count, U256::from(5));
+        assert_eq!(mmr.peaks.len(), 2);
+        assert_eq!(mmr.peaks[0], perfect(1, 4));
+        assert_eq!(mmr.peaks[1], hash_leaf(c(5)));
     }
 
     #[test]
@@ -343,7 +334,7 @@ mod tests {
             merges, 0,
             "these aligned chunks are already perfect boundaries"
         );
-        assert_eq!(mmr.leaf_count(), U256::from(13));
+        assert_eq!(mmr.leaf_count, U256::from(13));
         assert_eq!(mmr.root(), ROOTS[12]);
     }
 
@@ -398,7 +389,7 @@ mod tests {
             }
         );
         // Non-atomic by design: callers clone first for all-or-nothing semantics.
-        assert_eq!(mmr.leaf_count(), U256::from(5));
+        assert_eq!(mmr.leaf_count, U256::from(5));
     }
 
     #[test]

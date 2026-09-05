@@ -118,7 +118,7 @@ mod tests {
             let output = anchoring.call(&leaf(B256::repeat_byte(0xab)), sender)?;
             assert!(output.is_success());
             let root = IAnchoring::appendLeafCall::abi_decode_returns(&output.bytes)?;
-            assert_eq!(root, bag([first].iter()), "a write returns the new root");
+            assert_eq!(root, bag(&[first]), "a write returns the new root");
 
             let output = anchoring.call(&root_call(sender), Address::random())?;
             assert!(output.is_success());
@@ -134,7 +134,7 @@ mod tests {
             )?;
             assert!(output.is_success());
             let root = IAnchoring::appendLeavesCall::abi_decode_returns(&output.bytes)?;
-            assert_ne!(root, bag([first].iter()));
+            assert_ne!(root, bag(&[first]));
 
             let output = anchoring.call(
                 &IAnchoring::stateCall { namespace: sender }.abi_encode(),
@@ -144,7 +144,7 @@ mod tests {
             let state = IAnchoring::stateCall::abi_decode_returns(&output.bytes)?;
             assert_eq!(state.count, U256::from(2));
             assert_eq!(state.peaks.len(), 1);
-            assert_eq!(bag(state.peaks.iter()), root);
+            assert_eq!(bag(&state.peaks), root);
             assert_eq!(anchoring.emitted_events().len(), 2);
             Ok(())
         })

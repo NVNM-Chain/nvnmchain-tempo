@@ -80,14 +80,17 @@ impl Anchoring {
     /// any other precompile storage.
     fn open(&self, base: U256) -> Result<Mmr> {
         let count = count_slot(base).read()?;
-        // The pure accumulator stores peaks by increasing height, matching the Lean spec.
-        // The EVM slot layout already stores each live peak at its own height; walking the
-        // count's set bits in ascending order gives the spec's ordering for free.
+        // The pure accumulator stores peaks highest-first to match ABI/event ordering and
+        // to let `Vec` use efficient `push`/`pop` for the carry merge.
         let peaks = (0..256)
+            .rev()
             .filter(|height| count.bit(*height))
             .map(|height| peak_slot(base, height).read())
             .collect::<Result<Vec<_>>>()?;
-        Ok(Mmr::from_parts(count, peaks))
+        Ok(Mmr {
+            leaf_count: count,
+            peaks,
+        })
     }
 
     /// The root over `peaks`, charged for the merges bagging them takes: one per peak after
@@ -95,13 +98,13 @@ impl Anchoring {
     fn bagged(&mut self, peaks: &[B256]) -> Result<B256> {
         let merges = peaks.len().saturating_sub(1) as u64;
         self.storage.deduct_gas(HASH_COST * merges)?;
-        Ok(bag(peaks.iter()))
+        Ok(bag(peaks))
     }
 
     /// Returns the root of `namespace`'s MMR, or zero if nothing was ever appended.
     pub fn root(&mut self, call: IAnchoring::rootCall) -> Result<B256> {
         let mmr = self.open(base(call.namespace))?;
-        let merges = mmr.peaks_newest_first().len().saturating_sub(1) as u64;
+        let merges = mmr.peaks.len().saturating_sub(1) as u64;
         self.storage.deduct_gas(HASH_COST * merges)?;
         Ok(mmr.root())
     }
@@ -109,10 +112,9 @@ impl Anchoring {
     /// Returns the leaf count and the peaks of `namespace`'s MMR.
     pub fn state(&self, call: IAnchoring::stateCall) -> Result<IAnchoring::stateReturn> {
         let mmr = self.open(base(call.namespace))?;
-        let count = mmr.leaf_count();
         Ok(IAnchoring::stateReturn {
-            count,
-            peaks: mmr.into_peaks_highest_first(),
+            count: mmr.leaf_count,
+            peaks: mmr.peaks,
         })
     }
 
@@ -124,7 +126,7 @@ impl Anchoring {
     ) -> Result<B256> {
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
-        let first = mmr.leaf_count();
+        let first = mmr.leaf_count;
 
         let outcome = mmr
             .append_leaf_tracked(hash_leaf(call.commitment))
@@ -132,8 +134,8 @@ impl Anchoring {
         self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
         peak_slot(base, outcome.height).write(outcome.peak)?;
 
-        let count = mmr.leaf_count();
-        let peaks = mmr.into_peaks_highest_first();
+        let count = mmr.leaf_count;
+        let peaks = mmr.peaks;
         let root = self.bagged(&peaks)?;
         count_slot(base).write(count)?;
 
@@ -172,7 +174,7 @@ impl Anchoring {
 
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
-        let first = mmr.leaf_count();
+        let first = mmr.leaf_count;
 
         // Each push reports exactly the slot it lands in. A peak merged away by a later
         // push is left stale in its slot; the count's bits no longer name it.
@@ -185,8 +187,8 @@ impl Anchoring {
             peak_slot(base, outcome.height).write(outcome.peak)?;
         }
 
-        let count = mmr.leaf_count();
-        let peaks = mmr.into_peaks_highest_first();
+        let count = mmr.leaf_count;
+        let peaks = mmr.peaks;
         let root = self.bagged(&peaks)?;
         count_slot(base).write(count)?;
 
@@ -210,7 +212,7 @@ fn mmr_error(err: MmrError) -> TempoPrecompileError {
         MmrError::ChunkNotAligned { leaf_count, height } => {
             AnchoringError::chunk_not_aligned(leaf_count, U256::from(height)).into()
         }
-        MmrError::CountOverflow => TempoPrecompileError::under_overflow(),
+        MmrError::CountOverflow | MmrError::InvalidState => TempoPrecompileError::under_overflow(),
     }
 }
 
@@ -405,7 +407,7 @@ mod tests {
                 let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
                 assert_eq!(count, U256::from(i));
                 assert_eq!(peaks.len(), i.count_ones() as usize);
-                assert_eq!(bag(peaks.iter()), root, "the peaks bag to the root");
+                assert_eq!(bag(&peaks), root, "the peaks bag to the root");
             }
             Ok(())
         })
