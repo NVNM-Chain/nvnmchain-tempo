@@ -39,10 +39,10 @@ crate::sol! {
         function state(address namespace) external view returns (uint256 count, bytes32[] memory peaks);
 
         /// One leaf landed at `index`.
-        event LeafAppended(address indexed namespace, uint256 indexed index, bytes32 commitment, bytes32 root, bytes32[] peaks, bytes metadata);
+        event LeafAppended(address indexed namespace, uint256 indexed index, bytes32 commitment, bytes32[] peaks, bytes metadata);
 
         /// A batch landed from `firstLeaf`, bringing the leaf count to `count`.
-        event LeavesAppended(address indexed namespace, uint256 indexed firstLeaf, uint256 count, Chunk[] chunks, bytes32 root, bytes32[] peaks, bytes metadata);
+        event LeavesAppended(address indexed namespace, uint256 indexed firstLeaf, uint256 count, Chunk[] chunks, bytes32[] peaks, bytes metadata);
 
         /// A chunk of `height` at `count`, which is not a multiple of its size.
         error ChunkNotAligned(uint256 count, uint256 height);

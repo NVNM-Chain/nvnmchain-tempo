@@ -143,7 +143,6 @@ impl Anchoring {
             msg_sender,
             first,
             call.commitment,
-            root,
             peaks,
             call.metadata,
         ))?;
@@ -195,7 +194,6 @@ impl Anchoring {
             first,
             count,
             call.chunks,
-            root,
             peaks,
             call.metadata,
         ))?;
@@ -330,13 +328,13 @@ mod tests {
         );
         assert_eq!(
             IAnchoring::LeafAppended::SIGNATURE_HASH,
-            b256!("0x299ee3fc8eecbb10ce273b5329c6e4f095c550dc1bc7e1756bd6303da53cf12a"),
-            "LeafAppended(address,uint256,bytes32,bytes32,bytes32[],bytes)"
+            b256!("0x43a24f34ff55c61c25ca8f226ce1e940c9bc4ca4ef98253d9780a3cf29aa2262"),
+            "LeafAppended(address,uint256,bytes32,bytes32[],bytes)"
         );
         assert_eq!(
             IAnchoring::LeavesAppended::SIGNATURE_HASH,
-            b256!("0x3bac4ecae54059e1cd9ba1633985f8803565604f12206822dc33a123659a5808"),
-            "LeavesAppended(address,uint256,uint256,(bytes32,uint8)[],bytes32,bytes32[],bytes)"
+            b256!("0xa643a7916be4114a8d4f887b0606856c1f49b02a0a4374c775283987c1e12c2c"),
+            "LeavesAppended(address,uint256,uint256,(bytes32,uint8)[],bytes32[],bytes)"
         );
         assert_eq!(
             ANCHORING_ADDRESS,
@@ -571,7 +569,6 @@ mod tests {
                 PINNED_NS,
                 U256::from(5),
                 c(6),
-                ROOTS[5],
                 peaks,
                 Bytes::from_static(b"provenance"),
             )]);
@@ -588,7 +585,6 @@ mod tests {
                 U256::from(6),
                 U256::from(13),
                 chunks,
-                ROOTS[12],
                 peaks,
                 Bytes::new(),
             )]);
