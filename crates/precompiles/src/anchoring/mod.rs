@@ -11,14 +11,15 @@
 //! it. Its records and registries become leaves a wrapper contract shapes and an indexer reads
 //! back out of the log; its roles have no successor here at all.
 //!
-//! The append algorithm itself lives in [`mmr`] and is pure: no storage, ABI structs, events,
-//! or gas. This module is the EVM/ABI boundary — it loads a [`Mmr`] from EVM slots, runs the
-//! pure operations, persists the result, and maps ABI calls/events.
+//! The arithmetic lives in [`mmr`], which knows nothing of storage, ABI, events or gas. This
+//! module is the boundary: it loads an [`Mmr`] from the slots, pushes, writes the one slot each
+//! push lands in, and maps calls and events.
 
 pub mod dispatch;
 pub mod mmr;
 
-pub use mmr::{Mmr, MmrError, bag, hash_leaf, hash_merge};
+use mmr::{Mmr, MmrError};
+pub use mmr::{bag, hash_leaf, hash_merge};
 
 use crate::{
     ANCHORING_ADDRESS,
@@ -80,17 +81,33 @@ impl Anchoring {
     /// any other precompile storage.
     fn open(&self, base: U256) -> Result<Mmr> {
         let count = count_slot(base).read()?;
-        // The pure accumulator stores peaks highest-first to match ABI/event ordering and
-        // to let `Vec` use efficient `push`/`pop` for the carry merge.
+        // Highest first, one per set bit of the count: the ABI's order, and the order a
+        // carry pops from.
         let peaks = (0..256)
             .rev()
             .filter(|height| count.bit(*height))
             .map(|height| peak_slot(base, height).read())
             .collect::<Result<Vec<_>>>()?;
+        debug_assert_eq!(peaks.len(), count.count_ones(), "a peak per set bit");
         Ok(Mmr {
             leaf_count: count,
             peaks,
         })
+    }
+
+    /// Pushes `node`, a perfect subtree of `height`, charging its merges and writing the one
+    /// slot it lands in. The peaks it merged stay in their slots, stale — the count no longer
+    /// names them — which is what keeps a height from paying state creation more than once.
+    fn push(&mut self, base: U256, mmr: &mut Mmr, height: u8, node: B256) -> Result<()> {
+        let pushed = mmr.push(height, node).map_err(mmr_error)?;
+        self.storage.deduct_gas(HASH_COST * pushed.merges as u64)?;
+        peak_slot(base, pushed.height).write(pushed.peak)
+    }
+
+    /// Stores the count and bags the live peaks into the root.
+    fn close(&mut self, base: U256, mmr: &Mmr) -> Result<B256> {
+        count_slot(base).write(mmr.leaf_count)?;
+        self.bagged(&mmr.peaks)
     }
 
     /// The root over `peaks`, charged for the merges bagging them takes: one per peak after
@@ -104,9 +121,7 @@ impl Anchoring {
     /// Returns the root of `namespace`'s MMR, or zero if nothing was ever appended.
     pub fn root(&mut self, call: IAnchoring::rootCall) -> Result<B256> {
         let mmr = self.open(base(call.namespace))?;
-        let merges = mmr.peaks.len().saturating_sub(1) as u64;
-        self.storage.deduct_gas(HASH_COST * merges)?;
-        Ok(mmr.root())
+        self.bagged(&mmr.peaks)
     }
 
     /// Returns the leaf count and the peaks of `namespace`'s MMR.
@@ -128,22 +143,14 @@ impl Anchoring {
         let mut mmr = self.open(base)?;
         let first = mmr.leaf_count;
 
-        let outcome = mmr
-            .append_leaf_tracked(hash_leaf(call.commitment))
-            .map_err(mmr_error)?;
-        self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
-        peak_slot(base, outcome.height).write(outcome.peak)?;
-
-        let count = mmr.leaf_count;
-        let peaks = mmr.peaks;
-        let root = self.bagged(&peaks)?;
-        count_slot(base).write(count)?;
+        self.push(base, &mut mmr, 0, hash_leaf(call.commitment))?;
+        let root = self.close(base, &mmr)?;
 
         self.emit_event(AnchoringEvent::leaf_appended(
             msg_sender,
             first,
             call.commitment,
-            peaks,
+            mmr.peaks,
             call.metadata,
         ))?;
         Ok(root)
@@ -171,43 +178,35 @@ impl Anchoring {
         let mut mmr = self.open(base)?;
         let first = mmr.leaf_count;
 
-        // Each push reports exactly the slot it lands in. A peak merged away by a later
-        // push is left stale in its slot; the count's bits no longer name it.
-        //
-        // If a later chunk turns out to be misaligned, earlier peak slots may already be
-        // written; the EVM journal reverts the whole precompile frame on the returned error.
+        // Checked before anything is written, so a refused batch touches no slot.
+        let heights: Vec<u8> = call.chunks.iter().map(|chunk| chunk.height).collect();
+        mmr.validate(&heights).map_err(mmr_error)?;
         for chunk in &call.chunks {
-            let outcome = mmr
-                .append_peak_tracked(chunk.height, chunk.root)
-                .map_err(mmr_error)?;
-            self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
-            peak_slot(base, outcome.height).write(outcome.peak)?;
+            self.push(base, &mut mmr, chunk.height, chunk.root)?;
         }
-
-        let count = mmr.leaf_count;
-        let peaks = mmr.peaks;
-        let root = self.bagged(&peaks)?;
-        count_slot(base).write(count)?;
+        let root = self.close(base, &mmr)?;
 
         self.emit_event(AnchoringEvent::leaves_appended(
             msg_sender,
             first,
-            count,
+            mmr.leaf_count,
             call.chunks,
-            peaks,
+            mmr.peaks,
             call.metadata,
         ))?;
         Ok(root)
     }
 }
 
-/// Maps a pure accumulator error to the precompile's top-level error type.
+/// The pure module's refusals as the precompile's errors.
 fn mmr_error(err: MmrError) -> TempoPrecompileError {
     match err {
         MmrError::ChunkNotAligned { leaf_count, height } => {
             AnchoringError::chunk_not_aligned(leaf_count, U256::from(height)).into()
         }
-        MmrError::CountOverflow | MmrError::InvalidState => TempoPrecompileError::under_overflow(),
+        // `open` builds a peak per set bit, so a missing one cannot happen; the count
+        // overflowing can, at 2^256 leaves.
+        MmrError::CountOverflow | MmrError::PeakMissing => TempoPrecompileError::under_overflow(),
     }
 }
 
@@ -219,40 +218,15 @@ mod tests {
         primitives::{Bytes, U256, address, b256},
         sol_types::{SolCall, SolEvent},
     };
+    use mmr::vectors::{ROOTS, c, perfect};
     use tempo_chainspec::hardfork::TempoHardfork;
 
     /// The namespace pinned by the reference vectors.
     const PINNED_NS: Address = address!("0x1111111111111111111111111111111111111111");
 
-    /// Roots computed independently, in Python with keccak, over the commitments
-    /// `bytes32(1)`, `bytes32(2)`, … appended in that order. The Solidity verifier's suite
-    /// pins the same sixteen, which is what keeps the two implementations agreeing.
-    const ROOTS: [B256; 16] = [
-        b256!("0x5786039c2502cb1b5ff9a9f0b0b6957bb8b3f6489d20080f677236b2dd590dcd"),
-        b256!("0x9950fe45570c3e4c9c0241de506d53ba63bb5b4ceb7b3c0032148e32f1ab3d9d"),
-        b256!("0x036e11a04c28d071bc9b3961be683ff7eac4aad9234b6a21904de44b952cb3c9"),
-        b256!("0x9a444d98cfab773b89efcfe3749342cd1b072e8f2276f9f822fb1e19edabb77b"),
-        b256!("0xbbd0ad9fcc22a20f7adc962f214aba7710aed4d06063e7d722d65d07920a269d"),
-        b256!("0x950d9243a18618ebce2f7906ead2e5c9cfe719359d7b8635cf52ee4995c53631"),
-        b256!("0x237757481f6015968d2dd6b7784aa544f822d29f6a520bfae222c79c16051c14"),
-        b256!("0x2a43055cc8a7bb9202beebc4603c13e920c9c7f7e3bf26ca5178aad751d5b29e"),
-        b256!("0x8948ab91036932c2798daf8808b183438f08a6acb56cae4fe3d0db2ff999fd11"),
-        b256!("0x0dcc0e544f9c3d0d78a0b030257eb964bc1756e786ede2c565c24817885bee6c"),
-        b256!("0xbbe8d27929385c3988405fe38bf7a82136581ef7ea7a2f71634d9785eddaf1d7"),
-        b256!("0xd3ebf5629b714dde40059d9dd0bb940d3748ead5953aa63d5d7cc867354b28fa"),
-        b256!("0xbc438a6c52d1d3f2abea81fdd299bdfb9c8961b03e2adbeeff075db74971b2ae"),
-        b256!("0xd41583f4d63289dafc25e7b5beaefe0f1e453fe2b9f0ba50cdfa96e27689c9fe"),
-        b256!("0x7d75dea0b9798ddaa25f8a0d0e6222784f6ad299617a9128e7d75af3bf5eb81e"),
-        b256!("0xc60e652673b4bff570b066c5513bf939b9a69b21c5ad6802f3579166b660c2c2"),
-    ];
-
     fn with_anchoring<T>(f: impl FnOnce(Anchoring) -> eyre::Result<T>) -> eyre::Result<T> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T10);
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
-    }
-
-    fn c(i: u64) -> B256 {
-        B256::from(U256::from(i))
     }
 
     fn root_of(anchoring: &mut Anchoring, namespace: Address) -> Result<B256> {
@@ -276,18 +250,6 @@ mod tests {
             )?;
         }
         Ok(())
-    }
-
-    /// The root of a perfect tree over commitments `from .. from+size`, as a caller cuts a batch.
-    fn perfect(from: u64, size: u64) -> B256 {
-        let mut nodes: Vec<B256> = (0..size).map(|i| hash_leaf(c(from + i))).collect();
-        while nodes.len() > 1 {
-            nodes = nodes
-                .chunks(2)
-                .map(|pair| hash_merge(pair[0], pair[1]))
-                .collect();
-        }
-        nodes[0]
     }
 
     fn leaves_call(chunks: &[(u64, u64, u8)]) -> IAnchoring::appendLeavesCall {
@@ -481,43 +443,23 @@ mod tests {
                 err,
                 AnchoringError::chunk_not_aligned(U256::from(5), U256::from(1)).into()
             );
-            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
-            assert!(anchoring.emitted_events().is_empty());
-            Ok(())
-        })
-    }
 
-    /// A later chunk failing alignment leaves partial writes when calling the in-memory API
-    /// directly, but an outer EVM journal snapshot reverts the whole frame.  Simulate that
-    /// snapshot here with an explicit checkpoint.
-    #[test]
-    fn a_later_misaligned_chunk_is_reverted_by_a_snapshot() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            append_all(&mut anchoring, PINNED_NS, 1, 5)?;
-            anchoring.clear_emitted_events();
-            let before = root_of(&mut anchoring, PINNED_NS)?;
-            let (before_count, before_peaks) = state_of(&anchoring, PINNED_NS)?;
-
-            let err = {
-                let mut ctx = StorageCtx;
-                let _guard = ctx.checkpoint();
-                anchoring
-                    .append_leaves(
-                        PINNED_NS,
-                        leaves_call(&[(6, 1, 0), (7, 2, 1), (9, 2, 1), (11, 4, 2)]),
-                    )
-                    .unwrap_err()
-            };
+            // A fourth chunk off the alignment refuses the batch before the first is
+            // written: the height-0 slot still holds the fifth leaf, not the sixth.
+            let err = anchoring
+                .append_leaves(
+                    PINNED_NS,
+                    leaves_call(&[(6, 1, 0), (7, 2, 1), (9, 2, 1), (11, 4, 2)]),
+                )
+                .unwrap_err();
             assert_eq!(
                 err,
                 AnchoringError::chunk_not_aligned(U256::from(10), U256::from(2)).into()
             );
+            let lowest = StorageCtx.sload(ANCHORING_ADDRESS, base(PINNED_NS) + U256::ONE)?;
+            assert_eq!(B256::from(lowest.to_be_bytes()), hash_leaf(c(5)));
 
             assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
-            assert_eq!(
-                state_of(&anchoring, PINNED_NS)?,
-                (before_count, before_peaks)
-            );
             assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })
