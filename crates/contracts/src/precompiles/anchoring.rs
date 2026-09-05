@@ -20,10 +20,16 @@ crate::sol! {
         /// Appends one leaf to the caller's MMR.
         function appendLeaf(bytes32 commitment, bytes calldata metadata) external returns (bytes32 root);
 
+        /// An aligned perfect subtree to append: its root and height.
+        struct Chunk {
+            bytes32 root;
+            uint8 height;
+        }
+
         /// Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk of
         /// height `h` merges only when the count is a multiple of `2^h`, which is what makes
         /// the batch reach the root the leaves reach one by one.
-        function appendLeaves(bytes32[] calldata chunkRoots, uint8[] calldata chunkHeights, bytes calldata metadata) external returns (bytes32 root);
+        function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external returns (bytes32 root);
 
         /// The root of `namespace`'s MMR, or zero if nothing was ever appended.
         function root(address namespace) external view returns (bytes32);
@@ -35,12 +41,10 @@ crate::sol! {
         event LeafAppended(address indexed namespace, uint256 indexed index, bytes32 commitment, bytes32 root, bytes32[] peaks, bytes metadata);
 
         /// A batch landed from `firstLeaf`, bringing the leaf count to `count`.
-        event LeavesAppended(address indexed namespace, uint256 indexed firstLeaf, uint256 count, bytes32[] chunkRoots, uint8[] chunkHeights, bytes32 root, bytes32[] peaks, bytes metadata);
+        event LeavesAppended(address indexed namespace, uint256 indexed firstLeaf, uint256 count, Chunk[] chunks, bytes32 root, bytes32[] peaks, bytes metadata);
 
         /// A chunk of `height` at `count`, which is not a multiple of its size.
         error ChunkNotAligned(uint256 count, uint256 height);
-        /// `chunkRoots` and `chunkHeights` differ in length.
-        error ChunksMismatch();
         /// `appendLeaves` was given no chunks.
         error EmptyBatch();
         /// A zero chunk root, which nothing hashes to.

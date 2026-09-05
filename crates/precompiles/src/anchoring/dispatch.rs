@@ -78,10 +78,9 @@ mod tests {
         .abi_encode()
     }
 
-    fn leaves(chunk_roots: Vec<B256>, chunk_heights: Vec<u8>) -> Vec<u8> {
+    fn leaves(chunks: Vec<IAnchoring::Chunk>) -> Vec<u8> {
         IAnchoring::appendLeavesCall {
-            chunkRoots: chunk_roots,
-            chunkHeights: chunk_heights,
+            chunks,
             metadata: Bytes::new(),
         }
         .abi_encode()
@@ -129,7 +128,10 @@ mod tests {
 
             // A batch on top of it: a second leaf, which merges with the first.
             let output = anchoring.call(
-                &leaves(vec![hash_leaf(B256::repeat_byte(0xcd))], vec![0]),
+                &leaves(vec![IAnchoring::Chunk {
+                    root: hash_leaf(B256::repeat_byte(0xcd)),
+                    height: 0,
+                }]),
                 sender,
             )?;
             assert!(output.is_success());
@@ -161,7 +163,13 @@ mod tests {
             );
 
             // A pair at count 1.
-            let output = anchoring.call(&leaves(vec![B256::repeat_byte(0xef)], vec![1]), sender)?;
+            let output = anchoring.call(
+                &leaves(vec![IAnchoring::Chunk {
+                    root: B256::repeat_byte(0xef),
+                    height: 1,
+                }]),
+                sender,
+            )?;
             assert!(output.is_revert());
             assert_eq!(
                 output.bytes,
@@ -179,7 +187,10 @@ mod tests {
 
             for calldata in [
                 leaf(B256::repeat_byte(0xef)),
-                leaves(vec![B256::repeat_byte(0xef)], vec![0]),
+                leaves(vec![IAnchoring::Chunk {
+                    root: B256::repeat_byte(0xef),
+                    height: 0,
+                }]),
             ] {
                 let output = anchoring.call(&calldata, sender)?;
                 assert!(output.is_revert());

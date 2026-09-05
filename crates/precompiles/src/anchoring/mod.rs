@@ -153,7 +153,6 @@ impl Anchoring {
     /// Appends a batch of aligned perfect subtrees to `msg_sender`'s MMR.
     ///
     /// # Errors
-    /// - `ChunksMismatch` — the roots and heights differ in length
     /// - `EmptyBatch` — no chunks
     /// - `ZeroChunkRoot` — a zero chunk root, which nothing hashes to
     /// - `ChunkNotAligned` — a chunk would land at a count that is not a multiple of its size
@@ -162,13 +161,10 @@ impl Anchoring {
         msg_sender: Address,
         call: IAnchoring::appendLeavesCall,
     ) -> Result<B256> {
-        if call.chunkRoots.len() != call.chunkHeights.len() {
-            return Err(AnchoringError::chunks_mismatch().into());
-        }
-        if call.chunkRoots.is_empty() {
+        if call.chunks.is_empty() {
             return Err(AnchoringError::empty_batch().into());
         }
-        if call.chunkRoots.contains(&B256::ZERO) {
+        if call.chunks.iter().any(|chunk| chunk.root.is_zero()) {
             return Err(AnchoringError::zero_chunk_root().into());
         }
 
@@ -181,8 +177,10 @@ impl Anchoring {
         //
         // If a later chunk turns out to be misaligned, earlier peak slots may already be
         // written; the EVM journal reverts the whole precompile frame on the returned error.
-        for (root, height) in call.chunkRoots.iter().zip(&call.chunkHeights) {
-            let outcome = mmr.append_peak_tracked(*height, *root).map_err(mmr_error)?;
+        for chunk in &call.chunks {
+            let outcome = mmr
+                .append_peak_tracked(chunk.height, chunk.root)
+                .map_err(mmr_error)?;
             self.storage.deduct_gas(HASH_COST * outcome.merges as u64)?;
             peak_slot(base, outcome.height).write(outcome.peak)?;
         }
@@ -196,8 +194,7 @@ impl Anchoring {
             msg_sender,
             first,
             count,
-            call.chunkRoots,
-            call.chunkHeights,
+            call.chunks,
             root,
             peaks,
             call.metadata,
@@ -297,11 +294,13 @@ mod tests {
 
     fn leaves_call(chunks: &[(u64, u64, u8)]) -> IAnchoring::appendLeavesCall {
         IAnchoring::appendLeavesCall {
-            chunkRoots: chunks
+            chunks: chunks
                 .iter()
-                .map(|(from, size, _)| perfect(*from, *size))
+                .map(|(from, size, height)| IAnchoring::Chunk {
+                    root: perfect(*from, *size),
+                    height: *height,
+                })
                 .collect(),
-            chunkHeights: chunks.iter().map(|(_, _, h)| *h).collect(),
             metadata: Bytes::new(),
         }
     }
@@ -316,8 +315,8 @@ mod tests {
         );
         assert_eq!(
             IAnchoring::appendLeavesCall::SELECTOR,
-            alloy::hex!("0x1afcfa4f"),
-            "appendLeaves(bytes32[],uint8[],bytes)"
+            alloy::hex!("0x7150c2c6"),
+            "appendLeaves((bytes32,uint8)[],bytes)"
         );
         assert_eq!(
             IAnchoring::rootCall::SELECTOR,
@@ -336,8 +335,8 @@ mod tests {
         );
         assert_eq!(
             IAnchoring::LeavesAppended::SIGNATURE_HASH,
-            b256!("0x07d3a61ef7a792265f84d9a96ef8168c654dd0d610d83034971ce6c68c30a378"),
-            "LeavesAppended(address,uint256,uint256,bytes32[],uint8[],bytes32,bytes32[],bytes)"
+            b256!("0x3bac4ecae54059e1cd9ba1633985f8803565604f12206822dc33a123659a5808"),
+            "LeavesAppended(address,uint256,uint256,(bytes32,uint8)[],bytes32,bytes32[],bytes)"
         );
         assert_eq!(
             ANCHORING_ADDRESS,
@@ -526,19 +525,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn mismatched_chunk_lists_are_refused() -> eyre::Result<()> {
-        with_anchoring(|mut anchoring| {
-            let mut call = leaves_call(&[(1, 1, 0)]);
-            call.chunkHeights.clear();
-            let err = anchoring.append_leaves(PINNED_NS, call).unwrap_err();
-            assert_eq!(err, AnchoringError::chunks_mismatch().into());
-            Ok(())
-        })
-    }
-
-    /// The two shapes that pass the length check and still say nothing: no chunks would
-    /// change nothing but the log, and a zero chunk root would read back as an empty tree's.
+    /// The two shapes that still say nothing: no chunks would change nothing but the log,
+    /// and a zero chunk root would read back as an empty tree's.
     #[test]
     fn an_empty_batch_and_a_zero_chunk_root_are_refused() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
@@ -551,7 +539,7 @@ mod tests {
             assert_eq!(err, AnchoringError::empty_batch().into());
 
             let mut call = leaves_call(&[(3, 1, 0)]);
-            call.chunkRoots[0] = B256::ZERO;
+            call.chunks[0].root = B256::ZERO;
             let err = anchoring.append_leaves(PINNED_NS, call).unwrap_err();
             assert_eq!(err, AnchoringError::zero_chunk_root().into());
 
@@ -590,7 +578,7 @@ mod tests {
 
             // Seven more, as [6,8) h1, [8,12) h2, [12,13) h0, to thirteen.
             let call = leaves_call(&[(7, 2, 1), (9, 4, 2), (13, 1, 0)]);
-            let (chunk_roots, chunk_heights) = (call.chunkRoots.clone(), call.chunkHeights.clone());
+            let chunks = call.chunks.clone();
             anchoring.append_leaves(PINNED_NS, call)?;
             let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
             assert_eq!(count, U256::from(13));
@@ -598,8 +586,7 @@ mod tests {
                 PINNED_NS,
                 U256::from(6),
                 U256::from(13),
-                chunk_roots,
-                chunk_heights,
+                chunks,
                 ROOTS[12],
                 peaks,
                 Bytes::new(),
