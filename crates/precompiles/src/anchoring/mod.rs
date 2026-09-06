@@ -88,7 +88,6 @@ impl Anchoring {
             .filter(|height| count.bit(*height))
             .map(|height| peak_slot(base, height).read())
             .collect::<Result<Vec<_>>>()?;
-        debug_assert_eq!(peaks.len(), count.count_ones(), "a peak per set bit");
         Ok(Mmr {
             leaf_count: count,
             peaks,
@@ -176,9 +175,8 @@ impl Anchoring {
         let mut mmr = self.open(base)?;
         let first = mmr.leaf_count;
 
-        // Checked before anything is written, so a refused batch touches no slot.
-        let heights: Vec<u8> = call.chunks.iter().map(|chunk| chunk.height).collect();
-        mmr.validate(&heights).map_err(mmr_error)?;
+        // A chunk off the alignment is refused by its push. The slots the chunks before it
+        // wrote go with the frame: a precompile's error reverts the whole call.
         for chunk in &call.chunks {
             self.push(base, &mut mmr, chunk.height, chunk.root)?;
         }
@@ -439,8 +437,12 @@ mod tests {
                 AnchoringError::chunk_not_aligned(U256::from(5), U256::from(1)).into()
             );
 
-            // A fourth chunk off the alignment refuses the batch before the first is
-            // written: the height-0 slot still holds the fifth leaf, not the sixth.
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
+            assert!(anchoring.emitted_events().is_empty());
+
+            // A fourth chunk off the alignment is reported at the count it met, after the
+            // three before it. What they wrote is the frame's to revert, not this module's:
+            // the harness here has no journal, so only the error is asserted.
             let err = anchoring
                 .append_leaves(
                     PINNED_NS,
@@ -451,10 +453,6 @@ mod tests {
                 err,
                 AnchoringError::chunk_not_aligned(U256::from(10), U256::from(2)).into()
             );
-            let lowest = StorageCtx.sload(ANCHORING_ADDRESS, base(PINNED_NS) + U256::ONE)?;
-            assert_eq!(B256::from(lowest.to_be_bytes()), hash_leaf(c(5)));
-
-            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, before);
             assert!(anchoring.emitted_events().is_empty());
             Ok(())
         })

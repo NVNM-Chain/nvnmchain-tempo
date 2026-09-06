@@ -81,15 +81,6 @@ impl Mmr {
         bag(&self.peaks)
     }
 
-    /// Whether every chunk of `heights`, in order, is aligned at the count it would see,
-    /// reporting the first that is not — so a batch is refused before anything is written.
-    pub fn validate(&self, heights: &[u8]) -> Result<(), MmrError> {
-        heights
-            .iter()
-            .try_fold(self.leaf_count, |count, height| advanced(count, *height))
-            .map(|_| ())
-    }
-
     /// Merges `node`, a perfect subtree of `height`, at the low end, carrying through every
     /// peak of consecutive height. A refused push changes nothing.
     pub fn push(&mut self, height: u8, node: B256) -> Result<Pushed, MmrError> {
@@ -199,10 +190,11 @@ mod tests {
 
     #[test]
     fn an_empty_mmr_has_a_zero_root_and_takes_any_height() {
-        let mmr = Mmr::default();
+        let mut mmr = Mmr::default();
         assert_eq!(mmr.root(), B256::ZERO);
-        assert!(mmr.validate(&[255]).is_ok());
-        assert!(mmr.validate(&[3, 2, 0]).is_ok());
+        let pushed = mmr.push(255, B256::repeat_byte(0xff)).unwrap();
+        assert_eq!((pushed.merges, pushed.height), (0, 255));
+        assert_eq!(mmr.leaf_count, U256::ONE << 255);
     }
 
     #[test]
@@ -253,7 +245,6 @@ mod tests {
             (2, perfect(9, 4)),
             (0, hash_leaf(c(13))),
         ];
-        assert!(mmr.validate(&[3, 2, 0]).is_ok());
         for (height, root) in chunks {
             assert_eq!(
                 mmr.push(height, root).unwrap().merges,
@@ -265,9 +256,8 @@ mod tests {
         assert_eq!(mmr.root(), ROOTS[12]);
     }
 
-    /// A pair at count 1 is off the alignment: refused by `validate` before anything is
-    /// pushed, and by `push` itself without moving the tree. In a batch, the first chunk
-    /// off it is the one reported, at the count it would have met.
+    /// A pair at count 1 is off the alignment: refused by `push` without moving the tree.
+    /// In a batch, the chunk off it is reported at the count it met.
     #[test]
     fn a_misaligned_chunk_is_refused_and_nothing_moves() {
         let mut mmr = Mmr::default();
@@ -277,18 +267,19 @@ mod tests {
             leaf_count: U256::ONE,
             height: 1,
         };
-
-        assert_eq!(mmr.validate(&[1]), Err(refused));
         assert_eq!(mmr.push(1, perfect(2, 2)).unwrap_err(), refused);
         assert_eq!(mmr, before);
 
+        // Counts 1, 2, 4, 6: the height-2 chunk meets 6.
+        for (height, root) in [(0, hash_leaf(c(2))), (1, perfect(3, 2)), (1, perfect(5, 2))] {
+            mmr.push(height, root).unwrap();
+        }
         assert_eq!(
-            mmr.validate(&[0, 1, 1, 2]),
-            Err(MmrError::ChunkNotAligned {
+            mmr.push(2, perfect(7, 4)).unwrap_err(),
+            MmrError::ChunkNotAligned {
                 leaf_count: U256::from(6),
                 height: 2
-            }),
-            "counts 1, 2, 4, 6: the height-2 chunk meets 6"
+            }
         );
     }
 
