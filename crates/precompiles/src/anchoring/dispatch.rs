@@ -31,7 +31,7 @@ impl Precompile for Anchoring {
 mod tests {
     use super::*;
     use crate::{
-        anchoring::{bag, hash_leaf, hash_merge},
+        anchoring::{bag, hash_leaf, mmr::vectors::cut},
         dispatch::StaticCallNotAllowed,
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
@@ -91,34 +91,13 @@ mod tests {
         IAnchoring::rootCall { namespace }.abi_encode()
     }
 
-    fn root_of_leaves(leaves: &[B256]) -> B256 {
-        let mut nodes = leaves.to_vec();
-        while nodes.len() > 1 {
-            nodes = nodes
-                .chunks(2)
-                .map(|pair| hash_merge(pair[0], pair[1]))
-                .collect();
-        }
-        nodes[0]
-    }
-
-    /// Builds the aligned chunks for appending `commitments` from an empty MMR.
+    /// The aligned chunks for appending `commitments` from an empty MMR.
     fn chunks_from_commitments(commitments: &[B256]) -> Vec<IAnchoring::Chunk> {
         let leaves: Vec<_> = commitments.iter().copied().map(hash_leaf).collect();
-        let mut chunks = Vec::new();
-        let mut offset = 0usize;
-        let mut remaining = leaves.len();
-        while remaining > 0 {
-            let height = remaining.ilog2() as usize;
-            let size = 1usize << height;
-            chunks.push(IAnchoring::Chunk {
-                root: root_of_leaves(&leaves[offset..offset + size]),
-                height: height as u8,
-            });
-            offset += size;
-            remaining -= size;
-        }
-        chunks
+        cut(&leaves)
+            .into_iter()
+            .map(|(height, root)| IAnchoring::Chunk { root, height })
+            .collect()
     }
 
     proptest! {
