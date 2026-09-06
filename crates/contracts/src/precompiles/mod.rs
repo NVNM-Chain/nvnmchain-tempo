@@ -62,8 +62,8 @@ pub const RECEIVE_POLICY_GUARD_ADDRESS: Address =
 pub const STORAGE_CREDITS_ADDRESS: Address = address!("0x1060000000000000000000000000000000000000");
 pub const CURRENT_COMMITTEE_ADDRESS: Address =
     address!("0xC077E00000000000000000000000000000000000");
-/// Caller-partitioned commitment log. Inherited from the `x/anchoring` precompile, which
-/// lived at this address, so existing integrations keep their target.
+/// Caller-partitioned MMR. The address is inherited from the `x/anchoring` precompile that
+/// lived here; its ABI is not, so a stale integration reverts rather than writes.
 /// Outside both Ethereum's reserved `0x00..01`-`0x00..11` range and the high-prefix vanity
 /// space the addresses above occupy.
 pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000a00");
