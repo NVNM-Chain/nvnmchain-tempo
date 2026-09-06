@@ -9,7 +9,8 @@ crate::sol! {
     ///
     /// An append carries no witness, so several fit one transaction. What a leaf commits to
     /// is the caller's business: `metadata` is never stored, only emitted, and every event
-    /// carries the peaks, so a proof needs the log and nothing else.
+    /// carries the peaks, so a leaf appended on its own proves from the log alone. A batch's
+    /// leaves reach the log only as chunk roots, so proving one needs the file it was cut from.
     ///
     /// Hashing: a leaf is `keccak256("leaf" ‖ commitment)`, a merge
     /// `keccak256("merge" ‖ left ‖ right)`, and the root bags the peaks highest first,
@@ -17,8 +18,9 @@ crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
     #[sol(abi)]
     interface IAnchoring {
-        /// Appends one leaf to the caller's MMR.
-        function appendLeaf(bytes32 commitment, bytes calldata metadata) external returns (bytes32 root);
+        /// Appends one leaf to the caller's MMR. Nothing comes back: the root is what the
+        /// event's peaks bag to, or `root(namespace)`.
+        function appendLeaf(bytes32 commitment, bytes calldata metadata) external;
 
         /// An aligned perfect subtree to append: its root and height.
         struct Chunk {
@@ -28,9 +30,8 @@ crate::sol! {
 
         /// Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk of
         /// height `h` merges only when the count is a multiple of `2^h`, which is what makes
-        /// the batch reach the root the leaves reach one by one.  An empty batch is a no-op
-        /// that returns the current root without changing state.
-        function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external returns (bytes32 root);
+        /// the batch reach the root the leaves reach one by one. An empty batch is a no-op.
+        function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external;
 
         /// The root of `namespace`'s MMR, or zero if nothing was ever appended.
         function root(address namespace) external view returns (bytes32);

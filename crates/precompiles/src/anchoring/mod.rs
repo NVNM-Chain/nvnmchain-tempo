@@ -104,10 +104,10 @@ impl Anchoring {
         peak_slot(base, pushed.height).write(pushed.peak)
     }
 
-    /// Stores the count and bags the live peaks into the root.
-    fn close(&mut self, base: U256, mmr: &Mmr) -> Result<B256> {
-        count_slot(base).write(mmr.leaf_count)?;
-        self.bagged(&mmr.peaks)
+    /// Stores the count. A write never computes the root: nothing returns or emits it, and
+    /// a reader bags the peaks the event carries, or asks `root`.
+    fn close(&mut self, base: U256, mmr: &Mmr) -> Result<()> {
+        count_slot(base).write(mmr.leaf_count)
     }
 
     /// The root over `peaks`, charged for the merges bagging them takes: one per peak after
@@ -138,13 +138,13 @@ impl Anchoring {
         &mut self,
         msg_sender: Address,
         call: IAnchoring::appendLeafCall,
-    ) -> Result<B256> {
+    ) -> Result<()> {
         let base = base(msg_sender);
         let mut mmr = self.open(base)?;
         let first = mmr.leaf_count;
 
         self.push(base, &mut mmr, 0, hash_leaf(call.commitment))?;
-        let root = self.close(base, &mmr)?;
+        self.close(base, &mmr)?;
 
         self.emit_event(AnchoringEvent::leaf_appended(
             msg_sender,
@@ -152,8 +152,7 @@ impl Anchoring {
             call.commitment,
             mmr.peaks,
             call.metadata,
-        ))?;
-        Ok(root)
+        ))
     }
 
     /// Appends a batch of aligned perfect subtrees to `msg_sender`'s MMR.
@@ -165,10 +164,9 @@ impl Anchoring {
         &mut self,
         msg_sender: Address,
         call: IAnchoring::appendLeavesCall,
-    ) -> Result<B256> {
+    ) -> Result<()> {
         if call.chunks.is_empty() {
-            let mmr = self.open(base(msg_sender))?;
-            return self.bagged(&mmr.peaks);
+            return Ok(()); // a no-op: nothing to write, nothing to emit
         }
         if call.chunks.iter().any(|chunk| chunk.root.is_zero()) {
             return Err(AnchoringError::zero_chunk_root().into());
@@ -184,7 +182,7 @@ impl Anchoring {
         for chunk in &call.chunks {
             self.push(base, &mut mmr, chunk.height, chunk.root)?;
         }
-        let root = self.close(base, &mmr)?;
+        self.close(base, &mmr)?;
 
         self.emit_event(AnchoringEvent::leaves_appended(
             msg_sender,
@@ -193,8 +191,7 @@ impl Anchoring {
             call.chunks,
             mmr.peaks,
             call.metadata,
-        ))?;
-        Ok(root)
+        ))
     }
 }
 
@@ -350,19 +347,15 @@ mod tests {
     fn sequential_appends_reach_the_reference_roots() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             for i in 1..=16u64 {
-                let root = anchoring.append_leaf(
+                anchoring.append_leaf(
                     PINNED_NS,
                     IAnchoring::appendLeafCall {
                         commitment: c(i),
                         metadata: Bytes::new(),
                     },
                 )?;
-                assert_eq!(
-                    root,
-                    ROOTS[i as usize - 1],
-                    "root after leaf {i}, as returned"
-                );
-                assert_eq!(root_of(&mut anchoring, PINNED_NS)?, root, "as read");
+                let root = root_of(&mut anchoring, PINNED_NS)?;
+                assert_eq!(root, ROOTS[i as usize - 1], "root after leaf {i}");
                 let (count, peaks) = state_of(&anchoring, PINNED_NS)?;
                 assert_eq!(count, U256::from(i));
                 assert_eq!(peaks.len(), i.count_ones() as usize);
@@ -401,10 +394,12 @@ mod tests {
     fn a_batch_from_empty_reaches_the_sequential_root() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             // 13 leaves cut aligned from zero: sizes 8, 4, 1.
-            let root = anchoring
-                .append_leaves(PINNED_NS, leaves_call(&[(1, 8, 3), (9, 4, 2), (13, 1, 0)]))?;
-            assert_eq!(root, ROOTS[12], "one call, thirteen leaves");
-            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[12]);
+            anchoring.append_leaves(PINNED_NS, leaves_call(&[(1, 8, 3), (9, 4, 2), (13, 1, 0)]))?;
+            assert_eq!(
+                root_of(&mut anchoring, PINNED_NS)?,
+                ROOTS[12],
+                "one call, thirteen leaves"
+            );
             assert_eq!(state_of(&anchoring, PINNED_NS)?.0, U256::from(13));
             Ok(())
         })
@@ -465,16 +460,15 @@ mod tests {
         })
     }
 
-    /// An empty batch is a no-op returning the current root; a zero chunk root is still
-    /// refused because nothing hashes to it.
+    /// An empty batch is a no-op; a zero chunk root is still refused because nothing hashes
+    /// to it.
     #[test]
     fn empty_batch_is_a_noop_and_zero_chunk_root_is_refused() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             append_all(&mut anchoring, PINNED_NS, 1, 2)?;
             anchoring.clear_emitted_events();
 
-            let root = anchoring.append_leaves(PINNED_NS, leaves_call(&[]))?;
-            assert_eq!(root, ROOTS[1], "empty batch returns current root");
+            anchoring.append_leaves(PINNED_NS, leaves_call(&[]))?;
             assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[1], "unchanged");
             assert_eq!(state_of(&anchoring, PINNED_NS)?.0, U256::from(2));
             assert!(anchoring.emitted_events().is_empty());
@@ -498,14 +492,14 @@ mod tests {
             append_all(&mut anchoring, PINNED_NS, 1, 5)?;
             anchoring.clear_emitted_events();
 
-            let root = anchoring.append_leaf(
+            anchoring.append_leaf(
                 PINNED_NS,
                 IAnchoring::appendLeafCall {
                     commitment: c(6),
                     metadata: Bytes::from_static(b"provenance"),
                 },
             )?;
-            assert_eq!(root, ROOTS[5]);
+            assert_eq!(root_of(&mut anchoring, PINNED_NS)?, ROOTS[5]);
             let (_, peaks) = state_of(&anchoring, PINNED_NS)?;
             anchoring.assert_emitted_events(vec![AnchoringEvent::leaf_appended(
                 PINNED_NS,

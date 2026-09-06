@@ -1,6 +1,6 @@
 //! ABI dispatch for the [`Anchoring`] precompile.
 
-use crate::{Precompile, anchoring::Anchoring, charge_input_cost, dispatch, mutate, view};
+use crate::{Precompile, anchoring::Anchoring, charge_input_cost, dispatch, mutate_void, view};
 use alloy::primitives::Address;
 use revm::precompile::PrecompileResult;
 use tempo_contracts::precompiles::IAnchoring;
@@ -16,8 +16,10 @@ impl Precompile for Anchoring {
             |call| match call {
                 IAnchoring::IAnchoringCalls {
                     // Writes: the caller is the namespace, so no authorization check exists.
-                    appendLeaf(call) => mutate(call, msg_sender, |s, c| self.append_leaf(s, c)),
-                    appendLeaves(call) => mutate(call, msg_sender, |s, c| self.append_leaves(s, c)),
+                    appendLeaf(call) => mutate_void(call, msg_sender, |s, c| self.append_leaf(s, c)),
+                    appendLeaves(call) => mutate_void(call, msg_sender, |s, c| {
+                        self.append_leaves(s, c)
+                    }),
                     // Views
                     root(call) => view(call, |c| self.root(c)),
                     state(call) => view(call, |c| self.state(c))
@@ -131,22 +133,21 @@ mod tests {
 
             let sequential_root = with_anchoring(|mut anchoring| {
                 let sender = Address::random();
-                let mut root = B256::ZERO;
                 for commitment in &commitments {
                     let output = anchoring.call(&leaf(*commitment), sender)?;
                     assert!(output.is_success());
-                    root = IAnchoring::appendLeafCall::abi_decode_returns(&output.bytes)?;
                 }
-                Ok(root)
+                let output = anchoring.call(&root_call(sender), sender)?;
+                Ok(IAnchoring::rootCall::abi_decode_returns(&output.bytes)?)
             })
             .unwrap();
 
             let batch_root = with_anchoring(|mut anchoring| {
-                let output = anchoring.call(&leaves(chunks), Address::random())?;
+                let sender = Address::random();
+                let output = anchoring.call(&leaves(chunks), sender)?;
                 assert!(output.is_success());
-                Ok(IAnchoring::appendLeavesCall::abi_decode_returns(
-                    &output.bytes,
-                )?)
+                let output = anchoring.call(&root_call(sender), sender)?;
+                Ok(IAnchoring::rootCall::abi_decode_returns(&output.bytes)?)
             })
             .unwrap();
 
@@ -168,10 +169,10 @@ mod tests {
         .unwrap()
     }
 
-    /// Both writes go in as calldata, return the root, and come back out through `root` and
-    /// `state`, which is the only path a real caller has. `msg_sender` becomes the namespace,
-    /// so the reads use a different caller to prove the MMR is keyed on the writer rather than
-    /// the reader.
+    /// Both writes go in as calldata, return nothing, and what they did comes back out
+    /// through `root` and `state`, which is the only path a real caller has. `msg_sender`
+    /// becomes the namespace, so the reads use a different caller to prove the MMR is keyed
+    /// on the writer rather than the reader.
     #[test]
     fn writes_round_trip_through_calldata() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
@@ -180,14 +181,14 @@ mod tests {
 
             let output = anchoring.call(&leaf(B256::repeat_byte(0xab)), sender)?;
             assert!(output.is_success());
-            let root = IAnchoring::appendLeafCall::abi_decode_returns(&output.bytes)?;
-            assert_eq!(root, bag(&[first]), "a write returns the new root");
+            assert!(output.bytes.is_empty(), "a write returns nothing");
 
             let output = anchoring.call(&root_call(sender), Address::random())?;
             assert!(output.is_success());
             assert_eq!(
                 IAnchoring::rootCall::abi_decode_returns(&output.bytes)?,
-                root
+                bag(&[first]),
+                "one leaf is its own root"
             );
 
             // A batch on top of it: a second leaf, which merges with the first.
@@ -199,7 +200,9 @@ mod tests {
                 sender,
             )?;
             assert!(output.is_success());
-            let root = IAnchoring::appendLeavesCall::abi_decode_returns(&output.bytes)?;
+            assert!(output.bytes.is_empty(), "a batch returns nothing either");
+            let output = anchoring.call(&root_call(sender), Address::random())?;
+            let root = IAnchoring::rootCall::abi_decode_returns(&output.bytes)?;
             assert_ne!(root, bag(&[first]));
 
             let output = anchoring.call(
