@@ -16,12 +16,13 @@ impl Precompile for Anchoring {
             |call| match call {
                 IAnchoring::IAnchoringCalls {
                     // Writes: the caller is the namespace, so no authorization check exists.
-                    anchor(call) => mutate_void(call, msg_sender, |s, c| self.anchor(s, c)),
-                    anchorAndHash(call) => mutate_void(call, msg_sender, |s, c| {
-                        self.anchor_and_hash(s, c)
+                    appendLeaf(call) => mutate_void(call, msg_sender, |s, c| self.append_leaf(s, c)),
+                    appendLeaves(call) => mutate_void(call, msg_sender, |s, c| {
+                        self.append_leaves(s, c)
                     }),
-                    // View
-                    latest(call) => view(call, |c| self.latest(c))
+                    // Views
+                    root(call) => view(call, |c| self.root(c)),
+                    state(call) => view(call, |c| self.state(c))
                 }
             }
         )
@@ -32,14 +33,16 @@ impl Precompile for Anchoring {
 mod tests {
     use super::*;
     use crate::{
+        anchoring::{bag, hash_leaf, mmr::vectors::cut},
         dispatch::StaticCallNotAllowed,
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
         test_util::{assert_full_coverage, check_selector_coverage},
     };
     use alloy::{
-        primitives::{B256, Bytes, keccak256},
+        primitives::{B256, Bytes, U256},
         sol_types::{SolCall, SolError, SolInterface, SolValue},
     };
+    use proptest::prelude::*;
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::{
         AnchoringError, IAnchoring::IAnchoringCalls, UnknownFunctionSelector,
@@ -70,6 +73,88 @@ mod tests {
         StorageCtx::enter(&mut storage, || f(Anchoring::new()))
     }
 
+    fn leaf(commitment: B256) -> Vec<u8> {
+        IAnchoring::appendLeafCall {
+            commitment,
+            metadata: Bytes::from_static(b"payload"),
+        }
+        .abi_encode()
+    }
+
+    fn leaves(chunks: Vec<IAnchoring::Chunk>) -> Vec<u8> {
+        IAnchoring::appendLeavesCall {
+            chunks,
+            metadata: Bytes::new(),
+        }
+        .abi_encode()
+    }
+
+    fn root_call(namespace: Address) -> Vec<u8> {
+        IAnchoring::rootCall { namespace }.abi_encode()
+    }
+
+    /// The aligned chunks for appending `commitments` from an empty MMR.
+    fn chunks_from_commitments(commitments: &[B256]) -> Vec<IAnchoring::Chunk> {
+        let leaves: Vec<_> = commitments.iter().copied().map(hash_leaf).collect();
+        cut(&leaves)
+            .into_iter()
+            .map(|(height, root)| IAnchoring::Chunk { root, height })
+            .collect()
+    }
+
+    proptest! {
+        #[test]
+        fn append_leaves_calldata_roundtrips(
+            chunks in prop::collection::vec((any::<[u8; 32]>(), 0u8..=8), 0..32),
+            metadata in prop::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let chunks: Vec<_> = chunks
+                .into_iter()
+                .map(|(root, height)| IAnchoring::Chunk {
+                    root: B256::from(root),
+                    height,
+                })
+                .collect();
+            let call = IAnchoring::appendLeavesCall {
+                chunks: chunks.clone(),
+                metadata: Bytes::from(metadata),
+            };
+            let decoded = IAnchoring::appendLeavesCall::abi_decode(&call.abi_encode()).unwrap();
+            prop_assert_eq!(decoded.chunks, chunks);
+            prop_assert_eq!(decoded.metadata, call.metadata);
+        }
+
+        #[test]
+        fn append_leaves_via_abi_matches_sequential_appends(
+            commitments in prop::collection::vec(any::<[u8; 32]>(), 1..32),
+        ) {
+            let commitments: Vec<_> = commitments.into_iter().map(B256::from).collect();
+            let chunks = chunks_from_commitments(&commitments);
+
+            let sequential_root = with_anchoring(|mut anchoring| {
+                let sender = Address::random();
+                for commitment in &commitments {
+                    let output = anchoring.call(&leaf(*commitment), sender)?;
+                    assert!(output.is_success());
+                }
+                let output = anchoring.call(&root_call(sender), sender)?;
+                Ok(IAnchoring::rootCall::abi_decode_returns(&output.bytes)?)
+            })
+            .unwrap();
+
+            let batch_root = with_anchoring(|mut anchoring| {
+                let sender = Address::random();
+                let output = anchoring.call(&leaves(chunks), sender)?;
+                assert!(output.is_success());
+                let output = anchoring.call(&root_call(sender), sender)?;
+                Ok(IAnchoring::rootCall::abi_decode_returns(&output.bytes)?)
+            })
+            .unwrap();
+
+            prop_assert_eq!(sequential_root, batch_root);
+        }
+    }
+
     #[test]
     fn selector_coverage() {
         with_anchoring(|mut anchoring| {
@@ -84,101 +169,95 @@ mod tests {
         .unwrap()
     }
 
-    /// Both writes go in as calldata and come back out through `latest`, which is the only
-    /// path a real caller has. `msg_sender` becomes the namespace, so the read uses a
-    /// different caller to prove the head is keyed on the writer rather than the reader.
+    /// Both writes go in as calldata, return nothing, and what they did comes back out
+    /// through `root` and `state`, which is the only path a real caller has. `msg_sender`
+    /// becomes the namespace, so the reads use a different caller to prove the MMR is keyed
+    /// on the writer rather than the reader.
     #[test]
     fn writes_round_trip_through_calldata() -> eyre::Result<()> {
-        let metadata = Bytes::from_static(b"self-verifying payload");
-        let commitment = B256::repeat_byte(0xab);
+        with_anchoring(|mut anchoring| {
+            let sender = Address::random();
+            let first = hash_leaf(B256::repeat_byte(0xab));
 
-        for (write, expected) in [
-            (
-                IAnchoring::anchorCall {
-                    key: B256::ZERO,
-                    commitment,
-                    metadata: metadata.clone(),
-                }
-                .abi_encode(),
-                commitment,
-            ),
-            (
-                IAnchoring::anchorAndHashCall {
-                    key: B256::ZERO,
-                    metadata: metadata.clone(),
-                }
-                .abi_encode(),
-                keccak256(&metadata),
-            ),
-        ] {
-            with_anchoring(|mut anchoring| {
-                let sender = Address::random();
+            let output = anchoring.call(&leaf(B256::repeat_byte(0xab)), sender)?;
+            assert!(output.is_success());
+            assert!(output.bytes.is_empty(), "a write returns nothing");
 
-                let output = anchoring.call(&write, sender)?;
-                assert!(output.is_success());
-                assert!(output.bytes.is_empty(), "writes return no data");
+            let output = anchoring.call(&root_call(sender), Address::random())?;
+            assert!(output.is_success());
+            assert_eq!(
+                IAnchoring::rootCall::abi_decode_returns(&output.bytes)?,
+                bag(&[first]),
+                "one leaf is its own root"
+            );
 
-                let output = anchoring.call(
-                    &IAnchoring::latestCall {
-                        namespace: sender,
-                        key: B256::ZERO,
-                    }
-                    .abi_encode(),
-                    Address::random(),
-                )?;
-                assert!(output.is_success());
-                assert_eq!(
-                    IAnchoring::latestCall::abi_decode_returns(&output.bytes)?,
-                    expected
-                );
-                Ok(())
-            })?;
-        }
-        Ok(())
+            // A batch on top of it: a second leaf, which merges with the first.
+            let output = anchoring.call(
+                &leaves(vec![IAnchoring::Chunk {
+                    root: hash_leaf(B256::repeat_byte(0xcd)),
+                    height: 0,
+                }]),
+                sender,
+            )?;
+            assert!(output.is_success());
+            assert!(output.bytes.is_empty(), "a batch returns nothing either");
+            let output = anchoring.call(&root_call(sender), Address::random())?;
+            let root = IAnchoring::rootCall::abi_decode_returns(&output.bytes)?;
+            assert_ne!(root, bag(&[first]));
+
+            let output = anchoring.call(
+                &IAnchoring::stateCall { namespace: sender }.abi_encode(),
+                Address::random(),
+            )?;
+            assert!(output.is_success());
+            let state = IAnchoring::stateCall::abi_decode_returns(&output.bytes)?;
+            assert_eq!(state.count, U256::from(2));
+            assert_eq!(state.peaks.len(), 1);
+            assert_eq!(bag(&state.peaks), root);
+            assert_eq!(anchoring.emitted_events().len(), 2);
+            Ok(())
+        })
     }
 
     #[test]
-    fn commitment_unchanged_reverts_with_the_typed_error() -> eyre::Result<()> {
+    fn a_misaligned_chunk_reverts_with_the_typed_error() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             let sender = Address::random();
-            let calldata = IAnchoring::anchorCall {
-                key: B256::random(),
-                commitment: B256::repeat_byte(0xcd),
-                metadata: Bytes::new(),
-            }
-            .abi_encode();
+            assert!(
+                anchoring
+                    .call(&leaf(B256::repeat_byte(0xcd)), sender)?
+                    .is_success()
+            );
 
-            assert!(anchoring.call(&calldata, sender)?.is_success());
-
-            let output = anchoring.call(&calldata, sender)?;
+            // A pair at count 1.
+            let output = anchoring.call(
+                &leaves(vec![IAnchoring::Chunk {
+                    root: B256::repeat_byte(0xef),
+                    height: 1,
+                }]),
+                sender,
+            )?;
             assert!(output.is_revert());
             assert_eq!(
                 output.bytes,
-                AnchoringError::commitment_unchanged().abi_encode()
+                AnchoringError::chunk_not_aligned(U256::ONE, U256::ONE).abi_encode()
             );
             Ok(())
         })
     }
 
-    /// Writes must reject `STATICCALL`; `latest` must still serve reads.
+    /// Writes must reject `STATICCALL`; the views must still serve reads.
     #[test]
-    fn static_context_rejects_writes_but_serves_latest() -> eyre::Result<()> {
+    fn static_context_rejects_writes_but_serves_reads() -> eyre::Result<()> {
         with_static_anchoring(|mut anchoring| {
             let sender = Address::random();
-            let key = B256::random();
 
             for calldata in [
-                IAnchoring::anchorCall {
-                    key,
-                    commitment: B256::repeat_byte(0xef),
-                    metadata: Bytes::new(),
-                }
-                .abi_encode(),
-                IAnchoring::anchorAndHashCall {
-                    key,
-                    metadata: Bytes::from_static(b"nope"),
-                }
-                .abi_encode(),
+                leaf(B256::repeat_byte(0xef)),
+                leaves(vec![IAnchoring::Chunk {
+                    root: B256::repeat_byte(0xef),
+                    height: 0,
+                }]),
             ] {
                 let output = anchoring.call(&calldata, sender)?;
                 assert!(output.is_revert());
@@ -187,19 +266,17 @@ mod tests {
 
             assert!(anchoring.emitted_events().is_empty());
 
+            let output = anchoring.call(&root_call(sender), sender)?;
+            assert!(output.is_success());
+            assert_eq!(
+                IAnchoring::rootCall::abi_decode_returns(&output.bytes)?,
+                B256::ZERO
+            );
             let output = anchoring.call(
-                &IAnchoring::latestCall {
-                    namespace: sender,
-                    key,
-                }
-                .abi_encode(),
+                &IAnchoring::stateCall { namespace: sender }.abi_encode(),
                 sender,
             )?;
             assert!(output.is_success());
-            assert_eq!(
-                IAnchoring::latestCall::abi_decode_returns(&output.bytes)?,
-                B256::ZERO
-            );
             Ok(())
         })
     }
@@ -226,7 +303,7 @@ mod tests {
     fn malformed_calldata_reverts_without_side_effects() -> eyre::Result<()> {
         with_anchoring(|mut anchoring| {
             // A known selector with truncated arguments.
-            let mut truncated = IAnchoring::anchorCall::SELECTOR.to_vec();
+            let mut truncated = IAnchoring::appendLeafCall::SELECTOR.to_vec();
             truncated.extend_from_slice(&[0u8; 31]);
             let output = anchoring.call(&truncated, Address::random())?;
             assert!(output.is_revert());
