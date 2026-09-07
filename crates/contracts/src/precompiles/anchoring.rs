@@ -1,38 +1,53 @@
 pub use IAnchoring::{IAnchoringErrors as AnchoringError, IAnchoringEvents as AnchoringEvent};
 
 crate::sol! {
-    /// Caller-partitioned commitment log.
+    /// Caller-partitioned Merkle Mountain Range: one append-only tree per address.
     ///
-    /// An append-only, time-stamped commitment log partitioned by the calling address. Any
-    /// EOA or contract anchors a `bytes32` commitment under its own address and proves it
-    /// later via `latest(address, key)`. The caller *is* the namespace, so there is no
-    /// authorization logic: permissionless by construction, permissioned on demand by
-    /// routing through a wrapper contract whose address becomes the namespace.
+    /// The caller *is* the namespace, so there is no authorization logic — anyone appends
+    /// under their own address, and a contract wanting a policy forwards the call, its own
+    /// address becoming the namespace.
     ///
-    /// State is exactly one word per `(namespace, key)` — the latest commitment. History,
-    /// payloads, and version order live in the `Anchored` log for indexers to derive.
-    /// Re-writing the commitment already stored reverts, so every successful anchor is a
-    /// real state change and every event is a distinct one.
+    /// An append carries no witness, so several fit one transaction. What a leaf commits to
+    /// is the caller's business: `metadata` is never stored, only emitted, and every event
+    /// carries the peaks, so a leaf appended on its own proves from the log alone. A batch's
+    /// leaves reach the log only as chunk roots, so proving one needs the file it was cut from.
+    ///
+    /// Hashing: a leaf is `keccak256("leaf" ‖ commitment)`, a merge
+    /// `keccak256("merge" ‖ left ‖ right)`, and the root bags the peaks highest first,
+    /// `keccak256("bag" ‖ acc ‖ peak)`, zero when empty.
     #[derive(Debug, PartialEq, Eq)]
     #[sol(abi)]
     interface IAnchoring {
-        /// Anchors `commitment` under the caller's namespace at `key`.
-        ///
-        /// `metadata` is never stored, only emitted; it is opaque to the protocol.
-        function anchor(bytes32 key, bytes32 commitment, bytes calldata metadata) external;
+        /// Appends one leaf to the caller's MMR. Nothing comes back: the root is what the
+        /// event's peaks bag to, or `root(namespace)`.
+        function appendLeaf(bytes32 commitment, bytes calldata metadata) external;
 
-        /// Anchors `keccak256(metadata)`, which makes the emitted event self-verifying.
-        function anchorAndHash(bytes32 key, bytes calldata metadata) external;
+        /// An aligned perfect subtree to append: its root and height.
+        struct Chunk {
+            bytes32 root;
+            uint8 height;
+        }
 
-        /// Returns the latest commitment for `(namespace, key)`, or zero if never anchored.
-        function latest(address namespace, bytes32 key) external view returns (bytes32 commitment);
+        /// Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk of
+        /// height `h` merges only when the count is a multiple of `2^h`, which is what makes
+        /// the batch reach the root the leaves reach one by one. An empty batch is a no-op.
+        function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external;
 
-        /// Emitted on every successful anchor. Block number and timestamp are inherent to
-        /// the log and deliberately not duplicated as fields; indexers derive the version
-        /// from canonical log order.
-        event Anchored(address indexed caller, bytes32 indexed key, bytes32 commitment, bytes metadata);
+        /// The root of `namespace`'s MMR, or zero if nothing was ever appended.
+        function root(address namespace) external view returns (bytes32);
 
-        /// The write would leave the commitment unchanged.
-        error CommitmentUnchanged();
+        /// The leaf count and the peaks, highest first — what a proof is checked against.
+        function state(address namespace) external view returns (uint256 count, bytes32[] memory peaks);
+
+        /// One leaf landed at `index`.
+        event LeafAppended(address indexed namespace, uint256 indexed index, bytes32 commitment, bytes32[] peaks, bytes metadata);
+
+        /// A batch landed from `firstLeaf`, bringing the leaf count to `count`.
+        event LeavesAppended(address indexed namespace, uint256 indexed firstLeaf, uint256 count, Chunk[] chunks, bytes32[] peaks, bytes metadata);
+
+        /// A chunk of `height` at `count`, which is not a multiple of its size.
+        error ChunkNotAligned(uint256 count, uint256 height);
+        /// A zero chunk root, which nothing hashes to.
+        error ZeroChunkRoot();
     }
 }
