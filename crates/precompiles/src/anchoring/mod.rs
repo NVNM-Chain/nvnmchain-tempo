@@ -81,9 +81,9 @@ impl Anchoring {
     /// any other precompile storage.
     fn open(&self, base: U256) -> Result<Mmr> {
         let count = count_slot(base).read()?;
-        // Highest first, one per set bit of the count: the ABI's order, and the order a
-        // carry pops from.
-        let peaks = (0..256)
+        // From the highest set bit down, one read per set bit: the ABI's order, and the
+        // order a carry pops from.
+        let peaks = (0..count.bit_len())
             .rev()
             .filter(|height| count.bit(*height))
             .map(|height| peak_slot(base, height).read())
