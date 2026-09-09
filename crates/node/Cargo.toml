@@ -24,6 +24,7 @@ tempo-payload-builder.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles.workspace = true
 tempo-primitives = { workspace = true, features = ["default"] }
+tempo-indexer.workspace = true
 tempo-revm.workspace = true
 
 thiserror.workspace = true

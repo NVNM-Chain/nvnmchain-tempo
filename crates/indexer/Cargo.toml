@@ -1,0 +1,41 @@
+[package]
+name = "tempo-indexer"
+description = "Transaction index maintained by a reth ExEx, serving eth_getTransactions"
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Tempo
+tempo-alloy.workspace = true
+tempo-primitives = { workspace = true, features = ["default"] }
+
+# Reth
+reth-ethereum = { workspace = true, features = ["node", "exex", "provider"] }
+reth-execution-types.workspace = true
+reth-node-api.workspace = true
+reth-node-core.workspace = true
+reth-primitives-traits.workspace = true
+reth-rpc-eth-api.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+
+# The index, shared with allegro
+tx-index.workspace = true
+
+# General
+eyre.workspace = true
+futures.workspace = true
+# Must match reth's jsonrpsee exactly: the RPC module is merged into reth's server, so
+# a different version would be a different (incompatible) set of traits.
+jsonrpsee.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

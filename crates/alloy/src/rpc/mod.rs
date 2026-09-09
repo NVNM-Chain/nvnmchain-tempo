@@ -17,3 +17,6 @@ mod reth_compat;
 
 /// Various helper types for paginated queries.
 pub mod pagination;
+
+/// `eth_getTransactions` request and response types.
+pub mod transactions;
