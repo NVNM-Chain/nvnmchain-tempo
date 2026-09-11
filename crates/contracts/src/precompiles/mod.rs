@@ -1,6 +1,5 @@
 pub mod account_keychain;
 pub mod address_registry;
-pub mod anchoring;
 pub mod common_errors;
 pub mod current_committee;
 pub mod nonce;
@@ -19,7 +18,6 @@ pub mod zone_factory;
 
 pub use account_keychain::*;
 pub use address_registry::*;
-pub use anchoring::*;
 pub use common_errors::*;
 pub use current_committee::*;
 pub use nonce::*;
@@ -62,11 +60,6 @@ pub const RECEIVE_POLICY_GUARD_ADDRESS: Address =
 pub const STORAGE_CREDITS_ADDRESS: Address = address!("0x1060000000000000000000000000000000000000");
 pub const CURRENT_COMMITTEE_ADDRESS: Address =
     address!("0xC077E00000000000000000000000000000000000");
-/// Caller-partitioned MMR. The address is inherited from the `x/anchoring` precompile that
-/// lived here; its ABI is not, so a stale integration reverts rather than writes.
-/// Outside both Ethereum's reserved `0x00..01`-`0x00..11` range and the high-prefix vanity
-/// space the addresses above occupy.
-pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000a00");
 
 /// Fixed system precompile addresses and corresponding activation hardfork
 pub const SYSTEM_PRECOMPILES: &[(Address, TempoHardfork)] = &[
@@ -85,5 +78,4 @@ pub const SYSTEM_PRECOMPILES: &[(Address, TempoHardfork)] = &[
     (STORAGE_CREDITS_ADDRESS, TempoHardfork::T7),
     (CURRENT_COMMITTEE_ADDRESS, TempoHardfork::T8),
     (ZONE_FACTORY_ADDRESS, TempoHardfork::T10),
-    (ANCHORING_ADDRESS, TempoHardfork::T10),
 ];
