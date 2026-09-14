@@ -6,7 +6,7 @@
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::mpsc,
     thread::{self, JoinHandle},
@@ -50,6 +50,12 @@ const MAGIC: &[u8; 8] = b"TEMPOSB\x00";
 
 /// Expected format version
 const VERSION: u16 = 1;
+
+/// Read-ahead over the dump file, and again over what a compressed one unpacks to.
+const READ_BUFFER: usize = 64 * 1024 * 1024;
+
+/// A zstd frame's first four bytes.
+const ZSTD_MAGIC: [u8; 4] = zstd::zstd_safe::MAGICNUMBER.to_le_bytes();
 
 /// ETL collector file size (200 MiB per temp file before spilling a new one).
 const ETL_FILE_SIZE: usize = 200 * 1024 * 1024;
@@ -112,9 +118,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
 
         info!(target: "tempo::cli", path = %self.state.display(), "Loading binary state dump");
 
-        let file = File::open(&self.state)
-            .wrap_err_with(|| format!("failed to open {}", self.state.display()))?;
-        let mut reader = BufReader::with_capacity(64 * 1024 * 1024, file);
+        let mut reader = open_dump(&self.state)?;
 
         let mut total_entries = 0u64;
         let mut total_blocks = 0u64;
@@ -166,13 +170,9 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
 
         // Process blocks from binary file
         loop {
-            // Read next block header; EOF means no more blocks.
-            let mut header_buf = [0u8; 40];
-            match reader.read_exact(&mut header_buf) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e).wrap_err("failed to read block header"),
-            }
+            let Some(header_buf) = next_header(&mut reader)? else {
+                break;
+            };
 
             // Validate magic
             ensure!(
@@ -444,6 +444,37 @@ where
             .map(|(addr, account)| (*addr, Some(*account))),
     )?;
     Ok(())
+}
+
+/// The dump, unpacked on the way through if it was compressed. Its first four bytes say which.
+fn open_dump(path: &Path) -> eyre::Result<Box<dyn BufRead>> {
+    let file = File::open(path).wrap_err_with(|| format!("failed to open {}", path.display()))?;
+    let mut reader = BufReader::with_capacity(READ_BUFFER, file);
+    let head = reader
+        .fill_buf()
+        .wrap_err_with(|| format!("failed to read {}", path.display()))?;
+    if head.starts_with(&ZSTD_MAGIC) {
+        let decoder = zstd::Decoder::with_buffer(reader).wrap_err("failed to open zstd dump")?;
+        return Ok(Box::new(BufReader::with_capacity(READ_BUFFER, decoder)));
+    }
+    Ok(Box::new(reader))
+}
+
+/// The next block header, or `None` once the dump is spent. Bytes that stop partway through
+/// one are a truncated file, not an end.
+fn next_header(reader: &mut impl BufRead) -> eyre::Result<Option<[u8; 40]>> {
+    if reader
+        .fill_buf()
+        .wrap_err("failed to read block header")?
+        .is_empty()
+    {
+        return Ok(None);
+    }
+    let mut header = [0u8; 40];
+    reader
+        .read_exact(&mut header)
+        .wrap_err("dump ends partway through a block header")?;
+    Ok(Some(header))
 }
 
 /// Storage change sets and history for the loaded slots: what each held before block 0, which
@@ -826,6 +857,57 @@ mod tests {
             HistoryInfo::from_lookup(Some(9), before_the_first_write, None),
             HistoryInfo::NotYetWritten,
         );
+    }
+
+    /// Compressed or not, a dump reads back whole. `zstd -T0` leaves frame boundaries
+    /// mid-file, and stopping at the first would load part of one and call it done.
+    #[test]
+    fn a_compressed_dump_reads_back_as_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let dump: Vec<u8> = (0..200_000u32).flat_map(|n| n.to_be_bytes()).collect();
+
+        let plain = dir.path().join("dump.bin");
+        std::fs::write(&plain, &dump).unwrap();
+
+        let squeezed = dir.path().join("dump.bin.zst");
+        let (first, second) = dump.split_at(dump.len() / 2);
+        let mut frames = zstd::encode_all(first, 3).unwrap();
+        frames.extend(zstd::encode_all(second, 3).unwrap());
+        assert!(frames.len() < dump.len(), "the fixture has to compress");
+        std::fs::write(&squeezed, &frames).unwrap();
+
+        for path in [plain, squeezed] {
+            let mut read = Vec::new();
+            open_dump(&path).unwrap().read_to_end(&mut read).unwrap();
+            assert_eq!(read.len(), dump.len(), "{}", path.display());
+            assert!(read == dump, "{}", path.display());
+        }
+    }
+
+    /// A dump that stops partway through a header is truncated, and saying so beats loading
+    /// what came before it and reporting success.
+    #[test]
+    fn a_partial_header_is_not_an_end() {
+        let header = [7u8; 40];
+
+        assert_eq!(next_header(&mut [].as_slice()).unwrap(), None, "empty");
+        assert_eq!(
+            next_header(&mut header.as_slice()).unwrap(),
+            Some(header),
+            "one header"
+        );
+
+        let mut spent = header.as_slice();
+        assert!(next_header(&mut spent).unwrap().is_some());
+        assert_eq!(next_header(&mut spent).unwrap(), None, "cleanly spent");
+
+        for short in [1usize, 39] {
+            let err = next_header(&mut &header[..short]).unwrap_err();
+            assert!(
+                err.to_string().contains("partway through"),
+                "{short} bytes: {err}"
+            );
+        }
     }
 
     /// Times the history write over `TEMPO_HISTORY_BENCH_SLOTS` slots (default 32M).
