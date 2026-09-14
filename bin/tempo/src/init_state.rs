@@ -14,11 +14,13 @@ use std::{
 };
 
 use alloy_primitives::{
-    B256, U256, keccak256,
+    B256, U256,
     map::{AddressMap, Entry},
+    utils::keccak256_uncached,
 };
 use clap::Parser;
 use eyre::{Context as _, ensure};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_chainspec::EthereumHardforks;
 use reth_cli_commands::common::{AccessRights, CliNodeTypes, EnvironmentArgs};
 use reth_db_api::{
@@ -60,11 +62,11 @@ const ZSTD_MAGIC: [u8; 4] = zstd::zstd_safe::MAGICNUMBER.to_le_bytes();
 /// ETL collector file size (200 MiB per temp file before spilling a new one).
 const ETL_FILE_SIZE: usize = 200 * 1024 * 1024;
 
-/// Maximum number of storage entries to hash per worker batch.
-const WORKER_CHUNK_SIZE: usize = 100;
+/// Storage entries handed to the hash worker at a time; each chunk is hashed in parallel.
+const WORKER_CHUNK_SIZE: usize = 4096;
 
-/// Bounded channel depth for the hashing worker thread.
-const HASH_WORKER_QUEUE_DEPTH: usize = 256;
+/// Chunks in flight between the reader and the hash worker.
+const HASH_WORKER_QUEUE_DEPTH: usize = 64;
 
 /// Initialize state from a binary dump file.
 #[derive(Debug, Parser)]
@@ -127,8 +129,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         let mut accounts_seen: AddressMap<Account> = AddressMap::default();
 
         // ETL collectors: accumulate entries sorted, spill to disk when full
-        let mut hash_chunk: Vec<(alloy_primitives::Address, B256, CompactU256)> =
-            Vec::with_capacity(WORKER_CHUNK_SIZE);
+        let mut hash_chunk: Vec<(B256, B256, CompactU256)> = Vec::with_capacity(WORKER_CHUNK_SIZE);
         // Skipping also leaves the segment genesis wrote where it is, rather than rewriting it.
         let mut genesis_history = if self.skip_genesis_history {
             None
@@ -139,27 +140,26 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
             )?)
         };
 
-        // Single worker thread for keccak hashing: owns the hashed ETL collector, receives
-        // batches over a bounded channel, and returns the collector when the sender drops.
-        let (hash_tx, hash_rx) = mpsc::sync_channel::<
-            Vec<(alloy_primitives::Address, B256, CompactU256)>,
-        >(HASH_WORKER_QUEUE_DEPTH);
+        // The hash worker owns the hashed ETL collector: it keccaks each chunk across the rayon
+        // pool, inserts on its own thread, and returns the collector when the sender drops.
+        let (hash_tx, hash_rx) =
+            mpsc::sync_channel::<Vec<(B256, B256, CompactU256)>>(HASH_WORKER_QUEUE_DEPTH);
         let hashed_etl_dir = etl_dir;
         let hash_worker =
             thread::spawn(move || -> eyre::Result<Collector<Vec<u8>, CompactU256>> {
                 let mut hashed_collector: Collector<Vec<u8>, CompactU256> =
                     Collector::new(ETL_FILE_SIZE, Some(hashed_etl_dir));
                 while let Ok(chunk) = hash_rx.recv() {
-                    let mut last_addr = alloy_primitives::Address::ZERO;
-                    let mut hashed_addr = B256::ZERO;
-                    for (address, slot, value) in chunk {
-                        if address != last_addr {
-                            last_addr = address;
-                            hashed_addr = keccak256(address);
-                        }
-                        let mut hashed_key = Vec::with_capacity(64);
-                        hashed_key.extend_from_slice(hashed_addr.as_slice());
-                        hashed_key.extend_from_slice(keccak256(slot).as_slice());
+                    let hashed: Vec<(Vec<u8>, CompactU256)> = chunk
+                        .into_par_iter()
+                        .map(|(hashed_address, slot, value)| {
+                            let mut hashed_key = Vec::with_capacity(64);
+                            hashed_key.extend_from_slice(hashed_address.as_slice());
+                            hashed_key.extend_from_slice(keccak256_uncached(slot).as_slice());
+                            (hashed_key, value)
+                        })
+                        .collect();
+                    for (hashed_key, value) in hashed {
                         hashed_collector
                             .insert(hashed_key, value)
                             .wrap_err("hashed ETL insert failed")?;
@@ -211,8 +211,8 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
             // Preserving the genesis account is critical: TIP20 tokens have bytecode (0xEF)
             // set during genesis, and overwriting with Account::default() would clear the
             // code hash, making the token appear uninitialized.
+            let hashed_address = keccak256_uncached(address);
             if let Entry::Vacant(e) = accounts_seen.entry(address) {
-                let hashed_address = keccak256(address);
                 let mut account_cursor = provider_rw
                     .tx_ref()
                     .cursor_read::<tables::HashedAccounts>()?;
@@ -252,7 +252,7 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
                 }
 
                 // Queue raw data for parallel hashing
-                hash_chunk.push((address, slot, compact_value));
+                hash_chunk.push((hashed_address, slot, compact_value));
 
                 // Send full batches to the hashing worker thread.
                 if hash_chunk.len() >= WORKER_CHUNK_SIZE {
@@ -706,7 +706,8 @@ fn load_etl_to_cursor(
     Ok(())
 }
 
-/// Log collection progress every 5 seconds and on the final entry.
+/// Log collection progress every 5 seconds and on the final entry. The clock is read once
+/// per 65,536 entries: read per entry, it was most of the reader's own time.
 fn log_collection_progress(
     address: &alloy_primitives::Address,
     index: u64,
@@ -714,7 +715,11 @@ fn log_collection_progress(
     start: Instant,
     last_log: &mut Instant,
 ) {
-    if last_log.elapsed() >= Duration::from_secs(5) || index + 1 == total {
+    let done = index + 1;
+    if done != total && !done.is_multiple_of(65_536) {
+        return;
+    }
+    if last_log.elapsed() >= Duration::from_secs(5) || done == total {
         let pct = ((index + 1) as f64 / total as f64) * 100.0;
         let elapsed = start.elapsed();
         let pairs_per_sec = (index + 1) as f64 / elapsed.as_secs_f64();
