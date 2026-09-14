@@ -578,9 +578,8 @@ where
 
 /// Marks every slot in `collector` as last changed at block 0.
 ///
-/// Puts without looking the entry up first: at block 0 there is no other history
-/// to keep, and once compaction merges the loaded keys with the genesis entries
-/// sorting after them, every lookup reads an index block too big to stay cached.
+/// No lookup first: nothing else can be there at block 0, and a miss re-reads an
+/// index block too big to cache.
 fn write_storage_history(
     rocksdb: &RocksDBProvider,
     mut collector: Collector<Vec<u8>, CompactU256>,
@@ -734,9 +733,12 @@ fn log_collection_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
+    use std::{
+        path::Path,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use alloy_primitives::Address;
@@ -791,10 +793,12 @@ mod tests {
         (dir, rocksdb, gets)
     }
 
+    /// Spills under `dir`, not the system temp dir.
     fn collector_of(
+        dir: &Path,
         slots: impl IntoIterator<Item = (Address, B256)>,
     ) -> Collector<Vec<u8>, CompactU256> {
-        let mut collector = Collector::new(ETL_FILE_SIZE, None);
+        let mut collector = Collector::new(ETL_FILE_SIZE, Some(dir.to_path_buf()));
         for (address, slot) in slots {
             collector
                 .insert(
@@ -806,12 +810,10 @@ mod tests {
         collector
     }
 
-    /// Every slot ends at block 0 without a get, including one already there and one
-    /// handed over twice. A get would change only the time, not the result, so the
-    /// gets are counted.
+    /// Existing, repeated and fresh slots all end at block 0, with no get.
     #[test]
     fn every_slot_is_marked_at_block_zero_without_a_read() {
-        let (_dir, rocksdb, gets) = history_db();
+        let (dir, rocksdb, gets) = history_db();
         let block_zero = tables::BlockNumberList::new([0]).unwrap();
         let (a, b) = (Address::repeat_byte(0x11), Address::repeat_byte(0x22));
         let existing = (a, B256::repeat_byte(1));
@@ -824,7 +826,8 @@ mod tests {
                 &block_zero,
             )
             .unwrap();
-        write_storage_history(&rocksdb, collector_of([existing, twice, twice, fresh])).unwrap();
+        let collector = collector_of(dir.path(), [existing, twice, twice, fresh]);
+        write_storage_history(&rocksdb, collector).unwrap();
 
         // Before the checks below, which do gets of their own.
         let reads = gets.0.load(Ordering::Relaxed);
@@ -835,6 +838,8 @@ mod tests {
                 .unwrap();
             assert_eq!(history.as_ref(), Some(&block_zero), "{address} {slot}");
         }
+        // Those three gets prove the counter is wired.
+        assert_eq!(gets.0.load(Ordering::Relaxed), 3);
     }
 
     /// The marker is all that makes the skipped entries safe to read over: without it the
@@ -910,9 +915,8 @@ mod tests {
         }
     }
 
-    /// Times the history write over `TEMPO_HISTORY_BENCH_SLOTS` slots (default 32M).
-    /// Cost per slot should stay flat as it grows. Run with
-    /// `--release -- --ignored --nocapture`.
+    /// Times the history write over `TEMPO_HISTORY_BENCH_SLOTS` slots (default 32M);
+    /// the cost per slot should stay flat as it grows.
     #[test]
     #[ignore = "benchmark; run with --ignored --nocapture"]
     fn storage_history_throughput() {
@@ -920,9 +924,12 @@ mod tests {
             .ok()
             .and_then(|n| n.parse().ok())
             .unwrap_or(32_000_000);
-        let (_dir, rocksdb, _) = history_db();
+        let (dir, rocksdb, _) = history_db();
         let address = Address::repeat_byte(0xac);
-        let collector = collector_of((0..slots).map(|i| (address, B256::from(U256::from(i)))));
+        let collector = collector_of(
+            dir.path(),
+            (0..slots).map(|i| (address, B256::from(U256::from(i)))),
+        );
         // Stands in for genesis storage, which sorts after a loaded account.
         rocksdb
             .put::<tables::StoragesHistory>(
