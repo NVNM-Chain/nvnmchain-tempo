@@ -33,6 +33,9 @@ The release is created as a **draft**. Publishing it is a manual step.
    signature.
 5. **GitHub Pages docs** (optional). Set the repository variable
    `ENABLE_DOCS_DEPLOY=true` and enable Pages to publish rustdoc from `main`.
+6. **Package visibility.** After the first successful `docker.yml` run, set the
+   four GHCR packages to public, or give each deployment target a read-scoped
+   token.
 
 No other secrets or repository variables are required for a binary/Docker
 release. Registry credentials are supplied by `GITHUB_TOKEN`.

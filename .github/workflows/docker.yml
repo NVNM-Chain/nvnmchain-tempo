@@ -84,6 +84,11 @@ jobs:
           # The `chef` base image is pulled in as a named build context, so it
           # must be pinned to the same platform as the final images.
           args+=(--set "chef.platform=${PLATFORM}")
+          # GHCR links a package to its repository through this label, and a
+          # linked package is the only one that can inherit the repository's
+          # visibility. Without it every package stays private and each
+          # deployment target needs a token of its own.
+          args+=(--set "*.labels.org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}")
           for target in "${targets[@]}"; do
             args+=(--set "${target}.platform=${PLATFORM}")
             # `name` is required: with `push-by-digest` there are no tags to
