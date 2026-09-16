@@ -14,11 +14,6 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
-    inputs:
-      nightly:
-        description: "Tag nightly"
-        type: boolean
-        default: false
   workflow_call:
 
 # A tag build is the one a release depends on, so it is never cancelled; a
@@ -76,7 +71,6 @@ jobs:
         shell: bash
         env:
           PLATFORM: ${{ matrix.platform }}
-          NIGHTLY: ${{ github.event_name == 'schedule' || github.event.inputs.nightly == 'true' }}
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
         run: |
@@ -84,36 +78,25 @@ jobs:
 
           owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           registry="ghcr.io/${owner}"
-
-          if [ "$NIGHTLY" = "true" ]; then
-            targets="tempo-nightly tempo-localnet tempo-sidecar tempo-xtask"
-          else
-            targets="tempo tempo-localnet tempo-sidecar tempo-xtask"
-          fi
+          targets=(tempo tempo-localnet tempo-sidecar tempo-xtask)
 
           args=()
           # The `chef` base image is pulled in as a named build context, so it
           # must be pinned to the same platform as the final images.
           args+=(--set "chef.platform=${PLATFORM}")
-          for target in $targets; do
-            # `tempo-nightly` is the nightly variant of the published `tempo` image.
-            name="$target"
-            if [ "$name" = "tempo-nightly" ]; then
-              name="tempo"
-            fi
+          for target in "${targets[@]}"; do
             args+=(--set "${target}.platform=${PLATFORM}")
             # `name` is required: with `push-by-digest` there are no tags to
             # derive the destination repository from.
-            args+=(--set "${target}.output=type=image,name=${registry}/${name},push-by-digest=true,name-canonical=true,push=true")
+            args+=(--set "${target}.output=type=image,name=${registry}/${target},push-by-digest=true,name-canonical=true,push=true")
           done
 
-          # shellcheck disable=SC2086
           docker buildx bake \
             --file docker-bake.hcl \
             --metadata-file meta.json \
             --pull \
             "${args[@]}" \
-            $targets
+            "${targets[@]}"
 
       - name: Collect digests
         shell: bash
@@ -124,15 +107,9 @@ jobs:
 
           out="digests-${ARCH}.txt"
           : > "$out"
-          for target in tempo tempo-nightly tempo-localnet tempo-sidecar tempo-xtask; do
-            digest="$(jq -r --arg t "$target" '.[$t]["containerimage.digest"] // empty' meta.json)"
-            [ -n "$digest" ] || continue
-            # `tempo-nightly` is the nightly variant of the published `tempo` image.
-            name="$target"
-            if [ "$name" = "tempo-nightly" ]; then
-              name="tempo"
-            fi
-            echo "${name} ${digest}" >> "$out"
+          for target in tempo tempo-localnet tempo-sidecar tempo-xtask; do
+            digest="$(jq -er --arg t "$target" '.[$t]["containerimage.digest"]' meta.json)"
+            echo "${target} ${digest}" >> "$out"
           done
 
           cat "$out"
@@ -185,8 +162,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/tempo
           bake-target: tempo
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -203,8 +178,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/tempo-localnet
           bake-target: tempo-localnet
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -221,8 +194,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/tempo-sidecar
           bake-target: tempo-sidecar
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -239,8 +210,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/tempo-xtask
           bake-target: tempo-xtask
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}

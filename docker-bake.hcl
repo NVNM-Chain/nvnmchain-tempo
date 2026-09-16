@@ -10,10 +10,6 @@ group "default" {
   targets = ["tempo", "tempo-localnet", "tempo-sidecar", "tempo-xtask"]
 }
 
-group "nightly" {
-  targets = ["tempo-nightly", "tempo-localnet", "tempo-sidecar", "tempo-xtask"]
-}
-
 target "docker-metadata" {}
 
 # Base image with all dependencies pre-compiled.
@@ -49,16 +45,6 @@ target "_common" {
 target "tempo" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo"
-}
-
-# Same image as `tempo`, built with the nightly engine tuning. Image names and
-# tags are supplied by docker/metadata-action at build time.
-target "tempo-nightly" {
-  inherits = ["tempo"]
-  args = {
-    RETH_ENGINE_PERSISTENCE_THRESHOLD = "30"
-    RETH_ENGINE_NUM_STATE_MASKING_BLOCKS = "20"
-  }
 }
 
 target "tempo-localnet" {

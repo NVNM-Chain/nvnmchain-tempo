@@ -33,8 +33,6 @@ The release is created as a **draft**. Publishing it is a manual step.
    signature.
 5. **GitHub Pages docs** (optional). Set the repository variable
    `ENABLE_DOCS_DEPLOY=true` and enable Pages to publish rustdoc from `main`.
-6. **Canary soak window** (optional). Set the repository variable
-   `CANARY_SOAK_DAYS` (defaults to `1`) to control `promote-canary.yml`.
 
 No other secrets or repository variables are required for a binary/Docker
 release. Registry credentials are supplied by `GITHUB_TOKEN`.
