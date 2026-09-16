@@ -2,6 +2,10 @@ name: Docker Build
 
 permissions: {}
 
+# Only refs that are actually deployed from. Upstream also builds on a nightly
+# cron and on merge_group; both are out of reach here, because a build on
+# GitHub-hosted runners keeps no layer cache and recompiles the whole reth
+# dependency tree from scratch on each architecture.
 on:
   push:
     branches:
@@ -9,7 +13,6 @@ on:
       - "rc/*"
     tags:
       - "v*.*.*"
-  merge_group:
   workflow_dispatch:
     inputs:
       nightly:
@@ -17,9 +20,12 @@ on:
         type: boolean
         default: false
   workflow_call:
-  # We're building nightly only once a day to let the rollout cook for 24h without interruptions
-  schedule:
-    - cron: "5 9 * * *"
+
+# A tag build is the one a release depends on, so it is never cancelled; a
+# superseded branch build is, or hours-long builds stack up behind each other.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
@@ -39,6 +45,7 @@ jobs:
             platform: linux/arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
     permissions:
       contents: read
       packages: write
@@ -142,6 +149,7 @@ jobs:
     name: Merge and sign manifest lists
     needs: [build]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -256,7 +264,6 @@ jobs:
         run: echo "shortsha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
       - name: Create manifest lists
-        id: merge
         shell: bash
         env:
           TAGS_TEMPO: ${{ steps.meta-tempo.outputs.tags }}
@@ -296,8 +303,9 @@ jobs:
             if [ "${#args[@]}" -gt 0 ]; then
               docker buildx imagetools create "${args[@]}" "${sources[@]}"
             else
-              # No tags for this event (e.g. merge_group): create an untagged
-              # manifest so the per-arch blobs are still validated.
+              # Nothing to point at the per-arch digests, so they stay in the
+              # registry untagged. Every trigger left derives tags, so this is
+              # a guard rather than an expected path.
               echo "No tags derived for ${image}; skipping manifest creation"
             fi
           done
