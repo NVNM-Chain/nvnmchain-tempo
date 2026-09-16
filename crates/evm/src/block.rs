@@ -31,7 +31,7 @@ use std::{
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
-    anchoring::{ANCHORING_ADDRESS, NVNM1_ANCHORING_RUNTIME},
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME},
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -292,7 +292,7 @@ where
         // Every block runs this for as long as NVNM1 is active, so the jump-table scan and the
         // keccak over the runtime happen once for the process.
         static RUNTIME: LazyLock<(Bytecode, B256)> = LazyLock::new(|| {
-            let code = Bytecode::new_legacy(NVNM1_ANCHORING_RUNTIME);
+            let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
             let code_hash = code.hash_slow();
             (code, code_hash)
         });
@@ -2178,7 +2178,7 @@ mod tests {
         let upgraded = db.load_cache_account(ANCHORING_ADDRESS).unwrap();
         assert_eq!(
             upgraded.account_info().unwrap().code.unwrap(),
-            Bytecode::new_legacy(NVNM1_ANCHORING_RUNTIME),
+            Bytecode::new_legacy(ANCHORING_RUNTIME),
             "the boundary did not install the anchoring runtime"
         );
         assert_eq!(

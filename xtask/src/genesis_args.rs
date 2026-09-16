@@ -43,6 +43,10 @@ use tempo_consensus_config::{SigningKey, SigningShare};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
+    anchoring::{
+        ANCHORING_ADDRESS, ANCHORING_RUNTIME, MODULE_ADMIN_ADDRESS, MODULE_ADMIN_OWNERS,
+        MODULE_ADMIN_RUNTIME,
+    },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
         INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
@@ -223,6 +227,11 @@ pub(crate) struct GenesisArgs {
     /// current anchoring runtime wants.
     #[arg(long)]
     nvnm1_time: Option<u64>,
+
+    /// The module admin's three owners, which also places the anchoring contract. Left out, the
+    /// genesis carries neither, as upstream's own networks want.
+    #[arg(long, value_delimiter = ',')]
+    module_admin_owners: Vec<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -574,6 +583,7 @@ impl GenesisArgs {
         );
 
         insert_zone_state_at_genesis(self.t10_time, self.t12_time, &mut genesis_alloc);
+        insert_anchoring_state_at_genesis(&self.module_admin_owners, &mut genesis_alloc)?;
 
         genesis_alloc.insert(
             HISTORY_STORAGE_ADDRESS,
@@ -701,6 +711,44 @@ impl GenesisArgs {
 
         Ok((genesis, consensus_config))
     }
+}
+
+/// Places the anchoring contract and the module admin that administers it. The corpus is not
+/// here; what genesis owes is the code at both addresses and the owners, frozen once written.
+fn insert_anchoring_state_at_genesis(
+    owners: &[Address],
+    genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
+) -> eyre::Result<()> {
+    if owners.is_empty() {
+        return Ok(());
+    }
+    // The zero address is never an owner, so an unset slot would admit nobody.
+    eyre::ensure!(
+        owners.len() == MODULE_ADMIN_OWNERS && owners.iter().all(|owner| !owner.is_zero()),
+        "the module admin holds {MODULE_ADMIN_OWNERS} non-zero owners, got {owners:?}"
+    );
+    println!("Initializing the anchoring contract and its module admin");
+
+    let slots = owners
+        .iter()
+        .enumerate()
+        .map(|(slot, owner)| (B256::from(U256::from(slot)), owner.into_word()))
+        .collect();
+    for (address, code, storage) in [
+        (ANCHORING_ADDRESS, ANCHORING_RUNTIME, None),
+        (MODULE_ADMIN_ADDRESS, MODULE_ADMIN_RUNTIME, Some(slots)),
+    ] {
+        genesis_alloc.insert(
+            address,
+            GenesisAccount {
+                code: Some(code),
+                nonce: Some(1),
+                storage,
+                ..Default::default()
+            },
+        );
+    }
+    Ok(())
 }
 
 fn insert_zone_state_at_genesis(
@@ -1319,5 +1367,55 @@ mod tests {
         ] {
             assert_eq!(alloc[&destination].code.as_ref(), Some(&expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod anchoring_tests {
+    use super::*;
+
+    const OWNERS: [Address; MODULE_ADMIN_OWNERS] = [
+        address!("0x1becd7f3beed7907e5a94980b074b51f8d2f4bed"),
+        address!("0x4de8c982bcc02663554425b324cb4d5e2b87de93"),
+        address!("0xbf13df9e8fd64aee9c2ea17efe7a142514eceb40"),
+    ];
+
+    fn alloc(owners: &[Address]) -> eyre::Result<BTreeMap<Address, GenesisAccount>> {
+        let mut alloc = BTreeMap::new();
+        insert_anchoring_state_at_genesis(owners, &mut alloc)?;
+        Ok(alloc)
+    }
+
+    /// What the launch genesis owes: both runtimes, and the owners in the slots the multisig reads.
+    #[test]
+    fn the_owners_land_in_the_slots_the_multisig_reads() {
+        let alloc = alloc(&OWNERS).unwrap();
+        assert_eq!(alloc[&ANCHORING_ADDRESS].code, Some(ANCHORING_RUNTIME));
+        let admin = &alloc[&MODULE_ADMIN_ADDRESS];
+        assert_eq!(admin.code, Some(MODULE_ADMIN_RUNTIME));
+        let storage = admin.storage.as_ref().expect("owners are written");
+        for (slot, owner) in OWNERS.iter().enumerate() {
+            assert_eq!(storage[&B256::from(U256::from(slot))], owner.into_word());
+        }
+        assert_eq!(storage.len(), MODULE_ADMIN_OWNERS);
+    }
+
+    /// Upstream's own networks carry neither contract.
+    #[test]
+    fn no_owners_places_nothing() {
+        assert!(alloc(&[]).unwrap().is_empty());
+    }
+
+    /// The owners are frozen at genesis, so a miscount is caught here or never.
+    #[test]
+    fn a_wrong_owner_count_is_refused() {
+        assert!(alloc(&OWNERS[..2]).is_err());
+        assert!(alloc(&[OWNERS[0], OWNERS[1], OWNERS[2], OWNERS[0]]).is_err());
+    }
+
+    /// An empty slot admits nobody, which would leave the admin short of its threshold.
+    #[test]
+    fn a_zero_owner_is_refused() {
+        assert!(alloc(&[OWNERS[0], Address::ZERO, OWNERS[2]]).is_err());
     }
 }
