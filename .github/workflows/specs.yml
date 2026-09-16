@@ -228,9 +228,9 @@ jobs:
   foundry-build:
     name: Build patched Forge
     needs: [check-specs-changes, check-precompiles]
-    if: github.repository == 'tempoxyz/tempo' && needs.check-specs-changes.outputs.should_run == 'true'
-    runs-on: depot-ubuntu-latest-8
-    timeout-minutes: 60
+    if: needs.check-specs-changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
@@ -293,8 +293,8 @@ jobs:
       fail-fast: false
       matrix:
         profile: [default, next]
-    runs-on: depot-ubuntu-latest-8
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:

@@ -23,7 +23,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/tempoxyz/tempo
   DEFAULT_SOAK_DAYS: ${{ vars.CANARY_SOAK_DAYS || '1' }}
 
 jobs:
@@ -34,6 +33,14 @@ jobs:
       actions: read
       packages: write
     steps:
+      # GHCR rejects uppercase repository paths, and github.repository_owner
+      # preserves the owner's casing.
+      - name: Resolve image
+        shell: bash
+        run: |
+          owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=ghcr.io/${owner}/tempo" >> "$GITHUB_ENV"
+
       - name: Log in to GitHub Container Registry
         uses: tempoxyz/gh-actions/vendor/docker/login-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
