@@ -21,7 +21,6 @@ on:
       - "crates/revm/**"
       - "scripts/foundry-patch.sh"
       - ".github/workflows/specs.yml"
-      - ".github/workflows/update-reth.yml"
   merge_group:
   pull_request:
 
@@ -70,7 +69,6 @@ jobs:
               - '**/Cargo.toml'
               - 'scripts/foundry-patch.sh'
               - '.github/workflows/specs.yml'
-              - '.github/workflows/update-reth.yml'
 
   foundry-resolver-smoke:
     name: Foundry Resolver Smoke
