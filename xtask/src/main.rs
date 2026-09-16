@@ -34,7 +34,7 @@ async fn main() -> eyre::Result<()> {
     match args.action {
         Action::CheckAbi(args) => args.run().wrap_err("failed ABI alignment check"),
         Action::AnchoringRuntime(args) => {
-            args.run().wrap_err("failed copying the anchoring runtime")
+            args.run().wrap_err("failed copying the contract runtimes")
         }
         Action::GetDkgOutcome(args) => args.run().await.wrap_err("failed to get DKG outcome"),
         Action::GetIdentityTransitions(args) => args
