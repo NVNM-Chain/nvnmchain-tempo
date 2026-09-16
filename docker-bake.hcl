@@ -6,25 +6,21 @@ variable "VERGEN_GIT_SHA_SHORT" {
   default = ""
 }
 
-variable "REGISTRY" {
-  default = "ghcr.io/tempoxyz"
-}
-
 group "default" {
   targets = ["tempo", "tempo-localnet", "tempo-sidecar", "tempo-xtask"]
 }
 
-group "nightly" {
-  targets = ["tempo-nightly", "tempo-localnet", "tempo-sidecar", "tempo-xtask"]
-}
-
 target "docker-metadata" {}
 
-# Base image with all dependencies pre-compiled
+# Base image with all dependencies pre-compiled.
+#
+# `platforms` is intentionally left unset: the build workflow sets the target
+# platform per architecture (`--set chef.platform=...`) so each variant is
+# built natively. Leaving it unset also makes a bare `docker buildx bake`
+# default to the host platform.
 target "chef" {
   dockerfile = "Dockerfile.chef"
   context = "."
-  platforms = ["linux/amd64", "linux/arm64"]
   args = {
     RUST_PROFILE = "profiling"
     RUST_FEATURES = "asm-keccak,jemalloc,otlp"
@@ -44,21 +40,11 @@ target "_common" {
     VERGEN_GIT_SHA = "${VERGEN_GIT_SHA}"
     VERGEN_GIT_SHA_SHORT = "${VERGEN_GIT_SHA_SHORT}"
   }
-  platforms = ["linux/amd64", "linux/arm64"]
 }
 
 target "tempo" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo"
-}
-
-target "tempo-nightly" {
-  inherits = ["tempo"]
-  args = {
-    RETH_ENGINE_PERSISTENCE_THRESHOLD = "30"
-    RETH_ENGINE_NUM_STATE_MASKING_BLOCKS = "20"
-  }
-  tags = ["${REGISTRY}/tempo:nightly", "docker.io/tempoxyz/tempo:nightly"]
 }
 
 target "tempo-localnet" {

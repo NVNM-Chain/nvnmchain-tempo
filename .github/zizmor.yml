@@ -1,21 +1,11 @@
 rules:
   template-injection:
     ignore:
-      # Existing benchmark/release workflows interpolate trusted workflow outputs
-      # into scripts. Keep these baselined so new workflow files still fail.
-      - bench-e2e-multi-region.yml
-      - bench-e2e.yml
-      - bench-replay-scheduled.yml
-      - bench-replay.yml
-      - codspeed-microbench.yml
+      # The release and docker workflows interpolate trusted workflow outputs
+      # (github.sha, github.repository, ...) into run scripts. Keep these
+      # baselined so new workflow files still fail.
       - docker.yml
       - release.yml
-      - update-reth.yml
-  artipacked:
-    ignore:
-      # update-reth intentionally persists its Derek token for authenticated git
-      # pushes after checkout.
-      - update-reth.yml:37
   ref-version-mismatch:
     # tempoxyz/gh-actions publishes no version tags, so a version comment on a pin to it
     # (e.g. `# main`) can never match and the audit fires whenever gh-actions main moves.
