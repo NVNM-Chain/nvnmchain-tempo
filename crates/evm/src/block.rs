@@ -25,7 +25,10 @@ use reth_revm::{
     context::result::{ExecutionResult, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
     anchoring::{ANCHORING_ADDRESS, NVNM1_ANCHORING_RUNTIME},
@@ -281,21 +284,35 @@ where
 
     /// Installs the anchoring runtime at NVNM1 over the code the genesis alloc placed. Storage,
     /// which is the corpus, stays; an address with no code was never seeded and stays empty.
+    ///
+    /// The gate is NVNM1 being active, not the block it activates on, so this installs whatever
+    /// the running binary embeds. A later runtime needs a fork of its own, or nodes take it at
+    /// their own restart instead of at a block they agree on.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        // Every block runs this for as long as NVNM1 is active, so the jump-table scan and the
+        // keccak over the runtime happen once for the process.
+        static RUNTIME: LazyLock<(Bytecode, B256)> = LazyLock::new(|| {
+            let code = Bytecode::new_legacy(NVNM1_ANCHORING_RUNTIME);
+            let code_hash = code.hash_slow();
+            (code, code_hash)
+        });
+
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        let code = Bytecode::new_legacy(NVNM1_ANCHORING_RUNTIME);
-        let code_hash = code.hash_slow();
-        if info.is_empty_code_hash() || info.code_hash == code_hash {
+        if info.is_empty_code_hash() {
+            return Ok(());
+        }
+        let (code, code_hash) = &*RUNTIME;
+        if info.code_hash == *code_hash {
             return Ok(());
         }
 
         let mut account = Account::from(info);
-        account.info.code_hash = code_hash;
-        account.info.code = Some(code);
+        account.info.code_hash = *code_hash;
+        account.info.code = Some(code.clone());
         account.mark_touch();
         db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
         Ok(())
