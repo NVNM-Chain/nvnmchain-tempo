@@ -7,7 +7,7 @@ use alloy_primitives::{Address, Bytes, address};
 /// Where the old chain's precompile answered, so a caller changes chains and nothing else.
 pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000A00");
 
-/// `layout/anchoring.bin` decoded. The swap leaves storage alone, so this has to keep the layout
-/// `layout/anchoring.json` pins.
+/// `layout/anchoring.bin` decoded, copied in by `cargo xtask anchoring-runtime`. The swap leaves
+/// storage alone, so this has to keep the layout `layout/anchoring.json` pins.
 pub const NVNM1_ANCHORING_RUNTIME: Bytes =
     Bytes::from_static(include_bytes!("anchoring_runtime.bin"));
