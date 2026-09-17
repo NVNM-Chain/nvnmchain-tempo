@@ -25,13 +25,19 @@ use reth_revm::{
     context::result::{ExecutionResult, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+};
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
-use tempo_contracts::precompiles::{
-    ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, INITIAL_FACTORY_OWNER,
-    InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS,
-    STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
-    initial_zone_factory_state, t12_zone_factory_state,
+use tempo_contracts::{
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME},
+    precompiles::{
+        ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
+        INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
+        SIGNATURE_VERIFIER_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
+        VALIDATOR_CONFIG_V2_ADDRESS, initial_zone_factory_state, t12_zone_factory_state,
+    },
 };
 use tempo_primitives::{
     SubBlock, SubBlockMetadata, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -274,6 +280,42 @@ where
     fn upgrade_zone_runtimes_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let [_, portal, verifier, messenger] = t12_zone_factory_state(INITIAL_FACTORY_OWNER);
         self.install_zone_runtimes_at_boundary([portal, verifier, messenger])
+    }
+
+    /// Installs the anchoring runtime at NVNM1 over the code the genesis alloc placed. Storage,
+    /// which is the corpus, stays; an address with no code was never seeded and stays empty.
+    ///
+    /// The gate is NVNM1 being active, not the block it activates on, so this installs whatever
+    /// the running binary embeds. A later runtime needs a fork of its own, or nodes take it at
+    /// their own restart instead of at a block they agree on.
+    fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        // Every block runs this for as long as NVNM1 is active, so the jump-table scan and the
+        // keccak over the runtime happen once for the process.
+        static RUNTIME: LazyLock<(Bytecode, B256)> = LazyLock::new(|| {
+            let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
+            let code_hash = code.hash_slow();
+            (code, code_hash)
+        });
+
+        let db = self.inner.evm.db_mut();
+        let info = db
+            .basic(ANCHORING_ADDRESS)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default();
+        if info.is_empty_code_hash() {
+            return Ok(());
+        }
+        let (code, code_hash) = &*RUNTIME;
+        if info.code_hash == *code_hash {
+            return Ok(());
+        }
+
+        let mut account = Account::from(info);
+        account.info.code_hash = *code_hash;
+        account.info.code = Some(code.clone());
+        account.mark_touch();
+        db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
+        Ok(())
     }
 
     /// Installs shared Zone runtimes without modifying their existing storage.
@@ -652,6 +694,9 @@ where
         }
         if self.inner.spec.is_t12_active_at_timestamp(timestamp) {
             self.upgrade_zone_runtimes_at_boundary()?;
+        }
+        if self.inner.spec.is_nvnm1_active_at_timestamp(timestamp) {
+            self.upgrade_anchoring_at_boundary()?;
         }
 
         Ok(())
@@ -2100,6 +2145,68 @@ mod tests {
             calls[0][&addr].original_info(),
             original_info,
             "state hook account should preserve existing original_info"
+        );
+    }
+
+    /// The corpus is the anchoring account's storage, so the swap moves the code and nothing else.
+    #[test]
+    fn test_anchoring_runtime_hardfork_upgrade() {
+        let chainspec = test_chainspec();
+        let mut db = State::builder().with_bundle_update().build();
+
+        let slot = U256::from(3);
+        let corpus = U256::from(2182);
+        let placed = Bytecode::new_legacy([0xfe].into());
+        db.insert_account_with_storage(
+            ANCHORING_ADDRESS,
+            AccountInfo {
+                nonce: 1,
+                code_hash: placed.hash_slow(),
+                code: Some(placed),
+                ..Default::default()
+            },
+            FromIterator::from_iter([(slot, corpus)]),
+        );
+
+        let mut executor = TestExecutorBuilder::default()
+            .with_parent_beacon_block_root(B256::ZERO)
+            .build(&mut db, &chainspec);
+        executor.upgrade_anchoring_at_boundary().unwrap();
+        executor.upgrade_anchoring_at_boundary().unwrap();
+        drop(executor);
+
+        let upgraded = db.load_cache_account(ANCHORING_ADDRESS).unwrap();
+        assert_eq!(
+            upgraded.account_info().unwrap().code.unwrap(),
+            Bytecode::new_legacy(ANCHORING_RUNTIME),
+            "the boundary did not install the anchoring runtime"
+        );
+        assert_eq!(
+            upgraded.storage_slot(slot),
+            Some(corpus),
+            "the swap moved storage, which holds the corpus"
+        );
+        assert_eq!(upgraded.account_info().unwrap().nonce, 1, "nonce moved");
+    }
+
+    /// Nothing to upgrade at an address the genesis alloc never seeded.
+    #[test]
+    fn test_anchoring_upgrade_skips_an_empty_address() {
+        let chainspec = test_chainspec();
+        let mut db = State::builder().with_bundle_update().build();
+        let mut executor = TestExecutorBuilder::default()
+            .with_parent_beacon_block_root(B256::ZERO)
+            .build(&mut db, &chainspec);
+
+        executor.upgrade_anchoring_at_boundary().unwrap();
+        drop(executor);
+
+        assert!(
+            db.load_cache_account(ANCHORING_ADDRESS)
+                .unwrap()
+                .account_info()
+                .is_none_or(|info| info.is_empty_code_hash()),
+            "an unseeded address was given anchoring code"
         );
     }
 
