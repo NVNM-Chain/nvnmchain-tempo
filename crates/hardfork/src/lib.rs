@@ -230,6 +230,9 @@ tempo_hardfork!(
         ///
         /// See <https://docs.tempo.xyz/docs/protocol/upgrades/t14>.
         T14,
+        /// NVNM1: this chain's first fork, named outside the `T` series so upstream's own forks
+        /// merge cleanly. Installs the anchoring runtime over the code the genesis alloc placed.
+        Nvnm1,
     }
 );
 
@@ -378,6 +381,7 @@ impl TempoHardfork {
             Self::T12 => None,
             Self::T13 => None,
             Self::T14 => None,
+            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -404,6 +408,7 @@ impl TempoHardfork {
             Self::T12 => Some(MAINNET_T12_TIMESTAMP),
             Self::T13 => None,
             Self::T14 => None,
+            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -430,6 +435,7 @@ impl TempoHardfork {
             Self::T12 => None,
             Self::T13 => None,
             Self::T14 => None,
+            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -456,6 +462,7 @@ impl TempoHardfork {
             Self::T12 => Some(MODERATO_T12_TIMESTAMP),
             Self::T13 => None,
             Self::T14 => None,
+            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 }

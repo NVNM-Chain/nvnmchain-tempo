@@ -221,7 +221,7 @@ fn print_grouped_diffs(diffs: &[(String, String)], missing_in: &str) {
     }
 }
 
-fn find_workspace_root() -> eyre::Result<PathBuf> {
+pub(crate) fn find_workspace_root() -> eyre::Result<PathBuf> {
     let output = std::process::Command::new("cargo")
         .args(["metadata", "--no-deps", "--format-version=1"])
         .output()
