@@ -31,7 +31,7 @@ use std::{
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
-    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME, MODULE_ADMIN_ADDRESS, MODULE_ADMIN_RUNTIME},
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME},
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -282,49 +282,37 @@ where
         self.install_zone_runtimes_at_boundary([portal, verifier, messenger])
     }
 
-    /// Installs the anchoring contract and its module admin at NVNM1, over the code the genesis
-    /// alloc placed. Storage stays — the corpus under one, the owners under the other, which is
-    /// why the multisig is here: no method sets its owners, so new code is the only way to name
-    /// new ones. An address with no code was never seeded and stays empty.
+    /// Installs the anchoring contract at NVNM1, over the code the genesis alloc placed. Storage
+    /// stays, so the corpus outlives the swap. An address with no code was never seeded and stays
+    /// empty. The module admin is a Safe and upgrades on Safe's own terms, so it is not here.
     ///
     /// The gate is NVNM1 being active, not the block it activates on, so this installs whatever
     /// the running binary embeds. A later runtime needs a fork of its own, or nodes take it at
     /// their own restart instead of at a block they agree on.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         // Every block runs this for as long as NVNM1 is active, so the jump-table scan and the
-        // keccak over each runtime happen once for the process.
-        static RUNTIMES: LazyLock<[(Address, Bytecode, B256); 2]> = LazyLock::new(|| {
-            [
-                (ANCHORING_ADDRESS, ANCHORING_RUNTIME),
-                (MODULE_ADMIN_ADDRESS, MODULE_ADMIN_RUNTIME),
-            ]
-            .map(|(address, runtime)| {
-                let code = Bytecode::new_legacy(runtime);
-                let code_hash = code.hash_slow();
-                (address, code, code_hash)
-            })
+        // keccak over the runtime happen once for the process.
+        static RUNTIME: LazyLock<(Bytecode, B256)> = LazyLock::new(|| {
+            let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
+            let code_hash = code.hash_slow();
+            (code, code_hash)
         });
+        let (code, code_hash) = &*RUNTIME;
 
         let db = self.inner.evm.db_mut();
-        let mut state = EvmState::default();
-        for (address, code, code_hash) in &*RUNTIMES {
-            let info = db
-                .basic(*address)
-                .map_err(BlockExecutionError::other)?
-                .unwrap_or_default();
-            if info.is_empty_code_hash() || info.code_hash == *code_hash {
-                continue;
-            }
+        let info = db
+            .basic(ANCHORING_ADDRESS)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default();
+        if info.is_empty_code_hash() || info.code_hash == *code_hash {
+            return Ok(());
+        }
 
-            let mut account = Account::from(info);
-            account.info.code_hash = *code_hash;
-            account.info.code = Some(code.clone());
-            account.mark_touch();
-            state.insert(*address, account);
-        }
-        if !state.is_empty() {
-            db.commit(state);
-        }
+        let mut account = Account::from(info);
+        account.info.code_hash = *code_hash;
+        account.info.code = Some(code.clone());
+        account.mark_touch();
+        db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
         Ok(())
     }
 
@@ -2167,19 +2155,16 @@ mod tests {
         let slot = U256::from(3);
         let corpus = U256::from(2182);
         let placed = Bytecode::new_legacy([0xfe].into());
-        // The multisig's owners are its storage, and they outlive a code swap the same way.
-        for address in [ANCHORING_ADDRESS, MODULE_ADMIN_ADDRESS] {
-            db.insert_account_with_storage(
-                address,
-                AccountInfo {
-                    nonce: 1,
-                    code_hash: placed.hash_slow(),
-                    code: Some(placed.clone()),
-                    ..Default::default()
-                },
-                FromIterator::from_iter([(slot, corpus)]),
-            );
-        }
+        db.insert_account_with_storage(
+            ANCHORING_ADDRESS,
+            AccountInfo {
+                nonce: 1,
+                code_hash: placed.hash_slow(),
+                code: Some(placed),
+                ..Default::default()
+            },
+            FromIterator::from_iter([(slot, corpus)]),
+        );
 
         let mut executor = TestExecutorBuilder::default()
             .with_parent_beacon_block_root(B256::ZERO)
@@ -2188,30 +2173,18 @@ mod tests {
         executor.upgrade_anchoring_at_boundary().unwrap();
         drop(executor);
 
-        for (address, expected) in [
-            (ANCHORING_ADDRESS, Bytecode::new_legacy(ANCHORING_RUNTIME)),
-            (
-                MODULE_ADMIN_ADDRESS,
-                Bytecode::new_legacy(MODULE_ADMIN_RUNTIME),
-            ),
-        ] {
-            let upgraded = db.load_cache_account(address).unwrap();
-            assert_eq!(
-                upgraded.account_info().unwrap().code.unwrap(),
-                expected,
-                "the boundary did not install the runtime at {address}"
-            );
-            assert_eq!(
-                upgraded.storage_slot(slot),
-                Some(corpus),
-                "the swap moved storage at {address}"
-            );
-            assert_eq!(
-                upgraded.account_info().unwrap().nonce,
-                1,
-                "nonce moved at {address}"
-            );
-        }
+        let upgraded = db.load_cache_account(ANCHORING_ADDRESS).unwrap();
+        assert_eq!(
+            upgraded.account_info().unwrap().code.unwrap(),
+            Bytecode::new_legacy(ANCHORING_RUNTIME),
+            "the boundary did not install the runtime"
+        );
+        assert_eq!(
+            upgraded.storage_slot(slot),
+            Some(corpus),
+            "the swap moved the corpus"
+        );
+        assert_eq!(upgraded.account_info().unwrap().nonce, 1, "nonce moved");
     }
 
     /// Nothing to upgrade at an address the genesis alloc never seeded.
@@ -2226,15 +2199,13 @@ mod tests {
         executor.upgrade_anchoring_at_boundary().unwrap();
         drop(executor);
 
-        for address in [ANCHORING_ADDRESS, MODULE_ADMIN_ADDRESS] {
-            assert!(
-                db.load_cache_account(address)
-                    .unwrap()
-                    .account_info()
-                    .is_none_or(|info| info.is_empty_code_hash()),
-                "unseeded {address} was given code"
-            );
-        }
+        assert!(
+            db.load_cache_account(ANCHORING_ADDRESS)
+                .unwrap()
+                .account_info()
+                .is_none_or(|info| info.is_empty_code_hash()),
+            "an unseeded address was given code"
+        );
     }
 
     #[test]
