@@ -8,8 +8,8 @@ use alloy_primitives::{Address, Bytes, address};
 /// Where the old chain's precompile answered, so a caller changes chains and nothing else.
 pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000A00");
 
-/// `params.Admin` on the old chain: a 2-of-3 amino multisig whose address no single key derives,
-/// so genesis gives it a Safe instead, owned by the member keys' own addresses.
+/// The module admin, whose address the migration writes into the anchoring contract. No key
+/// derives it, so genesis places a 2-of-3 Safe there rather than leave it unreachable.
 pub const MODULE_ADMIN_ADDRESS: Address = address!("0x0582bFB2e8561D48636E78f0e6b139d5a842be8f");
 
 /// `layout/anchoring.bin` decoded. `layout/anchoring.json` pins its slots, which the dump writer

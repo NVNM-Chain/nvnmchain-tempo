@@ -726,6 +726,10 @@ const OWNER_COUNT_SLOT: u64 = 3;
 const THRESHOLD_SLOT: u64 = 4;
 const SENTINEL: Address = address!("0x0000000000000000000000000000000000000001");
 
+/// What `setupOwners` refuses to take as an owner: the list's empty entry, its head, and the
+/// Safe itself.
+const RESERVED: [Address; 3] = [Address::ZERO, SENTINEL, MODULE_ADMIN_ADDRESS];
+
 /// A `u64` as the 32-byte word storage holds it in.
 fn word(value: u64) -> B256 {
     B256::from(U256::from(value))
@@ -739,8 +743,8 @@ fn entry(slot: u64, key: Address) -> B256 {
     keccak256(preimage)
 }
 
-/// Places the anchoring contract and the module admin that administers it. The corpus is not
-/// here; what genesis owes is the code at each address and the admin's owners.
+/// Places the anchoring contract and the module admin that administers it: code at each address,
+/// and the state Safe's constructor and `setup()` would have left. The corpus arrives separately.
 fn insert_anchoring_state_at_genesis(
     owners: &[Address],
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
@@ -748,20 +752,25 @@ fn insert_anchoring_state_at_genesis(
     if owners.is_empty() {
         return Ok(());
     }
-    // A repeat points the owner list at itself and drops an owner, leaving the threshold out of
-    // reach; the zero address is the list's empty entry. Dropping both from a set catches either.
-    let named: HashSet<_> = owners.iter().filter(|owner| !owner.is_zero()).collect();
+    // Genesis writes the list rather than calling `setupOwners`, so its refusals are here: a
+    // reserved address or a repeat leaves `getOwners` walking fewer names than `ownerCount`
+    // counts. Dropping both from a set catches either.
+    let named: HashSet<_> = owners.iter().filter(|o| !RESERVED.contains(o)).collect();
     eyre::ensure!(
         owners.len() == MODULE_ADMIN_OWNERS && named.len() == MODULE_ADMIN_OWNERS,
-        "the module admin holds {MODULE_ADMIN_OWNERS} distinct non-zero owners, got {owners:?}"
+        "the module admin holds {MODULE_ADMIN_OWNERS} distinct owners, none of them {RESERVED:?}, \
+         got {owners:?}"
     );
     println!("Initializing the anchoring contract and its module admin");
 
+    // Safe's constructor makes the singleton unusable so nobody can `setup()` it, and genesis
+    // runs no constructor.
+    let singleton = Some(BTreeMap::from([(word(THRESHOLD_SLOT), word(1))]));
     let admin = Some(safe_state(owners));
     for (address, code, storage) in [
         (ANCHORING_ADDRESS, ANCHORING_RUNTIME, None),
         (MODULE_ADMIN_ADDRESS, SAFE_PROXY_RUNTIME, admin),
-        (SAFE_SINGLETON_ADDRESS, SAFE_SINGLETON_RUNTIME, None),
+        (SAFE_SINGLETON_ADDRESS, SAFE_SINGLETON_RUNTIME, singleton),
     ] {
         genesis_alloc.insert(
             address,
@@ -1455,6 +1464,17 @@ mod anchoring_tests {
         assert_eq!(storage[&word(THRESHOLD_SLOT)], word(MODULE_ADMIN_THRESHOLD));
     }
 
+    /// An unset threshold lets the first caller `setup()` the singleton and be it.
+    #[test]
+    fn the_singleton_cannot_be_set_up() {
+        let alloc = alloc(&OWNERS).unwrap();
+        let storage = alloc[&SAFE_SINGLETON_ADDRESS]
+            .storage
+            .as_ref()
+            .expect("the singleton's constructor write is missing");
+        assert_eq!(storage[&word(THRESHOLD_SLOT)], word(1));
+    }
+
     /// `getOwners` walks from the sentinel back to it, so a break anywhere hides an owner.
     #[test]
     fn the_owner_list_runs_sentinel_to_sentinel() {
@@ -1486,10 +1506,16 @@ mod anchoring_tests {
         assert!(alloc(&[OWNERS[0], OWNERS[1], OWNERS[2], OWNERS[0]]).is_err());
     }
 
-    /// The zero address is the owner list's empty entry, so it can never be on it.
+    /// Each of these overwrites a link the walk depends on, so `getOwners` would answer with
+    /// fewer names than `ownerCount` counts.
     #[test]
-    fn a_zero_owner_is_refused() {
-        assert!(alloc(&[OWNERS[0], Address::ZERO, OWNERS[2]]).is_err());
+    fn a_reserved_owner_is_refused() {
+        for reserved in RESERVED {
+            assert!(
+                alloc(&[OWNERS[0], reserved, OWNERS[2]]).is_err(),
+                "{reserved} was taken as an owner"
+            );
+        }
     }
 
     /// A repeat points the list at itself, dropping an owner and the threshold with it.
