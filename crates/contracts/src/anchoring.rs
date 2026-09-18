@@ -21,3 +21,7 @@ pub const MODULE_ADMIN_RUNTIME: Bytes =
 
 /// The multisig's `address[3] _owners`, at slots 0..2.
 pub const MODULE_ADMIN_OWNERS: usize = 3;
+
+/// `_recovery`, the only address `recover` answers. Genesis is its only writer, since a boundary
+/// installs code and never storage.
+pub const MODULE_ADMIN_RECOVERY_SLOT: u64 = 7;

@@ -33,7 +33,7 @@ use reth_evm::{
     },
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     iter::repeat_with,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -45,7 +45,7 @@ use tempo_contracts::{
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
     anchoring::{
         ANCHORING_ADDRESS, ANCHORING_RUNTIME, MODULE_ADMIN_ADDRESS, MODULE_ADMIN_OWNERS,
-        MODULE_ADMIN_RUNTIME,
+        MODULE_ADMIN_RECOVERY_SLOT, MODULE_ADMIN_RUNTIME,
     },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
@@ -232,6 +232,11 @@ pub(crate) struct GenesisArgs {
     /// genesis carries neither, as upstream's own networks want.
     #[arg(long, value_delimiter = ',')]
     module_admin_owners: Vec<Address>,
+
+    /// Who may replace those owners outright, when too few keys are left for two of them to do
+    /// it. Left out, that is the only way they change.
+    #[arg(long)]
+    module_admin_recovery: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -583,7 +588,11 @@ impl GenesisArgs {
         );
 
         insert_zone_state_at_genesis(self.t10_time, self.t12_time, &mut genesis_alloc);
-        insert_anchoring_state_at_genesis(&self.module_admin_owners, &mut genesis_alloc)?;
+        insert_anchoring_state_at_genesis(
+            &self.module_admin_owners,
+            self.module_admin_recovery,
+            &mut genesis_alloc,
+        )?;
 
         genesis_alloc.insert(
             HISTORY_STORAGE_ADDRESS,
@@ -717,23 +726,38 @@ impl GenesisArgs {
 /// here; what genesis owes is the code at both addresses and the owners, frozen once written.
 fn insert_anchoring_state_at_genesis(
     owners: &[Address],
+    recovery: Option<Address>,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) -> eyre::Result<()> {
     if owners.is_empty() {
+        eyre::ensure!(
+            recovery.is_none(),
+            "--module-admin-recovery names who may replace the owners, so it needs --module-admin-owners"
+        );
         return Ok(());
     }
-    // The zero address is never an owner, so an unset slot would admit nobody.
+    // What `recover` enforces for the same three slots: zero admits nobody, and a repeat puts the
+    // threshold out of reach, since an owner cannot confirm twice.
     eyre::ensure!(
-        owners.len() == MODULE_ADMIN_OWNERS && owners.iter().all(|owner| !owner.is_zero()),
-        "the module admin holds {MODULE_ADMIN_OWNERS} non-zero owners, got {owners:?}"
+        owners.len() == MODULE_ADMIN_OWNERS
+            && owners.iter().all(|owner| !owner.is_zero())
+            && owners.iter().collect::<BTreeSet<_>>().len() == MODULE_ADMIN_OWNERS,
+        "the module admin holds {MODULE_ADMIN_OWNERS} distinct non-zero owners, got {owners:?}"
     );
     println!("Initializing the anchoring contract and its module admin");
 
-    let slots = owners
+    let mut slots: BTreeMap<B256, B256> = owners
         .iter()
         .enumerate()
         .map(|(slot, owner)| (B256::from(U256::from(slot)), owner.into_word()))
         .collect();
+    if let Some(recovery) = recovery {
+        eyre::ensure!(!recovery.is_zero(), "the recovery authority cannot be zero");
+        slots.insert(
+            B256::from(U256::from(MODULE_ADMIN_RECOVERY_SLOT)),
+            recovery.into_word(),
+        );
+    }
     for (address, code, storage) in [
         (ANCHORING_ADDRESS, ANCHORING_RUNTIME, None),
         (MODULE_ADMIN_ADDRESS, MODULE_ADMIN_RUNTIME, Some(slots)),
@@ -1382,8 +1406,37 @@ mod anchoring_tests {
 
     fn alloc(owners: &[Address]) -> eyre::Result<BTreeMap<Address, GenesisAccount>> {
         let mut alloc = BTreeMap::new();
-        insert_anchoring_state_at_genesis(owners, &mut alloc)?;
+        insert_anchoring_state_at_genesis(owners, None, &mut alloc)?;
         Ok(alloc)
+    }
+
+    /// Named here, the multisig asks it rather than the validator admin.
+    #[test]
+    fn a_named_recovery_authority_lands_in_its_slot() {
+        let recovery = address!("0x00000000000000000000000000000000000000be");
+        let mut named = BTreeMap::new();
+        insert_anchoring_state_at_genesis(&OWNERS, Some(recovery), &mut named).unwrap();
+
+        let storage = named[&MODULE_ADMIN_ADDRESS].storage.as_ref().unwrap();
+        assert_eq!(
+            storage[&B256::from(U256::from(MODULE_ADMIN_RECOVERY_SLOT))],
+            recovery.into_word()
+        );
+        assert_eq!(storage.len(), MODULE_ADMIN_OWNERS + 1);
+
+        // Left out, the slot stays empty and the multisig falls back.
+        let unnamed = alloc(&OWNERS).unwrap();
+        let unnamed = unnamed[&MODULE_ADMIN_ADDRESS].storage.as_ref().unwrap();
+        assert_eq!(unnamed.len(), MODULE_ADMIN_OWNERS);
+    }
+
+    /// It names who may replace the owners, so it means nothing without them.
+    #[test]
+    fn a_recovery_authority_needs_owners() {
+        let mut empty = BTreeMap::new();
+        let err = insert_anchoring_state_at_genesis(&[], Some(Address::repeat_byte(1)), &mut empty)
+            .unwrap_err();
+        assert!(err.to_string().contains("--module-admin-owners"), "{err}");
     }
 
     /// What the launch genesis owes: both runtimes, and the owners in the slots the multisig reads.
@@ -1398,6 +1451,14 @@ mod anchoring_tests {
             assert_eq!(storage[&B256::from(U256::from(slot))], owner.into_word());
         }
         assert_eq!(storage.len(), MODULE_ADMIN_OWNERS);
+    }
+
+    /// A repeat would put the threshold out of reach: an owner cannot confirm twice.
+    #[test]
+    fn a_repeated_owner_is_refused() {
+        let repeated = [OWNERS[0], OWNERS[1], OWNERS[0]];
+        let err = alloc(&repeated).unwrap_err();
+        assert!(err.to_string().contains("distinct"), "{err}");
     }
 
     /// Upstream's own networks carry neither contract.
