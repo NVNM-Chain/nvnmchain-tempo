@@ -37,7 +37,7 @@ permissions: {}
 jobs:
   resolve-refs:
     name: resolve-refs
-    if: ${{ github.event_name != 'schedule' || github.repository == 'tempoxyz/tempo' }}
+    if: ${{ github.repository == 'tempoxyz/tempo' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
       actions: read
