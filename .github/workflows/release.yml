@@ -34,6 +34,9 @@ env:
 jobs:
   get-version:
     name: Get Version
+    # Binaries are signed, uploaded to R2 and built on depot runners, none of which a fork has,
+    # so a tag here would only publish a failure. Every other job needs this one.
+    if: ${{ github.repository == 'tempoxyz/tempo' }}
     runs-on: ubuntu-latest
     permissions: {}
     outputs:
