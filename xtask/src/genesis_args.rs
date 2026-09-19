@@ -4,7 +4,7 @@ use alloy::{
     signers::{local::MnemonicBuilder, utils::secret_key_to_address},
 };
 use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
-use alloy_primitives::{B256, Bytes, keccak256};
+use alloy_primitives::{B256, Bytes};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{
     Signer as _,
@@ -32,7 +32,7 @@ use reth_evm::{
     },
 };
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     iter::repeat_with,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -42,10 +42,7 @@ use tempo_consensus_config::{SigningKey, SigningShare};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
-    anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_RUNTIME, MODULE_ADMIN_ADDRESS, SAFE_PROXY_RUNTIME,
-        SAFE_SINGLETON_ADDRESS, SAFE_SINGLETON_RUNTIME,
-    },
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME},
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
         INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
@@ -231,10 +228,10 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     nvnm1_time: Option<u64>,
 
-    /// The module admin's three owners, which also places the anchoring contract. Left out, the
-    /// genesis carries neither, as upstream's own networks want.
-    #[arg(long, value_delimiter = ',')]
-    module_admin_owners: Vec<Address>,
+    /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
+    /// networks want.
+    #[arg(long)]
+    anchoring: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -586,7 +583,7 @@ impl GenesisArgs {
         );
 
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, &mut genesis_alloc);
-        insert_anchoring_state_at_genesis(&self.module_admin_owners, &mut genesis_alloc)?;
+        insert_anchoring_contract_at_genesis(self.anchoring, &mut genesis_alloc);
 
         genesis_alloc.insert(
             HISTORY_STORAGE_ADDRESS,
@@ -719,94 +716,24 @@ impl GenesisArgs {
     }
 }
 
-/// The old chain's admin was three members, two of whom had to sign.
-const MODULE_ADMIN_OWNERS: usize = 3;
-const MODULE_ADMIN_THRESHOLD: u64 = 2;
-
-/// Safe's storage, from `forge inspect Safe storageLayout`, and the head and tail of its
-/// circular owner and module lists.
-const SINGLETON_SLOT: u64 = 0;
-const MODULES_SLOT: u64 = 1;
-const OWNERS_SLOT: u64 = 2;
-const OWNER_COUNT_SLOT: u64 = 3;
-const THRESHOLD_SLOT: u64 = 4;
-const SENTINEL: Address = address!("0x0000000000000000000000000000000000000001");
-
-/// What `setupOwners` refuses to take as an owner: the list's empty entry, its head, and the
-/// Safe itself.
-const RESERVED: [Address; 3] = [Address::ZERO, SENTINEL, MODULE_ADMIN_ADDRESS];
-
-/// A `u64` as the 32-byte word storage holds it in.
-fn word(value: u64) -> B256 {
-    B256::from(U256::from(value))
-}
-
-/// A `mapping(address => address)` entry, which is keyed by `keccak256(key . slot)`, both padded.
-fn entry(slot: u64, key: Address) -> B256 {
-    let mut preimage = [0u8; 64];
-    preimage[..32].copy_from_slice(key.into_word().as_slice());
-    preimage[32..].copy_from_slice(word(slot).as_slice());
-    keccak256(preimage)
-}
-
-/// Places the anchoring contract and the module admin that administers it: code at each address,
-/// and the state Safe's constructor and `setup()` would have left. The corpus arrives separately.
-fn insert_anchoring_state_at_genesis(
-    owners: &[Address],
+/// Places the anchoring contract. Its storage is the dump's: the corpus, and the address the
+/// source chain called its admin, which this build does not read.
+fn insert_anchoring_contract_at_genesis(
+    anchoring: bool,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
-) -> eyre::Result<()> {
-    if owners.is_empty() {
-        return Ok(());
+) {
+    if !anchoring {
+        return;
     }
-    // Genesis writes the list rather than calling `setupOwners`, so its refusals are here: a
-    // reserved address or a repeat leaves `getOwners` walking fewer names than `ownerCount`
-    // counts. Dropping both from a set catches either.
-    let named: HashSet<_> = owners.iter().filter(|o| !RESERVED.contains(o)).collect();
-    eyre::ensure!(
-        owners.len() == MODULE_ADMIN_OWNERS && named.len() == MODULE_ADMIN_OWNERS,
-        "the module admin holds {MODULE_ADMIN_OWNERS} distinct owners, none of them {RESERVED:?}, \
-         got {owners:?}"
+    println!("Initializing the anchoring contract");
+    genesis_alloc.insert(
+        ANCHORING_ADDRESS,
+        GenesisAccount {
+            code: Some(ANCHORING_RUNTIME),
+            nonce: Some(1),
+            ..Default::default()
+        },
     );
-    println!("Initializing the anchoring contract and its module admin");
-
-    // Safe's constructor makes the singleton unusable so nobody can `setup()` it, and genesis
-    // runs no constructor.
-    let singleton = Some(BTreeMap::from([(word(THRESHOLD_SLOT), word(1))]));
-    let admin = Some(safe_state(owners));
-    for (address, code, storage) in [
-        (ANCHORING_ADDRESS, ANCHORING_RUNTIME, None),
-        (MODULE_ADMIN_ADDRESS, SAFE_PROXY_RUNTIME, admin),
-        (SAFE_SINGLETON_ADDRESS, SAFE_SINGLETON_RUNTIME, singleton),
-    ] {
-        genesis_alloc.insert(
-            address,
-            GenesisAccount {
-                code: Some(code),
-                nonce: Some(1),
-                storage,
-                ..Default::default()
-            },
-        );
-    }
-    Ok(())
-}
-
-/// What Safe's `setup()` would have written, so genesis can skip it — and, by writing it, spends
-/// the one call `setup()` allows, so nobody else can make the Safe theirs.
-fn safe_state(owners: &[Address]) -> BTreeMap<B256, B256> {
-    // The owners are a list running sentinel to sentinel, which `getOwners` walks.
-    std::iter::once(SENTINEL)
-        .chain(owners.iter().copied())
-        .zip(owners.iter().copied().chain(std::iter::once(SENTINEL)))
-        .map(|(from, to)| (entry(OWNERS_SLOT, from), to.into_word()))
-        .chain([
-            (word(SINGLETON_SLOT), SAFE_SINGLETON_ADDRESS.into_word()),
-            (word(OWNER_COUNT_SLOT), word(owners.len() as u64)),
-            (word(THRESHOLD_SLOT), word(MODULE_ADMIN_THRESHOLD)),
-            // `setupModules` seeds the module list, which the first `enableModule` walks from.
-            (entry(MODULES_SLOT, SENTINEL), SENTINEL.into_word()),
-        ])
-        .collect()
 }
 
 fn insert_zone_state_at_genesis(
@@ -1432,101 +1359,27 @@ mod tests {
 mod anchoring_tests {
     use super::*;
 
-    const OWNERS: [Address; MODULE_ADMIN_OWNERS] = [
-        address!("0x1becd7f3beed7907e5a94980b074b51f8d2f4bed"),
-        address!("0x4de8c982bcc02663554425b324cb4d5e2b87de93"),
-        address!("0xbf13df9e8fd64aee9c2ea17efe7a142514eceb40"),
-    ];
-
-    fn alloc(owners: &[Address]) -> eyre::Result<BTreeMap<Address, GenesisAccount>> {
+    fn alloc(anchoring: bool) -> BTreeMap<Address, GenesisAccount> {
         let mut alloc = BTreeMap::new();
-        insert_anchoring_state_at_genesis(owners, &mut alloc)?;
-        Ok(alloc)
+        insert_anchoring_contract_at_genesis(anchoring, &mut alloc);
+        alloc
     }
 
-    /// What the launch genesis owes: the anchoring runtime, and a Safe at the module admin's
-    /// address already set up, since `setup()` is a transaction and genesis has none.
+    /// The runtime this binary embeds, and the nonce a deployment would have left. Every slot is
+    /// the dump's.
     #[test]
-    fn the_module_admin_is_a_safe_ready_to_use() {
-        let alloc = alloc(&OWNERS).unwrap();
-        assert_eq!(alloc[&ANCHORING_ADDRESS].code, Some(ANCHORING_RUNTIME));
-        assert_eq!(
-            alloc[&SAFE_SINGLETON_ADDRESS].code,
-            Some(SAFE_SINGLETON_RUNTIME)
-        );
-
-        let admin = &alloc[&MODULE_ADMIN_ADDRESS];
-        assert_eq!(admin.code, Some(SAFE_PROXY_RUNTIME));
-        let storage = admin.storage.as_ref().expect("the Safe's state is written");
-        assert_eq!(
-            storage[&word(SINGLETON_SLOT)],
-            SAFE_SINGLETON_ADDRESS.into_word(),
-            "the proxy delegates nowhere"
-        );
-        assert_eq!(
-            storage[&word(OWNER_COUNT_SLOT)],
-            word(MODULE_ADMIN_OWNERS as u64)
-        );
-        assert_eq!(storage[&word(THRESHOLD_SLOT)], word(MODULE_ADMIN_THRESHOLD));
+    fn the_contract_is_placed_with_no_storage() {
+        let alloc = alloc(true);
+        let anchoring = &alloc[&ANCHORING_ADDRESS];
+        assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
+        assert_eq!(anchoring.nonce, Some(1));
+        assert!(anchoring.storage.is_none());
+        assert_eq!(alloc.len(), 1, "nothing else belongs here");
     }
 
-    /// An unset threshold lets the first caller `setup()` the singleton and be it.
+    /// Upstream's own networks generate the same way and must not pick it up.
     #[test]
-    fn the_singleton_cannot_be_set_up() {
-        let alloc = alloc(&OWNERS).unwrap();
-        let storage = alloc[&SAFE_SINGLETON_ADDRESS]
-            .storage
-            .as_ref()
-            .expect("the singleton's constructor write is missing");
-        assert_eq!(storage[&word(THRESHOLD_SLOT)], word(1));
-    }
-
-    /// `getOwners` walks from the sentinel back to it, so a break anywhere hides an owner.
-    #[test]
-    fn the_owner_list_runs_sentinel_to_sentinel() {
-        let storage = alloc(&OWNERS).unwrap()[&MODULE_ADMIN_ADDRESS]
-            .storage
-            .clone()
-            .unwrap();
-        let next = |from: Address| Address::from_word(storage[&entry(OWNERS_SLOT, from)]);
-
-        let walked: Vec<_> = std::iter::successors(Some(SENTINEL), |&owner| {
-            Some(next(owner)).filter(|&owner| owner != SENTINEL)
-        })
-        .skip(1)
-        .collect();
-        assert_eq!(walked, OWNERS);
-        assert_eq!(next(OWNERS[MODULE_ADMIN_OWNERS - 1]), SENTINEL);
-    }
-
-    /// Upstream's own networks carry none of this.
-    #[test]
-    fn no_owners_places_nothing() {
-        assert!(alloc(&[]).unwrap().is_empty());
-    }
-
-    /// The owners are frozen at genesis, so a miscount is caught here or never.
-    #[test]
-    fn a_wrong_owner_count_is_refused() {
-        assert!(alloc(&OWNERS[..2]).is_err());
-        assert!(alloc(&[OWNERS[0], OWNERS[1], OWNERS[2], OWNERS[0]]).is_err());
-    }
-
-    /// Each of these overwrites a link the walk depends on, so `getOwners` would answer with
-    /// fewer names than `ownerCount` counts.
-    #[test]
-    fn a_reserved_owner_is_refused() {
-        for reserved in RESERVED {
-            assert!(
-                alloc(&[OWNERS[0], reserved, OWNERS[2]]).is_err(),
-                "{reserved} was taken as an owner"
-            );
-        }
-    }
-
-    /// A repeat points the list at itself, dropping an owner and the threshold with it.
-    #[test]
-    fn a_repeated_owner_is_refused() {
-        assert!(alloc(&[OWNERS[0], OWNERS[0], OWNERS[2]]).is_err());
+    fn without_the_flag_the_genesis_carries_none() {
+        assert!(alloc(false).is_empty());
     }
 }
