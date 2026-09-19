@@ -6,16 +6,10 @@ use eyre::{Context, bail};
 use std::path::PathBuf;
 
 /// Each `layout/` build and the copy of it this binary embeds, relative to the workspace root.
-const COPIES: &[(&str, &str)] = &[
-    (
-        "anchoring.bin",
-        "crates/contracts/src/anchoring_runtime.bin",
-    ),
-    (
-        "module-admin-multisig.bin",
-        "crates/contracts/src/module_admin_runtime.bin",
-    ),
-];
+const COPIES: &[(&str, &str)] = &[(
+    "anchoring.bin",
+    "crates/contracts/src/anchoring_runtime.bin",
+)];
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct AnchoringRuntime {
