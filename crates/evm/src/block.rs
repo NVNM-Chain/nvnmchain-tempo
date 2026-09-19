@@ -283,8 +283,8 @@ where
     }
 
     /// Installs the anchoring contract at NVNM1, over the code the genesis alloc placed. Storage
-    /// stays, so the corpus outlives the swap. An address with no code was never seeded and stays
-    /// empty. The module admin is a Safe and upgrades on Safe's own terms, so it is not here.
+    /// stays, so the corpus outlives the swap, and so does the admin the contract now names in
+    /// code. An address with no code was never seeded and stays empty.
     ///
     /// The gate is NVNM1 being active, not the block it activates on, so this installs whatever
     /// the running binary embeds. A later runtime needs a fork of its own, or nodes take it at
