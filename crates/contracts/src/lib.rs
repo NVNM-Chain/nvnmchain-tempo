@@ -204,6 +204,30 @@ mod tests {
         );
     }
 
+    /// Safe v1.4.1's runtimes as the module admin uses them: the singleton as mainnet deployed it,
+    /// and the proxy as `SafeProxyFactory.proxyCreationCode()` leaves it behind.
+    #[test]
+    fn safe_runtimes_are_the_ones_we_pinned() {
+        assert_eq!(
+            keccak256(&anchoring::SAFE_SINGLETON_RUNTIME),
+            b256!("0x1fe2df852ba3299d6534ef416eefa406e56ced995bca886ab7a553e6d0c5e1c4"),
+        );
+        assert_eq!(
+            keccak256(&anchoring::SAFE_PROXY_RUNTIME),
+            b256!("0xd7d408ebcd99b2b70be43e20253d6d92a8ea8fab29bd3be7f55b10032331fb4c"),
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires mainnet RPC access - not needed after mainnet launch"]
+    async fn safe_singleton_bytecode_matches_mainnet() {
+        assert_eq!(
+            get_mainnet_code_hash(anchoring::SAFE_SINGLETON_ADDRESS).await,
+            keccak256(&anchoring::SAFE_SINGLETON_RUNTIME),
+            "the Safe singleton we embed is not the one mainnet carries"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires mainnet RPC access - not needed after mainnet launch"]
     async fn safe_deployer_bytecode_matches_mainnet() {
