@@ -13360,6 +13360,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tempo-alloy",
+ "tempo-anchoring-index",
  "tempo-chainspec",
  "tempo-consensus",
  "tempo-consensus-config",
@@ -13428,6 +13429,29 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tracing",
+]
+
+[[package]]
+name = "tempo-anchoring-index"
+version = "1.14.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "async-trait",
+ "clap",
+ "eyre",
+ "futures",
+ "jsonrpsee",
+ "reth-ethereum",
+ "reth-node-api",
+ "reth-node-core",
+ "reth-storage-api",
+ "rocksdb",
+ "serde",
+ "tempfile",
+ "tempo-primitives",
+ "tokio",
  "tracing",
 ]
 
