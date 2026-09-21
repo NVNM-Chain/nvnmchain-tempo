@@ -27,7 +27,7 @@ on:
 jobs:
   build:
     name: Build & hash
-    runs-on: depot-ubuntu-latest-16
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
