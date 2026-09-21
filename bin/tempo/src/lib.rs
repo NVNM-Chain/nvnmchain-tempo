@@ -64,9 +64,13 @@ use reth_ethereum::{chainspec::EthChainSpec as _, cli::Commands};
 use reth_network_api::Peers;
 use reth_node_builder::{NodeHandle, WithLaunchContext};
 use std::{sync::Arc, thread};
+use tempo_anchoring_index::{AnchoringApiServer, AnchoringRpc};
 use tempo_chainspec::spec::{DEV, TempoChainSpec};
 use tempo_consensus::{feed as consensus_feed, run_consensus_stack, run_follow_stack};
-use tempo_contracts::precompiles::{ZONE_FACTORY_ADDRESS, initial_zone_factory_config};
+use tempo_contracts::{
+    anchoring::ANCHORING_ADDRESS,
+    precompiles::{ZONE_FACTORY_ADDRESS, initial_zone_factory_config},
+};
 use tempo_evm::{TempoEvmConfig, consensus::TempoConsensus};
 use tempo_faucet::faucet::{TempoFaucetExt, TempoFaucetExtApiServer};
 pub use tempo_node::{
@@ -511,6 +515,27 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
             url => Some(url.to_string()),
         };
 
+        // One open for both halves: the ExEx that fills the index and the RPC that reads it.
+        let (name_index_store, name_index_reader) = args
+            .anchoring_index
+            .enabled
+            .then(|| {
+                let datadir = builder
+                    .config()
+                    .datadir
+                    .clone()
+                    .resolve_datadir(builder.config().chain.chain());
+                tempo_anchoring_index::open_store(
+                    datadir.data_dir(),
+                    args.anchoring_index.path.clone(),
+                    chain_id,
+                    ANCHORING_ADDRESS,
+                )
+            })
+            .transpose()
+            .wrap_err("failed to open the anchoring name index")?
+            .unzip();
+
         let NodeHandle {
             node,
             node_exit_future,
@@ -537,6 +562,20 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
                 let has_consensus_engine =
                     args.has_consensus_engine(builder.config().dev.dev);
 
+                let builder = match name_index_store {
+                    Some(store) => builder.install_exex(
+                        "anchoring-name-index",
+                        move |ctx| async move {
+                            Ok(tempo_anchoring_index::exex::run(
+                                ctx,
+                                store,
+                                ANCHORING_ADDRESS,
+                            ))
+                        },
+                    ),
+                    None => builder,
+                };
+
                 builder.extend_rpc_modules(move |ctx| {
                     if faucet_args.enabled {
                         let faucet_ext = TempoFaucetExt::new(
@@ -553,6 +592,16 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
                         let consensus_rpc = TempoConsensusRpc::new(cl_feed_state);
                         ctx.modules.merge_configured(consensus_rpc.into_rpc())
                             .wrap_err("failed to register consensus rpc module")?;
+                    }
+
+                    if let Some(index) = name_index_reader {
+                        let anchoring = AnchoringRpc::new(
+                            ctx.provider().clone(),
+                            index,
+                            ANCHORING_ADDRESS,
+                        );
+                        ctx.modules.merge_configured(anchoring.into_rpc())
+                            .wrap_err("failed to register anchoring rpc module")?;
                     }
 
                     Ok(())
