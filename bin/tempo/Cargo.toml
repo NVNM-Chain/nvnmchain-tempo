@@ -34,6 +34,7 @@ tempo-validator-config.workspace = true
 tempo-chainspec = { workspace = true, features = ["default"] }
 tempo-evm.workspace = true
 tempo-faucet.workspace = true
+tempo-anchoring-index.workspace = true
 tempo-telemetry-util.workspace = true
 
 alloy = { workspace = true, default-features = false, features = [
