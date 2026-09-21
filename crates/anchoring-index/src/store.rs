@@ -1,7 +1,8 @@
 //! Registry ids keyed by name, in RocksDB.
 //!
 //! `id` holds every registry's lowercased name. `name` and `rev` are the seeks: the name, or
-//! its reverse, then the id, so a prefix of either is a contiguous range.
+//! its reverse, then the id, so a prefix of either is a contiguous range. `tri` is the same
+//! shape over every three characters of a name, which is what `contains` seeks.
 //!
 //! No write needs to be atomic with another: state is the source of truth and
 //! [`crate::exex::reconcile`] re-reads whatever a crash left short.
@@ -23,7 +24,8 @@ const CF_META: &str = "meta";
 const CF_ID: &str = "id";
 const CF_NAME: &str = "name";
 const CF_REV: &str = "rev";
-const CFS: [&str; 4] = [CF_META, CF_ID, CF_NAME, CF_REV];
+const CF_TRI: &str = "tri";
+const CFS: [&str; 5] = [CF_META, CF_ID, CF_NAME, CF_REV, CF_TRI];
 
 const KEY_LAYOUT: &[u8] = b"layout";
 const KEY_SOURCE: &[u8] = b"source";
@@ -254,8 +256,6 @@ impl Reader {
     }
 
     /// The ids matching `name` under `mode`, in id order, `limit` of them from `offset`.
-    ///
-    /// Exact, prefix and suffix seek a key range; `contains` cannot, and reads the names.
     pub fn search(
         &self,
         mode: Mode,
@@ -268,7 +268,7 @@ impl Reader {
             Mode::Exact => (CF_NAME, name_prefix(&lower)),
             Mode::Prefix => (CF_NAME, lower.as_bytes().to_vec()),
             Mode::Suffix => (CF_REV, reversed(&lower).into_bytes()),
-            Mode::Contains => return self.scan(&lower, offset, limit),
+            Mode::Contains => return self.contains(&lower, offset, limit),
         };
 
         let mut ids = Vec::new();
@@ -284,6 +284,55 @@ impl Reader {
         }
         ids.sort_unstable();
         Ok(page(ids, offset, limit))
+    }
+
+    /// Through the postings when the query has a trigram to seek; a shorter one reads the
+    /// names, which the chain's own index refused to do.
+    fn contains(&self, lower: &str, offset: u64, limit: u64) -> eyre::Result<Vec<u64>> {
+        let probes = probes(lower);
+        match probes.is_empty() {
+            true => self.scan(lower, offset, limit),
+            false => self.postings(&probes, lower, offset, limit),
+        }
+    }
+
+    /// The ids every probe is posted under, in id order. A trigram says a name holds three
+    /// characters, not the query, so each candidate is read back and tested.
+    fn postings(
+        &self,
+        probes: &[String],
+        lower: &str,
+        offset: u64,
+        limit: u64,
+    ) -> eyre::Result<Vec<u64>> {
+        let prefixes: Vec<Vec<u8>> = probes.iter().map(|gram| name_prefix(gram)).collect();
+        let tri = cf(&self.db, CF_TRI);
+        let mut cursors: Vec<_> = prefixes
+            .iter()
+            .map(|_| self.db.raw_iterator_cf(tri))
+            .collect();
+
+        let (mut ids, mut skipped, mut from) = (Vec::new(), 0, 0);
+        while (ids.len() as u64) < limit {
+            let Some(id) = next_common(&mut cursors, &prefixes, from)? else {
+                break;
+            };
+            if self.holds(id, lower)? {
+                match skipped < offset {
+                    true => skipped += 1,
+                    false => ids.push(id),
+                }
+            }
+            from = id + 1;
+        }
+        Ok(ids)
+    }
+
+    fn holds(&self, id: u64, lower: &str) -> eyre::Result<bool> {
+        let Some(name) = self.db.get_cf(cf(&self.db, CF_ID), id.to_be_bytes())? else {
+            return Ok(false);
+        };
+        Ok(String::from_utf8_lossy(&name).contains(lower))
     }
 
     /// Every name in id order, stopping once the page is full.
@@ -316,10 +365,78 @@ fn cf<'a>(db: &'a DB, name: &str) -> &'a ColumnFamily {
 
 /// Every key a registry is written under, by family.
 fn keys(lower: &str, id: u64) -> Vec<(&'static str, Vec<u8>)> {
-    vec![
+    let mut keys = vec![
         (CF_NAME, name_key(lower, id)),
         (CF_REV, name_key(&reversed(lower), id)),
-    ]
+    ];
+    keys.extend(
+        trigrams(lower)
+            .iter()
+            .map(|gram| (CF_TRI, name_key(gram, id))),
+    );
+    keys
+}
+
+/// The distinct trigrams of `lower`, by character so a multi-byte name cuts where it should.
+fn trigrams(lower: &str) -> Vec<String> {
+    let chars: Vec<char> = lower.chars().collect();
+    let mut grams: Vec<String> = Vec::new();
+    for window in chars.windows(3) {
+        let gram: String = window.iter().collect();
+        if !grams.contains(&gram) {
+            grams.push(gram);
+        }
+    }
+    grams
+}
+
+/// How many of a query's trigrams are seeked. Each is a cursor moved in step; past a handful
+/// they cost more than the candidates they rule out, which the name test rules out anyway.
+const PROBES: usize = 4;
+
+/// Up to [`PROBES`] trigrams, spread across the query so they overlap as little as possible.
+fn probes(lower: &str) -> Vec<String> {
+    let grams = trigrams(lower);
+    if grams.len() <= PROBES {
+        return grams;
+    }
+    (0..PROBES)
+        .map(|i| grams[i * (grams.len() - 1) / (PROBES - 1)].clone())
+        .collect()
+}
+
+/// The first id at or after `from` that every posting list holds, or `None` when one runs out.
+/// The furthest any cursor lands on becomes what the rest must reach, until none moves.
+fn next_common(
+    cursors: &mut [rocksdb::DBRawIterator<'_>],
+    prefixes: &[Vec<u8>],
+    from: u64,
+) -> eyre::Result<Option<u64>> {
+    let mut wanted = from;
+    loop {
+        let mut moved = false;
+        for (cursor, prefix) in cursors.iter_mut().zip(prefixes) {
+            let mut key = prefix.clone();
+            key.extend_from_slice(&wanted.to_be_bytes());
+            cursor.seek(&key);
+            cursor.status()?;
+            let posted = cursor
+                .key()
+                .filter(|key| key.starts_with(prefix))
+                .map(id_of)
+                .transpose()?;
+            let Some(posted) = posted else {
+                return Ok(None);
+            };
+            if posted != wanted {
+                wanted = posted;
+                moved = true;
+            }
+        }
+        if !moved {
+            return Ok(Some(wanted));
+        }
+    }
 }
 
 /// `name . 0`: the prefix of every key for that exact name.
@@ -510,6 +627,49 @@ mod tests {
             Some(Tip::new(7, B256::repeat_byte(0x11)))
         );
         assert_eq!(found(&reader, Mode::Prefix, "fund"), vec![1]);
+    }
+
+    /// Every probe lands on the name and the query is still not in it: only reading the name
+    /// can tell, and the difference sits between the probes, where the postings cannot see.
+    #[test]
+    fn a_name_holding_every_probe_but_not_the_query_is_not_a_match() {
+        let name = "abcdefghijklmnopqrst";
+        let query = "abcdXfghijklmnopqrst".to_lowercase();
+        assert!(
+            probes(&query)
+                .iter()
+                .all(|gram| name.contains(gram.as_str())),
+            "{:?} must all be in the name for this to test anything",
+            probes(&query)
+        );
+
+        let (_dir, store) = store(&[name]);
+        assert!(found(&store.reader(), Mode::Contains, &query).is_empty());
+        assert_eq!(found(&store.reader(), Mode::Contains, name), vec![1]);
+    }
+
+    /// The chain's own index refused these; here they fall back to reading the names.
+    #[test]
+    fn a_query_shorter_than_a_trigram_is_still_answered() {
+        let (_dir, store) = store(&NAMES);
+        let reader = store.reader();
+        assert!(probes("al").is_empty());
+        assert_eq!(found(&reader, Mode::Contains, "al"), vec![1, 2, 3, 5]);
+        assert_eq!(found(&reader, Mode::Contains, "a"), vec![1, 2, 3, 4, 5]);
+        assert_eq!(
+            reader.search(Mode::Contains, "al", 1, 2).unwrap(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn a_query_is_probed_by_at_most_a_handful_of_its_trigrams() {
+        assert_eq!(probes("abc"), ["abc"]);
+        assert_eq!(probes("abcd"), ["abc", "bcd"]);
+        assert_eq!(probes("abcdefghijklmnopqrst"), ["abc", "fgh", "lmn", "rst"]);
+        // A name is posted under all of them, or its middle could not find it.
+        assert_eq!(trigrams("abcde"), ["abc", "bcd", "cde"]);
+        assert_eq!(trigrams("aaaa"), ["aaa"]);
     }
 
     #[test]
