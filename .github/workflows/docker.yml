@@ -3,9 +3,8 @@ name: Docker Build
 permissions: {}
 
 # Only refs that are actually deployed from. Upstream also builds on a nightly
-# cron and on merge_group; both are out of reach here, because a build on
-# GitHub-hosted runners keeps no layer cache and recompiles the whole reth
-# dependency tree from scratch on each architecture.
+# cron and on merge_group; both are out of reach here, because the workspace
+# is still compiled from scratch on each architecture.
 on:
   push:
     branches:
@@ -70,6 +69,7 @@ jobs:
         id: build
         shell: bash
         env:
+          ARCH: ${{ matrix.arch }}
           PLATFORM: ${{ matrix.platform }}
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
@@ -84,6 +84,12 @@ jobs:
           # The `chef` base image is pulled in as a named build context, so it
           # must be pinned to the same platform as the final images.
           args+=(--set "chef.platform=${PLATFORM}")
+          # Only the compiled dependencies are worth caching, one tag per arch so
+          # the two jobs don't overwrite each other. A failed export must not fail
+          # a release build; a failed import is only a warning.
+          cache="ghcr.io/${owner}/tempo-buildcache:chef-${ARCH}"
+          args+=(--set "chef.cache-from=type=registry,ref=${cache}")
+          args+=(--set "chef.cache-to=type=registry,ref=${cache},mode=min,image-manifest=true,oci-mediatypes=true,ignore-error=true")
           # GHCR links a package to its repository through this label, and a
           # linked package is the only one that can inherit the repository's
           # visibility. Without it every package stays private and each
