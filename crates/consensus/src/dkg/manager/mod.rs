@@ -28,7 +28,7 @@ pub(crate) use ingress::Mailbox;
 
 use crate::{
     consensus::{Block, Digest},
-    validators::{read_active_and_known_peers_at_block_hash, read_validator_config_at_block_hash},
+    validators::{next_players_at_block_hash, read_validator_config_at_block_hash},
 };
 
 use ingress::{Command, Message};
@@ -179,13 +179,16 @@ impl ExecutionLayer for Arc<TempoFullNode> {
 
     #[tracing::instrument(skip_all, fields(%digest), err(level = Level::WARN))]
     fn next_players(&self, digest: Digest) -> eyre::Result<ordered::Set<PublicKey>> {
-        let next_players = read_active_and_known_peers_at_block_hash(
+        // Election or full registry: the choice lives in `next_players_at_block_hash`, so no
+        // caller can pick the wrong half of it.
+        let info = &self.chain_spec().info;
+        let next_players = next_players_at_block_hash(
             self.as_ref(),
-            &ordered::Set::default(),
             digest.0,
+            info.staking_election(),
+            info.staking_election_time(),
         )
-        .wrap_err("failed reading peers from validator config v2")?
-        .into_keys();
+        .wrap_err("failed determining the next players")?;
 
         tracing::debug!(?next_players, "determined next players");
         Ok(next_players)

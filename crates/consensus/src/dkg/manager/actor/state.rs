@@ -365,6 +365,31 @@ where
             .and_then(|events| events.dkg_outcomes.get(digest))
     }
 
+    /// Caches the next-players read for `digest`, a pure function of it. Entries leave with the
+    /// per-epoch cache in `prune`.
+    pub(super) fn cache_next_players(
+        &mut self,
+        epoch: Epoch,
+        digest: Digest,
+        next_players: ordered::Set<PublicKey>,
+    ) {
+        self.cache
+            .entry(epoch)
+            .or_default()
+            .next_players
+            .insert(digest, next_players);
+    }
+
+    pub(super) fn get_next_players(
+        &self,
+        epoch: &Epoch,
+        digest: &Digest,
+    ) -> Option<&ordered::Set<PublicKey>> {
+        self.cache
+            .get(epoch)
+            .and_then(|events| events.next_players.get(digest))
+    }
+
     /// Caches the notarized log in memory.
     ///
     /// Notably, this does not persist the dealer logs to disk! On restart, it
@@ -757,6 +782,7 @@ struct Events {
 
     notarized_blocks: HashMap<Digest, ReducedBlock>,
     dkg_outcomes: HashMap<Digest, (Output<MinSig, PublicKey>, ShareState)>,
+    next_players: HashMap<Digest, ordered::Set<PublicKey>>,
 }
 
 impl Events {
