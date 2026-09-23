@@ -821,7 +821,7 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
     Ok(())
 }
 
-/// The canary devnet, launched with pathUSD named `nvmnUSD`.
+/// The canary devnet, launched with pathUSD named `nvnmUSD`.
 const CANARY_CHAIN_ID: u64 = 787222;
 
 /// Creates pathUSD as the first TIP20 token at a reserved address.
@@ -835,7 +835,7 @@ fn create_path_usd_token(
     let ctx = evm.ctx_mut();
     // The canary keeps its launch name, so its genesis regenerates unchanged.
     let name = if ctx.cfg.chain_id == CANARY_CHAIN_ID {
-        "nvmnUSD"
+        "nvnmUSD"
     } else {
         "nUSD"
     };
