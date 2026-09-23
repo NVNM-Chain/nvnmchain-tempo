@@ -827,6 +827,9 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
     Ok(())
 }
 
+/// The canary devnet, launched with pathUSD named `nvnmUSD`.
+const CANARY_CHAIN_ID: u64 = 787222;
+
 /// Creates pathUSD as the first TIP20 token at a reserved address.
 /// pathUSD is not created via factory since it's at a reserved address.
 fn create_path_usd_token(
@@ -836,6 +839,12 @@ fn create_path_usd_token(
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
 ) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
+    // The canary keeps its launch name, so its genesis regenerates unchanged.
+    let name = if ctx.cfg.chain_id == CANARY_CHAIN_ID {
+        "nvnmUSD"
+    } else {
+        "nUSD"
+    };
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
         &ctx.block,
@@ -845,8 +854,8 @@ fn create_path_usd_token(
         || {
             TIP20Factory::new().create_token_reserved_address(
                 PATH_USD_ADDRESS,
-                "nvmnUSD",
-                "nvmnUSD",
+                name,
+                name,
                 "USD",
                 Address::ZERO,
                 admin,
