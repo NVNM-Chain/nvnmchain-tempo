@@ -92,13 +92,27 @@ pub struct TempoGenesisInfo {
 }
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
+    /// Extract Tempo genesis info from genesis extra_fields. Panics on a malformed value: these
+    /// fields are consensus-critical and outside the genesis hash, so a default would go unseen.
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
             .config
             .extra_fields
             .deserialize_as::<Self>()
-            .unwrap_or_default()
+            .expect("malformed Tempo genesis extra_fields (consensus-critical config)")
+    }
+
+    #[cfg(feature = "std")]
+    /// Keys in extra_fields this struct dropped: whatever does not serialize back out.
+    fn unrecognized_keys(&self, genesis: &Genesis) -> Vec<alloc::string::String> {
+        let kept = serde_json::to_value(self).unwrap_or_default();
+        genesis
+            .config
+            .extra_fields
+            .keys()
+            .filter(|key| kept.get(key.as_str()).is_none())
+            .cloned()
+            .collect()
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -212,6 +226,8 @@ pub struct TempoChainSpec {
     pub network_identity: Option<NetworkIdentity>,
     /// Default RPC URL for following this chain.
     pub default_follow_url: Option<&'static str>,
+    /// Genesis config keys Tempo does not know, for the node to warn about once logging is up.
+    pub unknown_config_keys: alloc::vec::Vec<alloc::string::String>,
 }
 
 impl TempoChainSpec {
@@ -245,6 +261,10 @@ impl TempoChainSpec {
     pub fn from_genesis(genesis: Genesis) -> Self {
         // Extract Tempo genesis info from extra_fields
         let info = TempoGenesisInfo::extract_from(&genesis);
+        #[cfg(feature = "std")]
+        let unknown_config_keys = info.unrecognized_keys(&genesis);
+        #[cfg(not(feature = "std"))]
+        let unknown_config_keys = alloc::vec::Vec::new();
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -274,6 +294,7 @@ impl TempoChainSpec {
             info,
             network_identity,
             default_follow_url: None,
+            unknown_config_keys,
         }
     }
 
@@ -320,6 +341,7 @@ impl From<ChainSpec> for TempoChainSpec {
             info: TempoGenesisInfo::default(),
             network_identity,
             default_follow_url: None,
+            unknown_config_keys: Default::default(),
         }
     }
 }
@@ -653,6 +675,41 @@ mod tests {
 
         let chainspec = super::TempoChainSpec::from_genesis(genesis);
         assert!(chainspec.network_identity.is_none());
+    }
+
+    #[test]
+    fn absent_extra_fields_are_the_default() {
+        assert_eq!(
+            super::TempoGenesisInfo::extract_from(&genesis_with(serde_json::json!({}))),
+            super::TempoGenesisInfo::default()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "malformed Tempo genesis extra_fields")]
+    fn a_malformed_extra_field_panics() {
+        let genesis = genesis_with(serde_json::json!({ "epochLength": "not-a-number" }));
+        let _ = super::TempoGenesisInfo::extract_from(&genesis);
+    }
+
+    #[test]
+    fn a_misspelled_key_is_named_and_a_real_one_is_not() {
+        let genesis = genesis_with(serde_json::json!({
+            "epochLength": 20,
+            "stakingElecton": "0x0000000000000000000000000000000000000001",
+        }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis);
+        assert_eq!(info.unrecognized_keys(&genesis), ["stakingElecton"]);
+    }
+
+    /// A genesis carrying `extra` alongside the fields every genesis needs.
+    fn genesis_with(extra: serde_json::Value) -> alloy_genesis::Genesis {
+        let mut config = serde_json::json!({ "chainId": 1234 });
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} })).unwrap()
     }
 
     #[test]
