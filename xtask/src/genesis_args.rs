@@ -144,8 +144,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     no_extra_tokens: bool,
 
-    /// Creates a temporary gas token that genesis accounts pay fees in and the coinbase and
-    /// validators take.
+    /// Creates a temporary gas token that the genesis accounts and validators pay fees in, and
+    /// that the coinbase and validators take.
     #[arg(long)]
     deployment_gas_token: bool,
 
@@ -394,6 +394,21 @@ impl GenesisArgs {
             );
         }
 
+        let validator_onchain_addresses = self.validator_onchain_addresses()?;
+
+        // Validators outside the generated accounts get the token too, or they could not pay for
+        // their own move off it.
+        let fee_payers: Vec<Address> = if self.deployment_gas_token {
+            addresses
+                .iter()
+                .chain(&validator_onchain_addresses)
+                .copied()
+                .unique()
+                .collect()
+        } else {
+            addresses.clone()
+        };
+
         let deployment_gas_token = {
             if self.deployment_gas_token {
                 let mut rng = rand_08::rngs::StdRng::seed_from_u64(
@@ -411,7 +426,7 @@ impl GenesisArgs {
                     self.deployment_gas_token_admin.expect(
                         "Deployment gas token admin is required if you want to deploy the token",
                     ),
-                    &addresses,
+                    &fee_payers,
                     U256::from(u64::MAX),
                     SaltOrAddress::Salt(B256::from(salt_bytes)),
                     &mut evm,
@@ -431,26 +446,12 @@ impl GenesisArgs {
         let consensus_config =
             generate_consensus_config(&self.validators, self.seed, self.no_dkg_in_genesis);
 
-        let validator_onchain_addresses = if self.validator_addresses.is_empty() {
-            if addresses.len() < self.validators.len() + 1 {
-                return Err(eyre!("not enough accounts created for validators"));
-            }
-
-            &addresses[1..self.validators.len() + 1]
-        } else {
-            if self.validator_addresses.len() < self.validators.len() {
-                return Err(eyre!("not enough addresses provided for validators"));
-            }
-
-            &self.validator_addresses[0..self.validators.len()]
-        };
-
         println!("Initializing validator config v2");
         initialize_validator_config_v2(
             validator_admin,
             &mut evm,
             &consensus_config,
-            validator_onchain_addresses,
+            &validator_onchain_addresses,
             self.no_dkg_in_genesis,
             self.chain_id,
         )?;
@@ -471,7 +472,7 @@ impl GenesisArgs {
         initialize_fee_manager(
             default_validator_fee_token,
             default_user_fee_token,
-            addresses.clone(),
+            fee_payers,
             [self.coinbase]
                 .into_iter()
                 .chain(validator_onchain_addresses.iter().copied())
