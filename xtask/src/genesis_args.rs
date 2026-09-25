@@ -34,7 +34,7 @@ use reth_evm::{
 };
 use std::{
     collections::BTreeMap,
-    iter::repeat_with,
+    iter::{once, repeat_with},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -144,8 +144,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     no_extra_tokens: bool,
 
-    /// Creates a temporary gas token that the genesis accounts and validators pay fees in, and
-    /// that the coinbase and validators take.
+    /// A temporary gas token: the generated accounts and validators pay fees in it, the coinbase
+    /// and validators take it.
     #[arg(long)]
     deployment_gas_token: bool,
 
@@ -395,7 +395,9 @@ impl GenesisArgs {
         }
 
         let validator_onchain_addresses = self.validator_onchain_addresses()?;
-
+        let fee_recipients: Vec<Address> = once(self.coinbase)
+            .chain(validator_onchain_addresses.iter().copied())
+            .collect();
         // Validators outside the generated accounts get the token too, or they could not pay for
         // their own move off it.
         let fee_payers: Vec<Address> = if self.deployment_gas_token {
@@ -473,10 +475,7 @@ impl GenesisArgs {
             default_validator_fee_token,
             default_user_fee_token,
             fee_payers,
-            [self.coinbase]
-                .into_iter()
-                .chain(validator_onchain_addresses.iter().copied())
-                .collect(),
+            fee_recipients,
             &mut evm,
         );
 
