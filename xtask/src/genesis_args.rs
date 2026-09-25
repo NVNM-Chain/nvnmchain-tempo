@@ -144,7 +144,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     no_extra_tokens: bool,
 
-    /// Enable creating deployment gas token.
+    /// Creates a temporary gas token that genesis accounts pay fees in and the coinbase and
+    /// validators take.
     #[arg(long)]
     deployment_gas_token: bool,
 
@@ -471,8 +472,10 @@ impl GenesisArgs {
             default_validator_fee_token,
             default_user_fee_token,
             addresses.clone(),
-            // TODO: also populate validators here, once the logic is back.
-            vec![self.coinbase],
+            [self.coinbase]
+                .into_iter()
+                .chain(validator_onchain_addresses.iter().copied())
+                .collect(),
             &mut evm,
         );
 
@@ -972,7 +975,7 @@ fn initialize_fee_manager(
     validator_fee_token_address: Address,
     user_fee_token_address: Address,
     initial_accounts: Vec<Address>,
-    validators: Vec<Address>,
+    fee_recipients: Vec<Address>,
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
 ) {
     // Update the beneficiary since the validator can't set the validator fee token for themselves
@@ -1003,12 +1006,12 @@ fn initialize_fee_manager(
                     .expect("Could not set fee token");
             }
 
-            // Set validator fee tokens to pathUSD
-            for validator in validators {
-                println!("Setting user token for {validator} {validator_fee_token_address}");
+            // Every fee recipient takes the validator fee token
+            for recipient in fee_recipients {
+                println!("Setting validator token for {recipient} {validator_fee_token_address}");
                 fee_manager
                     .set_validator_token(
-                        validator,
+                        recipient,
                         IFeeManager::setValidatorTokenCall {
                             token: validator_fee_token_address,
                         },
