@@ -2,6 +2,9 @@ name: Docker Build
 
 permissions: {}
 
+# Only refs that are actually deployed from. Upstream also builds on a nightly
+# cron and on merge_group; both are out of reach here, because the workspace
+# is still compiled from scratch on each architecture.
 on:
   push:
     branches:
@@ -9,26 +12,132 @@ on:
       - "rc/*"
     tags:
       - "v*.*.*"
-  merge_group:
   workflow_dispatch:
-    inputs:
-      nightly:
-        description: "Tag nightly"
-        type: boolean
-        default: false
   workflow_call:
-  # We're building nightly only once a day to let the rollout cook for 24h without interruptions
-  schedule:
-    - cron: "5 9 * * *"
 
-env:
-  REGISTRY: ghcr.io/tempoxyz
+# A tag build is the one a release depends on, so it is never cancelled; a
+# superseded branch build is, or hours-long builds stack up behind each other.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  build-and-push:
-    name: Build and Push Docker Images
-    if: ${{ (github.event_name != 'schedule' || github.repository == 'tempoxyz/tempo') && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository != 'tempoxyz/tempo') }}
-    runs-on: depot-ubuntu-latest-16
+  build:
+    name: Build ${{ matrix.arch }} image
+    # Multi-arch is built natively on one runner per architecture and the
+    # per-arch digests are stitched into a manifest list by the `merge` job.
+    # Emulating arm64 with QEMU is not viable here: the Dockerfile.chef stage
+    # compiles the whole reth dependency tree.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: tempoxyz/gh-actions/vendor/docker/setup-buildx-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+
+      - name: Log in to Container Registry
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        with:
+          # `login-action` only needs the registry host; the lowercase
+          # namespace is applied where the image names are constructed.
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: shortsha
+        run: echo "shortsha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
+        run: |
+          set -euo pipefail
+
+          owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          registry="ghcr.io/${owner}"
+          targets=(tempo tempo-localnet tempo-sidecar tempo-xtask)
+
+          args=()
+          # The `chef` base image is pulled in as a named build context, so it
+          # must be pinned to the same platform as the final images.
+          args+=(--set "chef.platform=${PLATFORM}")
+          # Only the compiled dependencies are worth caching, one tag per arch so
+          # the two jobs don't overwrite each other. A failed export must not fail
+          # a release build; a failed import is only a warning.
+          cache="ghcr.io/${owner}/tempo-buildcache:chef-${ARCH}"
+          args+=(--set "chef.cache-from=type=registry,ref=${cache}")
+          args+=(--set "chef.cache-to=type=registry,ref=${cache},mode=min,image-manifest=true,oci-mediatypes=true,ignore-error=true")
+          # GHCR links a package to its repository through this label, and a
+          # linked package is the only one that can inherit the repository's
+          # visibility. Without it every package stays private and each
+          # deployment target needs a token of its own.
+          args+=(--set "*.labels.org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}")
+          for target in "${targets[@]}"; do
+            args+=(--set "${target}.platform=${PLATFORM}")
+            # `name` is required: with `push-by-digest` there are no tags to
+            # derive the destination repository from.
+            args+=(--set "${target}.output=type=image,name=${registry}/${target},push-by-digest=true,name-canonical=true,push=true")
+          done
+
+          docker buildx bake \
+            --file docker-bake.hcl \
+            --metadata-file meta.json \
+            --pull \
+            "${args[@]}" \
+            "${targets[@]}"
+
+      - name: Collect digests
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+
+          out="digests-${ARCH}.txt"
+          : > "$out"
+          for target in tempo tempo-localnet tempo-sidecar tempo-xtask; do
+            digest="$(jq -er --arg t "$target" '.[$t]["containerimage.digest"]' meta.json)"
+            echo "${target} ${digest}" >> "$out"
+          done
+
+          cat "$out"
+
+      - name: Upload digests
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-digests-${{ matrix.arch }}
+          path: digests-${{ matrix.arch }}.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  merge:
+    name: Merge and sign manifest lists
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -40,43 +149,34 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: tempoxyz/gh-actions/vendor/depot/setup-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
-
-      - name: Determine Docker labels
-        id: docker-labels
+      # GHCR rejects uppercase repository paths, and github.repository_owner
+      # preserves the owner's casing. `docker/metadata-action` lowercases the
+      # image names it is given, but the shell-facing references below need the
+      # lowercase form explicitly.
+      - name: Resolve registry
         shell: bash
         run: |
-          if [[ "${{ github.repository }}" != "tempoxyz/tempo" ]]; then
-            cat <<'LABELS' >> "$GITHUB_OUTPUT"
-          value<<EOF
-          org.opencontainers.image.created=
-          org.opencontainers.image.description=
-          org.opencontainers.image.licenses=
-          org.opencontainers.image.revision=
-          org.opencontainers.image.source=
-          org.opencontainers.image.title=
-          org.opencontainers.image.url=
-          org.opencontainers.image.version=
-          EOF
-          LABELS
-          fi
+          owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          echo "REGISTRY=ghcr.io/${owner}" >> "$GITHUB_ENV"
+
+      - name: Download digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: docker-digests-*
+          path: digests
+          merge-multiple: true
 
       - name: Docker metadata for tempo
         id: meta-tempo
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          images: |
-            ${{ env.REGISTRY }}/tempo
-            docker.io/tempoxyz/tempo
+          images: ghcr.io/${{ github.repository_owner }}/tempo
           bake-target: tempo
-          labels: ${{ steps.docker-labels.outputs.value }}
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=edge,branch=main
             type=sha,prefix=sha-
@@ -86,18 +186,13 @@ jobs:
         id: meta-tempo-localnet
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          images: |
-            ${{ env.REGISTRY }}/tempo-localnet
-            docker.io/tempoxyz/tempo-localnet
+          images: ghcr.io/${{ github.repository_owner }}/tempo-localnet
           bake-target: tempo-localnet
-          labels: ${{ steps.docker-labels.outputs.value }}
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=edge,branch=main
             type=sha,prefix=sha-
@@ -107,18 +202,13 @@ jobs:
         id: meta-tempo-sidecar
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          images: |
-            ${{ env.REGISTRY }}/tempo-sidecar
-            docker.io/tempoxyz/tempo-sidecar
+          images: ghcr.io/${{ github.repository_owner }}/tempo-sidecar
           bake-target: tempo-sidecar
-          labels: ${{ steps.docker-labels.outputs.value }}
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=edge,branch=main
             type=sha,prefix=sha-
@@ -128,57 +218,77 @@ jobs:
         id: meta-tempo-xtask
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          images: |
-            ${{ env.REGISTRY }}/tempo-xtask
-            docker.io/tempoxyz/tempo-xtask
+          images: ghcr.io/${{ github.repository_owner }}/tempo-xtask
           bake-target: tempo-xtask
-          labels: ${{ steps.docker-labels.outputs.value }}
           tags: |
-            type=schedule,pattern=nightly
-            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
             type=raw,value=latest,enable={{is_default_branch}}
             type=edge,branch=main
             type=sha,prefix=sha-
             type=ref,event=pr
 
+      - name: Set up Docker Buildx
+        uses: tempoxyz/gh-actions/vendor/docker/setup-buildx-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+
       - name: Log in to Container Registry
         uses: tempoxyz/gh-actions/vendor/docker/login-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Log in to Docker Hub
-        uses: tempoxyz/gh-actions/vendor/docker/login-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
-        with:
-          username: ${{ vars.DOCKER_HUB_USER }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
       - id: shortsha
         run: echo "shortsha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push Docker images
-        id: build-and-push
-        uses: tempoxyz/gh-actions/vendor/depot/bake-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
-        with:
-          files: |
-            docker-bake.hcl
-            ${{ steps.meta-tempo.outputs.bake-file }}
-            ${{ steps.meta-tempo-localnet.outputs.bake-file }}
-            ${{ steps.meta-tempo-sidecar.outputs.bake-file }}
-            ${{ steps.meta-tempo-xtask.outputs.bake-file }}
-          targets: ${{ (github.event_name == 'schedule' || github.event.inputs.nightly == 'true') && 'nightly' || 'default' }}
-          project: 0c6tg19qsp
-          push: true
-          no-cache: ${{ startsWith(github.ref, 'refs/tags/v') }}
-          pull: ${{ github.event_name != 'merge_group' }}
+      - name: Create manifest lists
+        shell: bash
         env:
-          VERGEN_GIT_SHA: ${{ github.sha }}
-          VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
+          TAGS_TEMPO: ${{ steps.meta-tempo.outputs.tags }}
+          TAGS_TEMPO_LOCALNET: ${{ steps.meta-tempo-localnet.outputs.tags }}
+          TAGS_TEMPO_SIDECAR: ${{ steps.meta-tempo-sidecar.outputs.tags }}
+          TAGS_TEMPO_XTASK: ${{ steps.meta-tempo-xtask.outputs.tags }}
+        run: |
+          set -euo pipefail
+
+          declare -A tags_by_image=(
+            [tempo]="$TAGS_TEMPO"
+            [tempo-localnet]="$TAGS_TEMPO_LOCALNET"
+            [tempo-sidecar]="$TAGS_TEMPO_SIDECAR"
+            [tempo-xtask]="$TAGS_TEMPO_XTASK"
+          )
+
+          for image in tempo tempo-localnet tempo-sidecar tempo-xtask; do
+            repo="${REGISTRY}/${image}"
+            sources=()
+            while read -r name digest; do
+              [ "$name" = "$image" ] || continue
+              sources+=("${repo}@${digest}")
+            done < <(cat digests/digests-*.txt)
+
+            if [ "${#sources[@]}" -eq 0 ]; then
+              echo "::error::No digests collected for ${image}"
+              exit 1
+            fi
+
+            args=()
+            while IFS= read -r tag; do
+              [ -n "$tag" ] || continue
+              args+=("--tag" "$tag")
+            done <<< "${tags_by_image[$image]}"
+
+            echo "Creating ${image} manifest list from: ${sources[*]}"
+            if [ "${#args[@]}" -gt 0 ]; then
+              docker buildx imagetools create "${args[@]}" "${sources[@]}"
+            else
+              # Nothing to point at the per-arch digests, so they stay in the
+              # registry untagged. Every trigger left derives tags, so this is
+              # a guard rather than an expected path.
+              echo "No tags derived for ${image}; skipping manifest creation"
+            fi
+          done
 
       - name: Install cosign
         uses: tempoxyz/gh-actions/vendor/sigstore/cosign-installer@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
@@ -220,9 +330,11 @@ jobs:
             "$TEMPO_XTASK_TAGS"
           )
           sign_failures=0
+          signed=0
           for tags in "${images[@]}"; do
             while IFS= read -r image; do
               [ -n "$image" ] || continue
+              signed=$((signed + 1))
               if ! sign_image "$image"; then
                 sign_failures=$((sign_failures + 1))
               fi
@@ -233,79 +345,7 @@ jobs:
             echo "Failed to sign $sign_failures image reference(s)" >&2
             exit 1
           fi
-
-      - name: Publish event (sha tag)
-        id: publish-sha-event
-        if: ${{ github.repository == 'tempoxyz/tempo' && github.event_name != 'merge_group' }}
-        shell: bash
-        env:
-          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-          RUNNER_TEMP: ${{ runner.temp }}
-          GH_REPO: ${{ github.repository }}
-          SHORT_SHA: ${{ steps.shortsha.outputs.shortsha }}
-          COMMIT_SHA: ${{ github.sha }}
-          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          echo "$EVENTS_KEY" > "${RUNNER_TEMP}/key"
-          echo "$EVENTS_CERT" > "${RUNNER_TEMP}/cert"
-
-          # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST ${{ secrets.EVENTS_ARGS }} \
-            --key "${RUNNER_TEMP}/key" \
-            --cert "${RUNNER_TEMP}/cert" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"repository\": \"${GH_REPO}\",
-              \"event\": \"registry_package\",
-              \"data\": {
-                \"tag\": \"sha-${SHORT_SHA}\",
-                \"sha\": \"${COMMIT_SHA}\",
-                \"branch\": \"${BRANCH_NAME}\"
-              }
-            }"
-
-      - name: Publish event (nightly tag)
-        id: publish-nightly-event
-        if: ${{ github.repository == 'tempoxyz/tempo' && (github.event_name == 'schedule' || github.event.inputs.nightly == 'true') }}
-        shell: bash
-        env:
-          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-          RUNNER_TEMP: ${{ runner.temp }}
-          GH_REPO: ${{ github.repository }}
-          COMMIT_SHA: ${{ github.sha }}
-          BRANCH_NAME: ${{ github.head_ref || github.ref_name }}
-        run: |
-          set -euo pipefail
-
-          DAY_OF_WEEK="$(date -u +%u)"
-          if [ "$DAY_OF_WEEK" = "5" ]; then
-            INVARIANT_TIMEOUT="172800"
-          else
-            INVARIANT_TIMEOUT="18000"
-          fi
-
-          echo "$EVENTS_KEY" > "${RUNNER_TEMP}/key"
-          echo "$EVENTS_CERT" > "${RUNNER_TEMP}/cert"
-
-          # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST ${{ secrets.EVENTS_ARGS }} \
-            --key "${RUNNER_TEMP}/key" \
-            --cert "${RUNNER_TEMP}/cert" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"repository\": \"${GH_REPO}\",
-              \"event\": \"registry_package\",
-              \"data\": {
-                \"tag\": \"nightly\",
-                \"sha\": \"${COMMIT_SHA}\",
-                \"branch\": \"${BRANCH_NAME}\",
-                \"invariant_timeout\": \"${INVARIANT_TIMEOUT}\"
-              }
-            }"
+          echo "Signed ${signed} image reference(s)"
 
       - name: Summarize Docker build
         if: ${{ always() }}
@@ -316,21 +356,24 @@ jobs:
           TEMPO_SIDECAR_TAGS: ${{ steps.meta-tempo-sidecar.outputs.tags }}
           TEMPO_XTASK_TAGS: ${{ steps.meta-tempo-xtask.outputs.tags }}
           SHORT_SHA: ${{ steps.shortsha.outputs.shortsha }}
-          BUILD_OUTCOME: ${{ steps.build-and-push.outcome }}
+          BUILD_OUTCOME: ${{ needs.build.result }}
           SIGN_OUTCOME: ${{ steps.sign-images.outcome }}
-          SHA_EVENT_OUTCOME: ${{ steps.publish-sha-event.outcome }}
-          NIGHTLY_EVENT_OUTCOME: ${{ steps.publish-nightly-event.outcome }}
-          BUILD_METADATA: ${{ steps.build-and-push.outputs.metadata }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SERVER: ${{ github.server_url }}
+          GH_SHA: ${{ github.sha }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -euo pipefail
 
-          job_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          job_url="${GH_SERVER}/${GH_REPO}/actions/runs/${GH_RUN_ID}"
           if command -v gh >/dev/null 2>&1; then
             resolved_job_url="$(gh api \
-              "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+              "repos/${GH_REPO}/actions/runs/${GH_RUN_ID}/jobs" \
               --paginate \
-              --jq '.jobs[] | select(.name == "Build and Push Docker Images") | .html_url' \
+              --jq '.jobs[] | select(.name == "Merge and sign manifest lists") | .html_url' \
               | head -n 1 || true)"
             if [ -n "$resolved_job_url" ]; then
               job_url="$resolved_job_url"
@@ -342,31 +385,25 @@ jobs:
             echo
             echo "| Field | Value |"
             echo "| --- | --- |"
-            echo "| Commit | [\`${{ github.sha }}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |"
-            echo "| Ref | \`${{ github.ref_name }}\` |"
-            echo "| Workflow run | [run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
-            echo "| Workflow run ID | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
-            echo "| Job summary | [Build and Push Docker Images](${job_url}) |"
+            echo "| Commit | [\`${GH_SHA}\`](${GH_SERVER}/${GH_REPO}/commit/${GH_SHA}) |"
+            echo "| Ref | \`${GH_REF_NAME}\` |"
+            echo "| Workflow run | [run #${GH_RUN_NUMBER}](${GH_SERVER}/${GH_REPO}/actions/runs/${GH_RUN_ID}) |"
+            echo "| Job summary | [Merge and sign manifest lists](${job_url}) |"
             echo "| Short SHA tag | \`sha-${SHORT_SHA}\` |"
             echo "| Build | \`${BUILD_OUTCOME:-unknown}\` |"
             echo "| Sign | \`${SIGN_OUTCOME:-unknown}\` |"
             echo
             echo "## Images"
             echo
-            echo "| Image | Package | Tags | Digest |"
-            echo "| --- | --- | --- | --- |"
+            echo "| Image | Tags |"
+            echo "| --- | --- |"
           } >> "$GITHUB_STEP_SUMMARY"
 
           summarize_image() {
             local image="$1"
-            local package_url="$2"
-            local tags="$3"
-            local target="$4"
+            local tags="$2"
             local formatted=""
-            local digest
             local tag
-
-            digest="$(jq -r --arg target "$target" '.[$target]["containerimage.digest"] // empty' <<< "$BUILD_METADATA" 2>/dev/null || true)"
 
             while IFS= read -r tag; do
               [ -n "$tag" ] || continue
@@ -377,20 +414,10 @@ jobs:
               fi
             done <<< "$tags"
 
-            echo "| ${image} | [GHCR package](${package_url}) | ${formatted:-None} | \`${digest:-None}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${image} | ${formatted:-None} |" >> "$GITHUB_STEP_SUMMARY"
           }
 
-          summarize_image "tempo" "${{ github.server_url }}/orgs/tempoxyz/packages/container/package/tempo" "$TEMPO_TAGS" "tempo"
-          summarize_image "tempo-localnet" "${{ github.server_url }}/orgs/tempoxyz/packages/container/package/tempo-localnet" "$TEMPO_LOCALNET_TAGS" "tempo-localnet"
-          summarize_image "tempo-sidecar" "${{ github.server_url }}/orgs/tempoxyz/packages/container/package/tempo-sidecar" "$TEMPO_SIDECAR_TAGS" "tempo-sidecar"
-          summarize_image "tempo-xtask" "${{ github.server_url }}/orgs/tempoxyz/packages/container/package/tempo-xtask" "$TEMPO_XTASK_TAGS" "tempo-xtask"
-
-          {
-            echo
-            echo "## Publish events"
-            echo
-            echo "| Event | Tag | Outcome |"
-            echo "| --- | --- | --- |"
-            echo "| registry_package | \`sha-${SHORT_SHA}\` | \`${SHA_EVENT_OUTCOME:-skipped}\` |"
-            echo "| registry_package | \`nightly\` | \`${NIGHTLY_EVENT_OUTCOME:-skipped}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          summarize_image "\`${REGISTRY}/tempo\`" "$TEMPO_TAGS"
+          summarize_image "\`${REGISTRY}/tempo-localnet\`" "$TEMPO_LOCALNET_TAGS"
+          summarize_image "\`${REGISTRY}/tempo-sidecar\`" "$TEMPO_SIDECAR_TAGS"
+          summarize_image "\`${REGISTRY}/tempo-xtask\`" "$TEMPO_XTASK_TAGS"

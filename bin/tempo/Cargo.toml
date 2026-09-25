@@ -20,6 +20,7 @@ workspace = true
 [dependencies]
 base64.workspace = true
 blake3.workspace = true
+rayon.workspace = true
 tar.workspace = true
 url.workspace = true
 zstd.workspace = true
@@ -33,6 +34,7 @@ tempo-validator-config.workspace = true
 tempo-chainspec = { workspace = true, features = ["default"] }
 tempo-evm.workspace = true
 tempo-faucet.workspace = true
+tempo-anchoring-index.workspace = true
 tempo-telemetry-util.workspace = true
 
 alloy = { workspace = true, default-features = false, features = [
@@ -119,6 +121,9 @@ tracy-client = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30.1", features = ["signal"], optional = true }
+
+[dev-dependencies]
+reth-provider = { workspace = true, features = ["test-utils"] }
 
 [[bin]]
 name = "tempo"

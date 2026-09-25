@@ -89,6 +89,9 @@ pub struct TempoGenesisInfo {
     /// Activation timestamp for T13 hardfork.
     #[serde(skip_serializing_if = "Option::is_none")]
     t13_time: Option<u64>,
+    /// Activation timestamp for the NVNM1 hardfork.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nvnm1_time: Option<u64>,
 }
 
 impl TempoGenesisInfo {
@@ -144,7 +147,7 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
-        "testnet" | "moderato" => MODERATO.clone(),
+        "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -167,7 +170,7 @@ impl reth_cli::chainspec::ChainSpecParser for TempoChainSpecParser {
 pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
-        42431 => Some(MODERATO.clone()),
+        787222 => Some(MODERATO.clone()),
         _ => None,
     }
 }
@@ -178,7 +181,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
 
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::testnet())
-        .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
+        .with_default_follow_url("wss://rpc.testnet.nvnm.xyz")
         .into()
 });
 
@@ -395,7 +398,7 @@ impl EthChainSpec for TempoChainSpec {
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
-            42431 => Some(moderato_nodes()),
+            787222 => Some(moderato_nodes()),
             _ => self.inner.bootnodes(),
         }
     }
@@ -575,6 +578,27 @@ mod tests {
         // Should be able to query Tempo hardfork activation through trait
         let activation = chainspec.tempo_fork_activation(TempoHardfork::T0);
         assert_eq!(activation, ForkCondition::Timestamp(0));
+    }
+
+    /// The chain's own fork is scheduled from genesis, as upstream's networks never carry it.
+    #[test]
+    fn nvnm1_is_scheduled_by_genesis() {
+        let mut genesis: alloy_genesis::Genesis =
+            serde_json::from_str(include_str!("./genesis/dev.json"))
+                .expect("the dev genesis must always be well formed");
+        genesis
+            .config
+            .extra_fields
+            .insert_value("nvnm1Time".to_string(), 1_800_000_000u64)
+            .expect("nvnm1Time is serializable");
+
+        let chainspec = super::TempoChainSpec::from_genesis(genesis);
+        assert!(!chainspec.is_nvnm1_active_at_timestamp(1_799_999_999));
+        assert!(chainspec.is_nvnm1_active_at_timestamp(1_800_000_000));
+        assert_eq!(
+            chainspec.tempo_hardfork_at(1_800_000_000),
+            TempoHardfork::Nvnm1
+        );
     }
 
     #[test]

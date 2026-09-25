@@ -33,7 +33,7 @@ use reth_evm::{
 };
 use std::{
     collections::BTreeMap,
-    iter::repeat_with,
+    iter::{once, repeat_with},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -42,6 +42,7 @@ use tempo_consensus_config::{SigningKey, SigningShare};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_RUNTIME},
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
         INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
@@ -142,7 +143,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     no_extra_tokens: bool,
 
-    /// Enable creating deployment gas token.
+    /// A temporary gas token: the generated accounts and validators pay fees in it, the coinbase
+    /// and validators take it.
     #[arg(long)]
     deployment_gas_token: bool,
 
@@ -221,6 +223,16 @@ pub(crate) struct GenesisArgs {
     /// T13 hardfork activation time.
     #[arg(long, default_value = "0")]
     t13_time: u64,
+
+    /// NVNM1 hardfork activation time. Unset leaves it unscheduled, as a chain launching on the
+    /// current anchoring runtime wants.
+    #[arg(long)]
+    nvnm1_time: Option<u64>,
+
+    /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
+    /// networks want.
+    #[arg(long)]
+    anchoring: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -385,6 +397,23 @@ impl GenesisArgs {
             );
         }
 
+        let validator_onchain_addresses = self.validator_onchain_addresses()?;
+        let fee_recipients: Vec<Address> = once(self.coinbase)
+            .chain(validator_onchain_addresses.iter().copied())
+            .collect();
+        // Validators outside the generated accounts get the token too, or they could not pay for
+        // their own move off it.
+        let fee_payers: Vec<Address> = if self.deployment_gas_token {
+            addresses
+                .iter()
+                .chain(&validator_onchain_addresses)
+                .copied()
+                .unique()
+                .collect()
+        } else {
+            addresses.clone()
+        };
+
         let deployment_gas_token = {
             if self.deployment_gas_token {
                 let mut rng = rand_08::rngs::StdRng::seed_from_u64(
@@ -402,7 +431,7 @@ impl GenesisArgs {
                     self.deployment_gas_token_admin.expect(
                         "Deployment gas token admin is required if you want to deploy the token",
                     ),
-                    &addresses,
+                    &fee_payers,
                     U256::from(u64::MAX),
                     SaltOrAddress::Salt(B256::from(salt_bytes)),
                     &mut evm,
@@ -422,26 +451,12 @@ impl GenesisArgs {
         let consensus_config =
             generate_consensus_config(&self.validators, self.seed, self.no_dkg_in_genesis);
 
-        let validator_onchain_addresses = if self.validator_addresses.is_empty() {
-            if addresses.len() < self.validators.len() + 1 {
-                return Err(eyre!("not enough accounts created for validators"));
-            }
-
-            &addresses[1..self.validators.len() + 1]
-        } else {
-            if self.validator_addresses.len() < self.validators.len() {
-                return Err(eyre!("not enough addresses provided for validators"));
-            }
-
-            &self.validator_addresses[0..self.validators.len()]
-        };
-
         println!("Initializing validator config v2");
         initialize_validator_config_v2(
             validator_admin,
             &mut evm,
             &consensus_config,
-            validator_onchain_addresses,
+            &validator_onchain_addresses,
             self.no_dkg_in_genesis,
             self.chain_id,
         )?;
@@ -462,9 +477,8 @@ impl GenesisArgs {
         initialize_fee_manager(
             default_validator_fee_token,
             default_user_fee_token,
-            addresses.clone(),
-            // TODO: also populate validators here, once the logic is back.
-            vec![self.coinbase],
+            fee_payers,
+            fee_recipients,
             &mut evm,
         );
 
@@ -572,6 +586,7 @@ impl GenesisArgs {
         );
 
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, &mut genesis_alloc);
+        insert_anchoring_contract_at_genesis(self.anchoring, &mut genesis_alloc);
 
         genesis_alloc.insert(
             HISTORY_STORAGE_ADDRESS,
@@ -664,6 +679,11 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("t13Time".to_string(), self.t13_time)?;
+        if let Some(nvnm1_time) = self.nvnm1_time {
+            chain_config
+                .extra_fields
+                .insert_value("nvnm1Time".to_string(), nvnm1_time)?;
+        }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -697,6 +717,26 @@ impl GenesisArgs {
 
         Ok((genesis, consensus_config))
     }
+}
+
+/// Places the anchoring contract. Its storage is the dump's: the corpus, and the address the
+/// source chain called its admin, which this build does not read.
+fn insert_anchoring_contract_at_genesis(
+    anchoring: bool,
+    genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
+) {
+    if !anchoring {
+        return;
+    }
+    println!("Initializing the anchoring contract");
+    genesis_alloc.insert(
+        ANCHORING_ADDRESS,
+        GenesisAccount {
+            code: Some(ANCHORING_RUNTIME),
+            nonce: Some(1),
+            ..Default::default()
+        },
+    );
 }
 
 fn insert_zone_state_at_genesis(
@@ -808,8 +848,8 @@ fn create_path_usd_token(
         || {
             TIP20Factory::new().create_token_reserved_address(
                 PATH_USD_ADDRESS,
-                "pathUSD",
-                "pathUSD",
+                "nUSD",
+                "nUSD",
                 "USD",
                 Address::ZERO,
                 admin,
@@ -941,7 +981,7 @@ fn initialize_fee_manager(
     validator_fee_token_address: Address,
     user_fee_token_address: Address,
     initial_accounts: Vec<Address>,
-    validators: Vec<Address>,
+    fee_recipients: Vec<Address>,
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
 ) {
     // Update the beneficiary since the validator can't set the validator fee token for themselves
@@ -972,12 +1012,12 @@ fn initialize_fee_manager(
                     .expect("Could not set fee token");
             }
 
-            // Set validator fee tokens to pathUSD
-            for validator in validators {
-                println!("Setting user token for {validator} {validator_fee_token_address}");
+            // Every fee recipient takes the validator fee token
+            for recipient in fee_recipients {
+                println!("Setting validator token for {recipient} {validator_fee_token_address}");
                 fee_manager
                     .set_validator_token(
-                        validator,
+                        recipient,
                         IFeeManager::setValidatorTokenCall {
                             token: validator_fee_token_address,
                         },
@@ -1315,5 +1355,34 @@ mod tests {
         ] {
             assert_eq!(alloc[&destination].code.as_ref(), Some(&expected));
         }
+    }
+}
+
+#[cfg(test)]
+mod anchoring_tests {
+    use super::*;
+
+    fn alloc(anchoring: bool) -> BTreeMap<Address, GenesisAccount> {
+        let mut alloc = BTreeMap::new();
+        insert_anchoring_contract_at_genesis(anchoring, &mut alloc);
+        alloc
+    }
+
+    /// The runtime this binary embeds, and the nonce a deployment would have left. Every slot is
+    /// the dump's.
+    #[test]
+    fn the_contract_is_placed_with_no_storage() {
+        let alloc = alloc(true);
+        let anchoring = &alloc[&ANCHORING_ADDRESS];
+        assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
+        assert_eq!(anchoring.nonce, Some(1));
+        assert!(anchoring.storage.is_none());
+        assert_eq!(alloc.len(), 1, "nothing else belongs here");
+    }
+
+    /// Upstream's own networks generate the same way and must not pick it up.
+    #[test]
+    fn without_the_flag_the_genesis_carries_none() {
+        assert!(alloc(false).is_empty());
     }
 }
