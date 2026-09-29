@@ -11,7 +11,10 @@ use commonware_cryptography::{
     ed25519::PrivateKey,
 };
 use commonware_runtime::{Runner as _, Supervisor as _, deterministic::Runner};
-use commonware_utils::ordered::Quorum as _;
+use commonware_utils::{
+    TryFromIterator as _,
+    ordered::{self, Quorum as _},
+};
 use futures::channel::oneshot;
 
 use super::*;
@@ -957,6 +960,50 @@ fn outcome_requests_use_reshare_fallback_and_require_next_players() {
         assert!(
             !harness.has_dealer_log(state.epoch).await,
             "next-player lookup failure must not terminate the actor"
+        );
+    });
+}
+
+#[test]
+fn a_failed_ceremony_hands_the_fallback_its_dealers() {
+    Runner::default().start(|mut context| async move {
+        let (mut state, _, _) = dkg_state(&mut context, Epoch::new(1), 4, false);
+        // Players other than the dealers; this actor (seed 0) is in both.
+        state.players = ordered::Set::try_from_iter(
+            [0, 10, 11, 12].map(|seed| PrivateKey::from_seed(seed).public_key()),
+        )
+        .unwrap();
+        let mut harness = Harness::builder(context.child("test"), "outcome_fallback_dealers")
+            .epoch_length(10)
+            .build()
+            .await;
+
+        harness.execution.set_next_players(state.players().clone());
+        harness
+            .execution
+            .add_header(outcome_header(Height::new(9), &state));
+
+        harness.start().await;
+        harness
+            .report_finalized_header(header(Height::new(10)))
+            .await;
+        harness
+            .report_finalized_header(header(Height::new(11)))
+            .await;
+
+        let outcome = harness
+            .mailbox()
+            .get_dkg_outcome(Digest(B256::repeat_byte(1)), Height::new(10))
+            .await
+            .unwrap();
+
+        // With no dealings logged the ceremony fails forward, so its dealers, not the players it
+        // never reached, run the next epoch.
+        assert_eq!(outcome.output, state.output);
+        assert_ne!(state.dealers(), state.players());
+        assert_eq!(
+            harness.execution.current_players().as_ref(),
+            Some(state.dealers())
         );
     });
 }
