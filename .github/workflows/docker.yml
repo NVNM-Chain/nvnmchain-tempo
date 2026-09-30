@@ -421,3 +421,78 @@ jobs:
           summarize_image "\`${REGISTRY}/tempo-localnet\`" "$TEMPO_LOCALNET_TAGS"
           summarize_image "\`${REGISTRY}/tempo-sidecar\`" "$TEMPO_SIDECAR_TAGS"
           summarize_image "\`${REGISTRY}/tempo-xtask\`" "$TEMPO_XTASK_TAGS"
+
+  release:
+    name: Draft release
+    # A tag's release ships the binaries from the amd64 images this run pushed.
+    # It stays a draft so the notes can be written before it is published.
+    needs: [merge]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      OWNER: ${{ github.repository_owner }}
+      TAG: ${{ github.ref_name }}
+      SHA: ${{ github.sha }}
+    steps:
+      - name: Log in to Container Registry
+        uses: tempoxyz/gh-actions/vendor/docker/login-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          registry="ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          version="${TAG#v}"
+          for bin in tempo tempo-xtask; do
+            # Copied by platform digest, which is the one the notes quote.
+            digest="$(docker buildx imagetools inspect --raw "${registry}/${bin}:${version}" \
+              | jq -er '.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest')"
+            echo "${bin} ${digest}" >> digests.txt
+            id="$(docker create "${registry}/${bin}@${digest}")"
+            docker cp "${id}:/usr/local/bin/${bin}" "./${bin}"
+            docker rm "${id}" > /dev/null
+            tar -czf "${bin}-${TAG}-x86_64-unknown-linux-gnu.tar.gz" "${bin}"
+          done
+          sha256sum -- *.tar.gz > checksums.txt
+          cat digests.txt checksums.txt
+
+          digest="$(awk '$1 == "tempo" { print $2 }' digests.txt)"
+          {
+            echo "Tempo ${version%%-*} for NVNM Chain, from ${SHA:0:7}."
+            echo
+            echo "TODO: what changed since the previous release."
+            echo
+            echo "Linux x86_64 only, the same binaries as ${registry}/tempo:${version}"
+            echo "(amd64 digest ${digest:0:15}…). Verify with checksums.txt."
+          } > notes.md
+
+      - name: Create or refresh the draft
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          assets=(
+            "tempo-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "tempo-xtask-${TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            checksums.txt
+          )
+          if ! draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file notes.md "${assets[@]}"
+          elif [ "$draft" = true ]; then
+            # A re-run keeps whatever notes the draft has been given since.
+            gh release upload "$TAG" --clobber "${assets[@]}"
+          else
+            echo "::error::${TAG} is already published; its assets are left alone"
+            exit 1
+          fi
