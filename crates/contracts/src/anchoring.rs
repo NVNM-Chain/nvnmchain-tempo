@@ -1,6 +1,6 @@
-//! The anchoring contract, as the genesis alloc places it and the NVNM1 boundary installs it. The
-//! runtime is copied in from the contracts repo's `layout/` by `cargo xtask anchoring-runtime`;
-//! the corpus arrives separately, from the dump loader.
+//! The anchoring contract, as the genesis alloc places it. The runtime is copied in from the
+//! contracts repo's `layout/` by `cargo xtask anchoring-runtime`; the corpus arrives separately,
+//! from the dump loader.
 
 use alloy_primitives::{Address, Bytes, address};
 

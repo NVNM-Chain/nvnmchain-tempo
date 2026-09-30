@@ -224,11 +224,6 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     t12_time: Option<u64>,
 
-    /// NVNM1 hardfork activation time. Unset leaves it unscheduled, as a chain launching on the
-    /// current anchoring runtime wants.
-    #[arg(long)]
-    nvnm1_time: Option<u64>,
-
     /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
     /// networks want.
     #[arg(long)]
@@ -677,11 +672,6 @@ impl GenesisArgs {
             chain_config
                 .extra_fields
                 .insert_value("t12Time".to_string(), t12_time)?;
-        }
-        if let Some(nvnm1_time) = self.nvnm1_time {
-            chain_config
-                .extra_fields
-                .insert_value("nvnm1Time".to_string(), nvnm1_time)?;
         }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
