@@ -216,17 +216,20 @@ pub(crate) struct GenesisArgs {
     #[arg(long, default_value = "0")]
     t11_time: u64,
 
-    /// T12 hardfork activation time.
-    #[arg(long, default_value = "0")]
-    t12_time: u64,
+    /// T12 hardfork activation time. Unset leaves it unscheduled, as do T13 and T14: a genesis
+    /// should not pin a fork this chain has not chosen to run, or one whose contents are still
+    /// moving upstream.
+    #[arg(long)]
+    t12_time: Option<u64>,
 
-    /// T13 hardfork activation time.
-    #[arg(long, default_value = "0")]
-    t13_time: u64,
+    /// T13 hardfork activation time. Unset, the genesis carries the pre-T13 zone runtimes, and a
+    /// chain that schedules T13 later gets the shared ones at its activation boundary.
+    #[arg(long)]
+    t13_time: Option<u64>,
 
     /// T14 hardfork activation time.
-    #[arg(long, default_value = "0")]
-    t14_time: u64,
+    #[arg(long)]
+    t14_time: Option<u64>,
 
     /// NVNM1 hardfork activation time. Unset leaves it unscheduled, as a chain launching on the
     /// current anchoring runtime wants.
@@ -677,15 +680,17 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("t11Time".to_string(), self.t11_time)?;
-        chain_config
-            .extra_fields
-            .insert_value("t12Time".to_string(), self.t12_time)?;
-        chain_config
-            .extra_fields
-            .insert_value("t13Time".to_string(), self.t13_time)?;
-        chain_config
-            .extra_fields
-            .insert_value("t14Time".to_string(), self.t14_time)?;
+        for (key, time) in [
+            ("t12Time", self.t12_time),
+            ("t13Time", self.t13_time),
+            ("t14Time", self.t14_time),
+        ] {
+            if let Some(time) = time {
+                chain_config
+                    .extra_fields
+                    .insert_value(key.to_string(), time)?;
+            }
+        }
         if let Some(nvnm1_time) = self.nvnm1_time {
             chain_config
                 .extra_fields
@@ -744,12 +749,12 @@ fn insert_anchoring_contract_at_genesis(
 
 fn insert_zone_state_at_genesis(
     t10_time: u64,
-    t13_time: u64,
+    t13_time: Option<u64>,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) {
     if t10_time == 0 {
         println!("Initializing ZoneFactory and shared runtimes");
-        let accounts = if t13_time == 0 {
+        let accounts = if t13_time == Some(0) {
             t13_zone_factory_state(INITIAL_FACTORY_OWNER)
         } else {
             initial_zone_factory_state(INITIAL_FACTORY_OWNER)
@@ -1319,7 +1324,7 @@ mod tests {
     #[test]
     fn t10_genesis_installs_factory_and_canonical_shared_runtimes() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(0, 1, &mut alloc);
+        insert_zone_state_at_genesis(0, Some(1), &mut alloc);
         let account = alloc.remove(&ZONE_FACTORY_ADDRESS).unwrap();
         let expected_config =
             U256::from(1) | (U256::from_be_slice(INITIAL_FACTORY_OWNER.as_slice()) << u32::BITS);
@@ -1341,15 +1346,31 @@ mod tests {
     #[test]
     fn future_t10_does_not_install_zone_factory_at_genesis() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(1, 1, &mut alloc);
+        insert_zone_state_at_genesis(1, Some(1), &mut alloc);
 
         assert!(!alloc.contains_key(&ZONE_FACTORY_ADDRESS));
+    }
+
+    /// T13 left unscheduled places what a T12 chain runs; the boundary hook installs the shared
+    /// runtimes if the chain ever turns T13 on.
+    #[test]
+    fn unscheduled_t13_genesis_installs_canonical_shared_runtimes() {
+        let mut alloc = BTreeMap::new();
+        insert_zone_state_at_genesis(0, None, &mut alloc);
+
+        for (destination, expected) in [
+            (ZONE_PORTAL_IMPL_ADDRESS, ZONE_PORTAL_RUNTIME),
+            (ZONE_VERIFIER_ADDRESS, ZONE_VERIFIER_RUNTIME),
+            (ZONE_MESSENGER_ADDRESS, ZONE_MESSENGER_RUNTIME),
+        ] {
+            assert_eq!(alloc[&destination].code.as_ref(), Some(&expected));
+        }
     }
 
     #[test]
     fn t13_genesis_installs_t13_shared_runtimes() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(0, 0, &mut alloc);
+        insert_zone_state_at_genesis(0, Some(0), &mut alloc);
 
         for (destination, expected) in [
             (ZONE_PORTAL_IMPL_ADDRESS, T13_ZONE_PORTAL_RUNTIME),
