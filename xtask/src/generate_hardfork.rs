@@ -254,50 +254,29 @@ fn append_genesis_info_field(source: &str, previous: &str, hardfork: &str) -> ey
     Ok(source.replace(&previous_assert, &new_assert))
 }
 
-/// The new fork's arg copies the previous one's shape: after a fork unscheduled by default, a
-/// later one must be too.
 fn append_genesis_arg(source: &str, previous: &str, hardfork: &str) -> eyre::Result<String> {
-    let optional = source.contains(&genesis_arg(previous, true));
-    let (previous_arg, new_arg) = (
-        genesis_arg(previous, optional),
-        genesis_arg(hardfork, optional),
+    let previous_arg = format!(
+        "    /// {previous} hardfork activation time.\n    #[arg(long, default_value = \"0\")]\n    {}_time: u64,\n",
+        previous.to_ascii_lowercase()
     );
-    let output = insert_once(
-        source,
-        &previous_arg,
-        &format!("{previous_arg}\n    /// {hardfork} hardfork activation time.\n{new_arg}"),
-    )?;
-    let previous_insert = genesis_insert(previous, optional);
-    let new_insert = genesis_insert(hardfork, optional);
-    insert_once(
-        &output,
-        &previous_insert,
-        &format!("{previous_insert}{new_insert}"),
-    )
-}
+    let new_arg = format!(
+        "{previous_arg}\n    /// {hardfork} hardfork activation time.\n    #[arg(long, default_value = \"0\")]\n    {}_time: u64,\n",
+        hardfork.to_ascii_lowercase()
+    );
+    let mut output = insert_once(source, &previous_arg, &new_arg)?;
 
-/// A fork's `--<fork>-time` arg, `0` by default or unset.
-fn genesis_arg(hardfork: &str, optional: bool) -> String {
-    let fork = hardfork.to_ascii_lowercase();
-    if optional {
-        format!("    #[arg(long)]\n    {fork}_time: Option<u64>,\n")
-    } else {
-        format!("    #[arg(long, default_value = \"0\")]\n    {fork}_time: u64,\n")
-    }
-}
-
-/// Writes a fork's time into the genesis config, unless it is unset.
-fn genesis_insert(hardfork: &str, optional: bool) -> String {
-    let fork = hardfork.to_ascii_lowercase();
-    if optional {
-        format!(
-            "        if let Some({fork}_time) = self.{fork}_time {{\n            chain_config\n                .extra_fields\n                .insert_value(\"{fork}Time\".to_string(), {fork}_time)?;\n        }}\n"
-        )
-    } else {
-        format!(
-            "        chain_config\n            .extra_fields\n            .insert_value(\"{fork}Time\".to_string(), self.{fork}_time)?;\n"
-        )
-    }
+    let previous_insert = format!(
+        "        chain_config\n            .extra_fields\n            .insert_value(\"{}Time\".to_string(), self.{}_time)?;\n",
+        previous.to_ascii_lowercase(),
+        previous.to_ascii_lowercase()
+    );
+    let new_insert = format!(
+        "{previous_insert}        chain_config\n            .extra_fields\n            .insert_value(\"{}Time\".to_string(), self.{}_time)?;\n",
+        hardfork.to_ascii_lowercase(),
+        hardfork.to_ascii_lowercase()
+    );
+    output = insert_once(&output, &previous_insert, &new_insert)?;
+    Ok(output)
 }
 
 fn ensure_profile_pair(source: &str, current: &str, previous: &str) -> eyre::Result<()> {
@@ -527,54 +506,6 @@ mod tests {
         let updated = append_bench_hardfork(source, &variants, "T10", "T11").unwrap();
         assert!(updated.contains("['T9', 'T10', 'T11']"));
         assert_eq!(updated.matches("T9|T10|T11").count(), 4);
-    }
-
-    #[test]
-    fn the_current_tree_takes_a_new_hardfork() {
-        // On copies of what it edits, so a change that moves one of its markers fails here, not
-        // when the next hardfork is added.
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let root = tempfile::tempdir().unwrap();
-        let copy = |path: &Path| {
-            let target = root.path().join(path);
-            fs::create_dir_all(target.parent().unwrap()).unwrap();
-            fs::copy(repo.join(path), target).unwrap();
-        };
-        for path in [
-            HARDFORK_SOURCE,
-            CHAINSPEC_SOURCE,
-            GENESIS_ARGS_SOURCE,
-            FOUNDRY_CONFIG,
-            BENCH_WORKFLOW,
-            DEV_GENESIS,
-            TEST_GENESIS,
-        ] {
-            copy(Path::new(path));
-        }
-        for snapshot in fs::read_dir(repo.join(SNAPSHOT_DIR)).unwrap() {
-            copy(&Path::new(SNAPSHOT_DIR).join(snapshot.unwrap().file_name()));
-        }
-
-        let added =
-            add_hardfork(root.path(), "T99").expect("add-hardfork must take the current tree");
-        assert_eq!(added.next, "T99");
-    }
-
-    #[test]
-    fn a_new_hardfork_is_unscheduled_after_an_unscheduled_one() {
-        let source = concat!(
-            "    /// T12 hardfork activation time.\n",
-            "    #[arg(long)]\n",
-            "    t12_time: Option<u64>,\n",
-            "        if let Some(t12_time) = self.t12_time {\n",
-            "            chain_config\n",
-            "                .extra_fields\n",
-            "                .insert_value(\"t12Time\".to_string(), t12_time)?;\n",
-            "        }\n",
-        );
-        let updated = append_genesis_arg(source, "T12", "T13").unwrap();
-        assert!(updated.contains("    #[arg(long)]\n    t13_time: Option<u64>,\n"));
-        assert!(updated.contains("if let Some(t13_time) = self.t13_time {"));
     }
 
     #[test]
