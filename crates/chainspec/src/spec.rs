@@ -21,7 +21,7 @@ use reth_chainspec::{
 use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
-use tempo_hardfork::TempoHardfork;
+use tempo_hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -255,6 +255,12 @@ impl TempoChainSpec {
         });
 
         base_spec.hardforks.extend(tempo_forks);
+        // Beside the `T` series, not in it: `tempo_hardfork_at` never returns it.
+        if let Some(time) = info.nvnm1_time {
+            base_spec
+                .hardforks
+                .insert(NvnmHardfork::Nvnm1, ForkCondition::Timestamp(time));
+        }
 
         let inner = base_spec.map_header(|inner| TempoHeader {
             general_gas_limit: 0,
@@ -275,6 +281,12 @@ impl TempoChainSpec {
             network_identity,
             default_follow_url: None,
         }
+    }
+
+    /// Whether NVNM1, this chain's own fork, is active at `timestamp`.
+    pub fn is_nvnm1_active_at_timestamp(&self, timestamp: u64) -> bool {
+        self.fork(NvnmHardfork::Nvnm1)
+            .active_at_timestamp(timestamp)
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -577,12 +589,14 @@ mod tests {
         assert_eq!(activation, ForkCondition::Timestamp(0));
     }
 
-    /// The chain's own fork is scheduled from genesis, as upstream's networks never carry it.
+    /// Crossing NVNM1 leaves the chain on its `T` fork, here with T12 unscheduled, as a launch
+    /// genesis leaves it.
     #[test]
-    fn nvnm1_is_scheduled_by_genesis() {
+    fn nvnm1_implies_no_t_fork() {
         let mut genesis: alloy_genesis::Genesis =
             serde_json::from_str(include_str!("./genesis/dev.json"))
                 .expect("the dev genesis must always be well formed");
+        genesis.config.extra_fields.remove("t12Time");
         genesis
             .config
             .extra_fields
@@ -594,7 +608,13 @@ mod tests {
         assert!(chainspec.is_nvnm1_active_at_timestamp(1_800_000_000));
         assert_eq!(
             chainspec.tempo_hardfork_at(1_800_000_000),
-            TempoHardfork::Nvnm1
+            chainspec.tempo_hardfork_at(1_799_999_999)
+        );
+        // Still in the fork schedule, and so in the fork id.
+        assert!(
+            chainspec
+                .forks_iter()
+                .any(|(fork, _)| fork.name() == "Nvnm1")
         );
     }
 

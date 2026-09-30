@@ -28,6 +28,9 @@
 //! 5. Add `"vivaceTime": 0` to `genesis/dev.json`.
 //! 6. Add `vivace_time: Option<u64>` arg to `xtask/src/genesis_args.rs`.
 //! 7. Add insertion of `"vivaceTime"` to `chain_config.extra_fields`.
+//!
+//! This chain's own forks go in [`NvnmHardfork`] instead, by hand: a genesis field, an xtask arg
+//! and a boundary hook, each checked by its own activation time.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -222,8 +225,14 @@ tempo_hardfork!(
         ///
         /// See <https://docs.tempo.xyz/docs/protocol/upgrades/t12>.
         T12,
-        /// NVNM1: this chain's first fork, named outside the `T` series so upstream's own forks
-        /// merge cleanly. Installs the anchoring runtime over the code the genesis alloc placed.
+    }
+);
+
+hardfork!(
+    /// This chain's own forks, outside the `T` series: each activates at its own time and implies
+    /// no `T` fork.
+    NvnmHardfork {
+        /// Installs the anchoring runtime over the code the genesis alloc placed.
         Nvnm1,
     }
 );
@@ -371,7 +380,6 @@ impl TempoHardfork {
             Self::T10 => None,
             Self::T11 => None,
             Self::T12 => None,
-            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -396,7 +404,6 @@ impl TempoHardfork {
             Self::T10 => Some(MAINNET_T10_TIMESTAMP),
             Self::T11 => Some(MAINNET_T11_TIMESTAMP),
             Self::T12 => None,
-            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -421,7 +428,6 @@ impl TempoHardfork {
             Self::T10 => None,
             Self::T11 => None,
             Self::T12 => None,
-            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 
@@ -446,7 +452,6 @@ impl TempoHardfork {
             Self::T10 => Some(MODERATO_T10_TIMESTAMP),
             Self::T11 => Some(MODERATO_T11_TIMESTAMP),
             Self::T12 => None,
-            Self::Nvnm1 => None, // scheduled only by genesis
         }
     }
 }
