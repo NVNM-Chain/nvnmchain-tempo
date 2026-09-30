@@ -32,7 +32,10 @@ use tracing::{Span, debug, error, info_span, instrument, warn};
 use crate::{
     consensus::Digest,
     utils::public_key_to_b256,
-    validators::{DecodedValidatorV2, ExecutionNode, read_validator_config_at_block_hash},
+    validators::{
+        DecodedValidatorV2, ExecutionNode, decoded_active_validators,
+        read_validator_config_at_block_hash,
+    },
 };
 
 /// The interval on which the peer set is update during bootstrapping.
@@ -385,30 +388,17 @@ impl PeersBuilder {
     }
 
     #[instrument(skip_all, fields(%hash))]
-    fn resolve_at_hash(self, node: impl ExecutionNode, hash: B256) -> eyre::Result<Peers> {
+    fn resolve_at_hash(self, node: &impl ExecutionNode, hash: B256) -> eyre::Result<Peers> {
         let Self { primary, secondary } = self;
         let (_, _, (primary, secondary)) = read_validator_config_at_block_hash(
             node,
             hash,
             |config: &ValidatorConfigV2| {
                 let mut active_validators = HashMap::new();
-                for (i, raw) in config
-                    .get_active_validators()
-                    .wrap_err("failed reading active validator set from contract")?
-                    .into_iter()
-                    .enumerate()
-                {
-                    if let Ok(decoded) =
-                        DecodedValidatorV2::decode_from_contract(raw).inspect_err(|error| {
-                            warn!(
-                                    %error,
-                                    position = i,
-                                    "failed decoding active validator in contract",
-                            )
-                        })
-                        && active_validators
-                            .insert(decoded.public_key().clone(), decoded.to_p2p_address())
-                            .is_some()
+                for decoded in decoded_active_validators(config)? {
+                    if active_validators
+                        .insert(decoded.public_key().clone(), decoded.to_p2p_address())
+                        .is_some()
                     {
                         warn!(
                             duplicate = %decoded.public_key(),
@@ -487,175 +477,17 @@ fn read_header_at_height(execution_node: &TempoFullNode, height: u64) -> eyre::R
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        net::{IpAddr, Ipv4Addr, SocketAddr},
-    };
-
-    use alloy_consensus::Header;
-    use alloy_primitives::{Address as AlloyAddress, B256, Keccak256, U256};
-    use commonware_codec::Encode as _;
     use commonware_consensus::types::Epoch;
-    use commonware_cryptography::{
-        Signer as _,
-        bls12381::{
-            dkg::feldman_desmedt as dkg,
-            primitives::{sharing::Mode, variant::MinSig},
-        },
-        ed25519::PrivateKey,
+    use commonware_cryptography::bls12381::{
+        dkg::feldman_desmedt as dkg,
+        primitives::{sharing::Mode, variant::MinSig},
     };
     use commonware_utils::{N3f1, TryFromIterator as _};
     use rand::SeedableRng as _;
-    use reth_ethereum::evm::revm::{State, database::StateProviderDatabase};
-    use reth_node_builder::ConfigureEvm as _;
-    use reth_provider::{
-        StateProviderBox,
-        test_utils::{ExtendedAccount, MockEthProvider},
-    };
-    use tempo_node::evm::{TempoEvmConfig, evm::TempoEvm};
-    use tempo_precompiles::{
-        storage::{StorageCtx, hashmap::HashMapStorageProvider},
-        validator_config_v2::{IValidatorConfigV2, VALIDATOR_NS_ADD},
-    };
+
+    use crate::validators::testing::{ValidatorFixture, execution_with, peer};
 
     use super::*;
-
-    const VALIDATOR_CONFIG_V2_ADDRESS: AlloyAddress =
-        alloy_primitives::address!("0xCCCCCCCC00000000000000000000000000000001");
-
-    struct TestExecutionNode {
-        hash: B256,
-        height: u64,
-        provider: MockEthProvider,
-    }
-
-    impl ExecutionNode for TestExecutionNode {
-        fn header(&self, block_hash: B256) -> eyre::Result<TempoHeader> {
-            assert_eq!(block_hash, self.hash);
-            Ok(TempoHeader {
-                general_gas_limit: 30_000_000,
-                inner: Header {
-                    number: self.height,
-                    timestamp: 1,
-                    gas_limit: 30_000_000,
-                    base_fee_per_gas: Some(1),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-        }
-
-        fn state_by_block_hash(&self, block_hash: B256) -> eyre::Result<StateProviderBox> {
-            assert_eq!(block_hash, self.hash);
-            Ok(Box::new(self.provider.clone()))
-        }
-
-        fn evm_for_block(
-            &self,
-            db: State<StateProviderDatabase<StateProviderBox>>,
-            header: &TempoHeader,
-        ) -> eyre::Result<TempoEvm<State<StateProviderDatabase<StateProviderBox>>>> {
-            TempoEvmConfig::moderato()
-                .evm_for_block(db, header)
-                .map_err(eyre::Report::new)
-        }
-    }
-
-    struct ValidatorFixture {
-        private_key: PrivateKey,
-        public_key: PublicKey,
-        validator_address: AlloyAddress,
-        ingress: String,
-        egress: String,
-        p2p_address: Address,
-    }
-
-    fn peer(seed: u8) -> ValidatorFixture {
-        let private_key = PrivateKey::from_seed(u64::from(seed));
-        let public_key = private_key.public_key();
-        let validator_address = AlloyAddress::from([seed; 20]);
-        let egress_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, seed));
-        let ingress_socket = SocketAddr::new(egress_ip, 8000 + u16::from(seed));
-        let p2p_address = Address::Asymmetric {
-            ingress: commonware_p2p::Ingress::Socket(ingress_socket),
-            egress: SocketAddr::new(egress_ip, 0),
-        };
-
-        ValidatorFixture {
-            private_key,
-            public_key,
-            validator_address,
-            ingress: ingress_socket.to_string(),
-            egress: egress_ip.to_string(),
-            p2p_address,
-        }
-    }
-
-    impl ValidatorFixture {
-        fn add_validator_call(&self) -> IValidatorConfigV2::addValidatorCall {
-            let mut hasher = Keccak256::new();
-            hasher.update(1u64.to_be_bytes());
-            hasher.update(VALIDATOR_CONFIG_V2_ADDRESS.as_slice());
-            hasher.update(self.validator_address.as_slice());
-            hasher.update([self.ingress.len() as u8]);
-            hasher.update(self.ingress.as_bytes());
-            hasher.update([self.egress.len() as u8]);
-            hasher.update(self.egress.as_bytes());
-            hasher.update(self.validator_address.as_slice());
-            let message = hasher.finalize();
-            let signature = self
-                .private_key
-                .sign(VALIDATOR_NS_ADD, message.as_slice())
-                .encode()
-                .to_vec();
-
-            IValidatorConfigV2::addValidatorCall {
-                validatorAddress: self.validator_address,
-                publicKey: public_key_to_b256(&self.public_key),
-                ingress: self.ingress.clone(),
-                egress: self.egress.clone(),
-                feeRecipient: self.validator_address,
-                signature: signature.into(),
-            }
-        }
-    }
-
-    fn execution_with_validators(
-        validators: &[ValidatorFixture],
-    ) -> eyre::Result<TestExecutionNode> {
-        let mut storage = HashMapStorageProvider::new(1);
-        let owner = AlloyAddress::from([0xAA; 20]);
-
-        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-            let mut config = ValidatorConfigV2::new();
-            config.initialize(owner)?;
-            for validator in validators {
-                config.add_validator(owner, validator.add_validator_call())?;
-            }
-            Ok(())
-        })?;
-
-        let mut storage_by_account = HashMap::<AlloyAddress, Vec<(B256, U256)>>::new();
-        for (address, slot, value) in storage.into_storage() {
-            storage_by_account
-                .entry(address)
-                .or_default()
-                .push((B256::from(slot), value));
-        }
-        let provider = MockEthProvider::new();
-        for (address, storage) in storage_by_account {
-            provider.add_account(
-                address,
-                ExtendedAccount::new(0, U256::ZERO).extend_storage(storage),
-            );
-        }
-
-        Ok(TestExecutionNode {
-            hash: B256::from([0x42; 32]),
-            height: 7,
-            provider,
-        })
-    }
 
     fn dkg_outcome(
         players: impl IntoIterator<Item = PublicKey>,
@@ -689,7 +521,7 @@ mod tests {
 
     #[test]
     fn resolve_at_hash_has_no_secondaries_when_players_are_next_players() -> eyre::Result<()> {
-        let execution = execution_with_validators(&[peer(1), peer(2)])?;
+        let execution = execution_with(&[peer(1), peer(2)], &[])?;
         let outcome = dkg_outcome(
             [peer(1).public_key, peer(2).public_key],
             [peer(1).public_key, peer(2).public_key],
@@ -707,7 +539,7 @@ mod tests {
 
     #[test]
     fn resolve_at_hash_keeps_dropped_player_primary() -> eyre::Result<()> {
-        let execution = execution_with_validators(&[peer(1), peer(2)])?;
+        let execution = execution_with(&[peer(1), peer(2)], &[])?;
         let outcome = dkg_outcome(
             [peer(1).public_key, peer(2).public_key],
             [peer(1).public_key],
@@ -725,7 +557,7 @@ mod tests {
 
     #[test]
     fn resolve_at_hash_adds_next_player_as_secondary() -> eyre::Result<()> {
-        let execution = execution_with_validators(&[peer(1), peer(2)])?;
+        let execution = execution_with(&[peer(1), peer(2)], &[])?;
         let outcome = dkg_outcome(
             [peer(1).public_key],
             [peer(1).public_key, peer(2).public_key],
@@ -744,7 +576,7 @@ mod tests {
 
     #[test]
     fn resolve_at_hash_adds_active_non_dkg_validator_as_secondary() -> eyre::Result<()> {
-        let execution = execution_with_validators(&[peer(1), peer(2)])?;
+        let execution = execution_with(&[peer(1), peer(2)], &[])?;
         let outcome = dkg_outcome([peer(1).public_key], [peer(1).public_key])?;
         let peers =
             PeersBuilder::with_dkg_outcome(&outcome).resolve_at_hash(&execution, execution.hash)?;

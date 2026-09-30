@@ -478,6 +478,7 @@ pub(super) struct StubExecutionProvider {
     next_players: Arc<Mutex<ordered::Set<PublicKey>>>,
     fail_next_players: Arc<AtomicBool>,
     fail_next_full_dkg_epoch: Arc<AtomicBool>,
+    current_players: Arc<Mutex<Option<ordered::Set<PublicKey>>>>,
 }
 
 impl StubExecutionProvider {
@@ -503,6 +504,11 @@ impl StubExecutionProvider {
     pub(super) fn fail_next_full_dkg_epoch(&self) {
         self.fail_next_full_dkg_epoch.store(true, Ordering::SeqCst);
     }
+
+    /// The `current_players` the last next-players read was given.
+    pub(super) fn current_players(&self) -> Option<ordered::Set<PublicKey>> {
+        self.current_players.lock().unwrap().clone()
+    }
 }
 
 impl ExecutionLayer for StubExecutionProvider {
@@ -511,7 +517,12 @@ impl ExecutionLayer for StubExecutionProvider {
         Ok(self.headers.lock().unwrap().get(&height).cloned())
     }
 
-    fn next_players(&self, _digest: Digest) -> eyre::Result<ordered::Set<PublicKey>> {
+    fn next_players(
+        &self,
+        _digest: Digest,
+        current_players: &ordered::Set<PublicKey>,
+    ) -> eyre::Result<ordered::Set<PublicKey>> {
+        *self.current_players.lock().unwrap() = Some(current_players.clone());
         if self.fail_next_players.load(Ordering::SeqCst) {
             eyre::bail!("next players unavailable");
         }

@@ -1205,11 +1205,21 @@ where
             "determined if the next epoch will be a reshare or full re-dkg process",
         );
 
-        let next_players = self
-            .config
-            .execution_node
-            .next_players(request.digest)
-            .wrap_err("could not determine who the next players are supposed to be")?;
+        // Cached: views re-propose the same digest, and each read builds an EVM in this loop.
+        let next_players = match storage.get_next_players(&state.epoch, &request.digest) {
+            Some(players) => players.clone(),
+            None => {
+                let players = self
+                    .config
+                    .execution_node
+                    // Whoever holds the output runs the next epoch: the players if the ceremony
+                    // succeeded, the dealers it carried forward if not.
+                    .next_players(request.digest, output.players())
+                    .wrap_err("could not determine who the next players are supposed to be")?;
+                storage.cache_next_players(state.epoch, request.digest, players.clone());
+                players
+            }
+        };
 
         request
             .response

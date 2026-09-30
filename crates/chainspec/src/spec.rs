@@ -35,6 +35,12 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// Contract whose `computeCommittee` selects each epoch's validators. Unset stays PoA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election: Option<Address>,
+    /// When the election activates, in the style of the hardfork times. Unset means genesis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election_time: Option<u64>,
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
@@ -92,17 +98,36 @@ pub struct TempoGenesisInfo {
 }
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Self {
+    /// Extract Tempo genesis info from genesis extra_fields. A malformed value is an error, not a
+    /// default: these fields are consensus-critical and outside the genesis hash.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        genesis.config.extra_fields.deserialize_as()
+    }
+
+    #[cfg(feature = "std")]
+    /// Keys in extra_fields that do not serialize back out, so Tempo ignores them. A null is
+    /// unset, never reported.
+    fn unrecognized_keys(&self, genesis: &Genesis) -> Vec<alloc::string::String> {
+        let kept = serde_json::to_value(self).unwrap_or_default();
         genesis
             .config
             .extra_fields
-            .deserialize_as::<Self>()
-            .unwrap_or_default()
+            .iter()
+            .filter(|(key, value)| !value.is_null() && kept.get(key.as_str()).is_none())
+            .map(|(key, _)| key.clone())
+            .collect()
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    pub fn staking_election(&self) -> Option<Address> {
+        self.staking_election
+    }
+
+    pub fn staking_election_time(&self) -> Option<u64> {
+        self.staking_election_time
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
@@ -146,7 +171,13 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
+        _ => {
+            let genesis = reth_cli::chainspec::parse_genesis(s)?;
+            // An argument error here, rather than `from_genesis`'s panic.
+            TempoGenesisInfo::extract_from(&genesis)
+                .map_err(|e| eyre::eyre!("malformed Tempo genesis extra_fields: {e}"))?;
+            TempoChainSpec::from_genesis(genesis).into()
+        }
     })
 }
 
@@ -212,6 +243,8 @@ pub struct TempoChainSpec {
     pub network_identity: Option<NetworkIdentity>,
     /// Default RPC URL for following this chain.
     pub default_follow_url: Option<&'static str>,
+    /// Genesis config keys Tempo ignores, for the node to warn about once logging is up.
+    pub unknown_config_keys: alloc::vec::Vec<alloc::string::String>,
 }
 
 impl TempoChainSpec {
@@ -244,7 +277,12 @@ impl TempoChainSpec {
     /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
     pub fn from_genesis(genesis: Genesis) -> Self {
         // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis);
+        let info =
+            TempoGenesisInfo::extract_from(&genesis).expect("malformed Tempo genesis extra_fields");
+        #[cfg(feature = "std")]
+        let unknown_config_keys = info.unrecognized_keys(&genesis);
+        #[cfg(not(feature = "std"))]
+        let unknown_config_keys = alloc::vec::Vec::new();
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -274,6 +312,7 @@ impl TempoChainSpec {
             info,
             network_identity,
             default_follow_url: None,
+            unknown_config_keys,
         }
     }
 
@@ -320,6 +359,7 @@ impl From<ChainSpec> for TempoChainSpec {
             info: TempoGenesisInfo::default(),
             network_identity,
             default_follow_url: None,
+            unknown_config_keys: Default::default(),
         }
     }
 }
@@ -653,6 +693,47 @@ mod tests {
 
         let chainspec = super::TempoChainSpec::from_genesis(genesis);
         assert!(chainspec.network_identity.is_none());
+    }
+
+    #[test]
+    fn absent_extra_fields_are_the_default() {
+        let info = super::TempoGenesisInfo::extract_from(&genesis_with(serde_json::json!({})));
+        assert_eq!(info.unwrap(), super::TempoGenesisInfo::default());
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_malformed_extra_field_is_a_chain_argument_error() {
+        for epoch_length in [serde_json::json!("302400"), serde_json::json!(0)] {
+            let genesis = genesis_with(serde_json::json!({ "epochLength": epoch_length }));
+            let err = super::chain_value_parser(&serde_json::to_string(&genesis).unwrap())
+                .expect_err("a malformed epochLength must not parse");
+            assert!(
+                err.to_string()
+                    .contains("malformed Tempo genesis extra_fields")
+            );
+        }
+    }
+
+    #[test]
+    fn a_misspelled_key_is_named_and_a_null_one_is_not() {
+        let genesis = genesis_with(serde_json::json!({
+            "epochLength": 20,
+            "epochLenght": 20,
+            "t12Tme": null,
+        }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
+        assert_eq!(info.unrecognized_keys(&genesis), ["epochLenght"]);
+    }
+
+    /// A genesis carrying `extra` alongside the fields every genesis needs.
+    fn genesis_with(extra: serde_json::Value) -> alloy_genesis::Genesis {
+        let mut config = serde_json::json!({ "chainId": 1234 });
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} })).unwrap()
     }
 
     #[test]
