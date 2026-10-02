@@ -35,6 +35,12 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// Contract whose `computeCommittee` selects each epoch's validators. Unset stays PoA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election: Option<Address>,
+    /// When the election activates, in the style of the hardfork times. Unset means genesis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election_time: Option<u64>,
     /// The fee router factory; from T12 a validator's fee recipient may only be the router it
     /// holds for it (`routerOf`). Unset leaves recipients free.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -121,6 +127,14 @@ impl TempoGenesisInfo {
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    pub fn staking_election(&self) -> Option<Address> {
+        self.staking_election
+    }
+
+    pub fn staking_election_time(&self) -> Option<u64> {
+        self.staking_election_time
     }
 
     pub fn fee_router_factory(&self) -> Option<Address> {

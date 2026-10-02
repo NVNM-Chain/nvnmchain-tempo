@@ -13,7 +13,7 @@ use commonware_cryptography::{
 };
 use commonware_utils::ordered;
 use eyre::{Report, WrapErr as _};
-use reth_provider::StateProvider as _;
+use reth_provider::{EvmStateProviderBox, StateProvider as _};
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{ExecutedState, TempoFullNode};
 use tempo_precompiles::validator_config_v2::ValidatorConfigV2;
@@ -21,7 +21,7 @@ use tracing::{Level, debug, info, instrument};
 
 use crate::{
     consensus::block::Block,
-    validators::{read_active_peers, read_validator_config_with_state},
+    validators::{read_active_peers, read_elected_players, read_validator_config_with_state},
 };
 
 /// Reads the post-state of a boundary block's parent through
@@ -48,8 +48,10 @@ impl TempoParentState {
         let next_full_dkg_epoch = self
             .next_full_dkg_epoch(parent)
             .wrap_err("could not determine the next full DKG epoch")?;
+        // Whoever holds the output runs the next epoch: the players if the ceremony succeeded,
+        // the dealers it carried forward if not.
         let next_players = self
-            .next_players(parent)
+            .next_players(parent, output.players())
             .wrap_err("could not determine who the next players are supposed to be")?;
 
         let outcome = assemble_boundary_outcome(
@@ -69,16 +71,35 @@ impl TempoParentState {
 
     /// Returns the validators that are active in the validator config at
     /// `parent`. They are the players of the ceremony in the next epoch.
+    ///
+    /// Where the genesis names a staking election, that contract picks them
+    /// among the active validators; `current_players` stay if it cannot.
     #[instrument(
         skip_all,
         fields(parent.height = %parent.height()),
         err(level = Level::WARN),
     )]
-    fn next_players(&self, parent: &Block) -> eyre::Result<ordered::Set<PublicKey>> {
-        let next_players = self
-            .read_validator_config(parent, read_active_peers)
-            .wrap_err("failed reading peers from validator config v2")?
-            .into_keys();
+    fn next_players(
+        &self,
+        parent: &Block,
+        current_players: &ordered::Set<PublicKey>,
+    ) -> eyre::Result<ordered::Set<PublicKey>> {
+        let info = &self.node.chain_spec().info;
+        let next_players = match info.staking_election() {
+            Some(staking_election) => read_elected_players(
+                self.node.as_ref(),
+                self.parent_post_state(parent)?,
+                parent.header(),
+                staking_election,
+                info.staking_election_time(),
+                current_players,
+            )
+            .wrap_err("failed determining the elected players")?,
+            None => self
+                .read_validator_config(parent, read_active_peers)
+                .wrap_err("failed reading peers from validator config v2")?
+                .into_keys(),
+        };
 
         debug!(?next_players, "determined next players");
         Ok(next_players)
@@ -106,15 +127,19 @@ impl TempoParentState {
         parent: &Block,
         read_fn: impl FnOnce(&ValidatorConfigV2) -> eyre::Result<T>,
     ) -> eyre::Result<T> {
-        let state = self
-            .executed_state
-            .state_by_block_hash(self.node.provider.clone(), parent.digest().0)?;
         read_validator_config_with_state(
             self.node.as_ref(),
-            Box::new(state.into_evm_state_provider()),
+            self.parent_post_state(parent)?,
             parent.header(),
             read_fn,
         )
+    }
+
+    fn parent_post_state(&self, parent: &Block) -> eyre::Result<EvmStateProviderBox> {
+        let state = self
+            .executed_state
+            .state_by_block_hash(self.node.provider.clone(), parent.digest().0)?;
+        Ok(Box::new(state.into_evm_state_provider()))
     }
 }
 
