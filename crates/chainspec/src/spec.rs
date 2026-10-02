@@ -1,7 +1,10 @@
 pub use tempo_hardfork::constants::gas::*;
 
 use crate::{
-    bootnodes::{moderato_nodes, presto_nodes},
+    bootnodes::{
+        NVNM_CANARY_FOLLOW_URL, NVNM_TESTNET_FOLLOW_URL, moderato_nodes, nvnm_canary_nodes,
+        nvnm_testnet_nodes, presto_nodes,
+    },
     network_identity::NetworkIdentity,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -131,7 +134,7 @@ impl TempoGenesisInfo {
 pub struct TempoChainSpecParser;
 
 /// Chains supported by Tempo. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "mainnet", "moderato", "testnet"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -141,7 +144,8 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
-        "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
+        "testnet" | "moderato" => MODERATO.clone(),
+        "nvnm-testnet" => NVNM_TESTNET.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -164,7 +168,8 @@ impl reth_cli::chainspec::ChainSpecParser for TempoChainSpecParser {
 pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
-        787222 => Some(MODERATO.clone()),
+        42431 => Some(MODERATO.clone()),
+        787223 => Some(NVNM_TESTNET.clone()),
         _ => None,
     }
 }
@@ -175,7 +180,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
 
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::testnet())
-        .with_default_follow_url("wss://rpc.testnet.nvnm.xyz")
+        .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
         .into()
 });
 
@@ -187,6 +192,14 @@ pub static PRESTO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .with_network_identity(NetworkIdentity::mainnet())
         .with_default_follow_url("wss://rpc.presto.tempo.xyz")
         .into()
+});
+
+/// NVNM testnet, chain 787223, still on its genesis DKG identity.
+pub static NVNM_TESTNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-testnet.json"))
+        .expect("`./genesis/nvnm-testnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis).into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -214,7 +227,11 @@ pub struct TempoChainSpec {
 impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
-        self.default_follow_url
+        self.default_follow_url.or(match self.inner.chain_id() {
+            787222 => NVNM_CANARY_FOLLOW_URL,
+            787223 => NVNM_TESTNET_FOLLOW_URL,
+            _ => None,
+        })
     }
 
     /// Returns the shared gas limit for the given timestamp and block gas limit.
@@ -392,8 +409,11 @@ impl EthChainSpec for TempoChainSpec {
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
-            787222 => Some(moderato_nodes()),
-            _ => self.inner.bootnodes(),
+            42431 => Some(moderato_nodes()),
+            787222 => Some(nvnm_canary_nodes()),
+            787223 => Some(nvnm_testnet_nodes()),
+            // `None` makes reth seed discovery with Ethereum mainnet's bootnodes.
+            _ => Some(Vec::new()),
         }
     }
 
@@ -1074,5 +1094,37 @@ mod tests {
 
             assert_eq!(spec.chain(), resolved.chain(), "chain mismatch for {name}");
         }
+    }
+
+    #[test]
+    fn bootnodes_are_never_none() {
+        assert!(!super::PRESTO.bootnodes().unwrap().is_empty());
+        assert!(!super::MODERATO.bootnodes().unwrap().is_empty());
+        assert_eq!(super::DEV.bootnodes(), Some(Vec::new()));
+
+        // Even an id reth knows (Ethereum mainnet) gets none of reth's lists.
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1 },
+            "alloc": {}
+        }))
+        .unwrap();
+        let ethereum = super::TempoChainSpec::from_genesis(genesis);
+        assert_eq!(ethereum.bootnodes(), Some(Vec::new()));
+    }
+
+    /// Block 0 and config as the live nodes report them (`debug_chainConfig`).
+    #[test]
+    fn nvnm_testnet_matches_the_live_network() {
+        use alloy_primitives::b256;
+
+        let spec = &*super::NVNM_TESTNET;
+        assert_eq!(spec.chain().id(), 787223);
+        assert_eq!(
+            spec.genesis_hash(),
+            b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300")
+        );
+        assert_eq!(spec.info.epoch_length().map(|n| n.get()), Some(21_600));
+        assert_eq!(spec.info.fork_time(TempoHardfork::T12), None);
+        assert!(spec.network_identity.is_some());
     }
 }

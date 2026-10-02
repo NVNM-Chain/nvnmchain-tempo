@@ -30,3 +30,41 @@ pub(crate) static PRESTO_BOOTNODES: [&str; 9] = [
 pub(crate) fn presto_nodes() -> Vec<NodeRecord> {
     parse_nodes(PRESTO_BOOTNODES)
 }
+
+// NVNM entry points. Bootnodes are public RPC replicas, never validators; follow URLs must be
+// websocket.
+
+pub(crate) static NVNM_CANARY_BOOTNODES: &[&str] = &[];
+pub(crate) static NVNM_TESTNET_BOOTNODES: &[&str] = &[];
+
+pub(crate) const NVNM_CANARY_FOLLOW_URL: Option<&str> = None;
+pub(crate) const NVNM_TESTNET_FOLLOW_URL: Option<&str> = None;
+
+pub(crate) fn nvnm_canary_nodes() -> Vec<NodeRecord> {
+    parse_nodes(NVNM_CANARY_BOOTNODES)
+}
+
+pub(crate) fn nvnm_testnet_nodes() -> Vec<NodeRecord> {
+    parse_nodes(NVNM_TESTNET_BOOTNODES)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn nvnm_entry_points_are_well_formed() {
+        super::nvnm_canary_nodes();
+        super::nvnm_testnet_nodes();
+        for url in [
+            super::NVNM_CANARY_FOLLOW_URL,
+            super::NVNM_TESTNET_FOLLOW_URL,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                url.starts_with("wss://") || url.starts_with("ws://"),
+                "{url}"
+            );
+        }
+    }
+}
