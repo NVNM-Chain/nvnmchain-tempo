@@ -1,7 +1,10 @@
 pub use tempo_hardfork::constants::gas::*;
 
 use crate::{
-    bootnodes::{moderato_nodes, presto_nodes},
+    bootnodes::{
+        NVNM_CANARY_FOLLOW_URL, NVNM_TESTNET_FOLLOW_URL, moderato_nodes, nvnm_canary_nodes,
+        nvnm_testnet_nodes, presto_nodes,
+    },
     network_identity::NetworkIdentity,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -224,7 +227,11 @@ pub struct TempoChainSpec {
 impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
-        self.default_follow_url
+        self.default_follow_url.or(match self.inner.chain_id() {
+            787222 => NVNM_CANARY_FOLLOW_URL,
+            787223 => NVNM_TESTNET_FOLLOW_URL,
+            _ => None,
+        })
     }
 
     /// Returns the shared gas limit for the given timestamp and block gas limit.
@@ -403,6 +410,8 @@ impl EthChainSpec for TempoChainSpec {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
             42431 => Some(moderato_nodes()),
+            787222 => Some(nvnm_canary_nodes()),
+            787223 => Some(nvnm_testnet_nodes()),
             // `None` makes reth seed discovery with Ethereum mainnet's bootnodes.
             _ => Some(Vec::new()),
         }
