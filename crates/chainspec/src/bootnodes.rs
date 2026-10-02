@@ -35,7 +35,10 @@ pub(crate) fn presto_nodes() -> Vec<NodeRecord> {
 // websocket.
 
 pub(crate) static NVNM_CANARY_BOOTNODES: &[&str] = &[];
-pub(crate) static NVNM_TESTNET_BOOTNODES: &[&str] = &[];
+pub(crate) static NVNM_TESTNET_BOOTNODES: &[&str] = &[
+    "enode://f5826a55ca7c92dc04e6da41e061b0b684ae0338bcdec81ed3213ae8b251308b6870ddafee5128ba16268bdff78f2eba8bda6518d175ddc0cd36c606d604f526@34.150.20.80:30303",
+    "enode://2d91f00d8305eb5faf7a002a260ac0d83b6ac4b1a61de7cbdf4021b4476a03360db071e6842f4d3d176c90d9a12c264d77e6c3792634a09a4f483bbceb5c8d70@34.92.172.118:30303",
+];
 
 pub(crate) const NVNM_CANARY_FOLLOW_URL: Option<&str> = None;
 pub(crate) const NVNM_TESTNET_FOLLOW_URL: Option<&str> = None;
