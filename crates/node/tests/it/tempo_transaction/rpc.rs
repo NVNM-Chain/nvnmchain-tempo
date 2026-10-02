@@ -20,7 +20,7 @@ use alloy_eips::Encodable2718;
 use reth_primitives_traits::transaction::TxHashRef;
 use tempo_chainspec::{
     hardfork::{TempoHardfork, TempoHardforks},
-    spec::{DEV, MODERATO, PRESTO},
+    spec::{DEV, chainspec_from_chain_id},
 };
 use tempo_primitives::{TempoTxEnvelope, transaction::tempo_transaction::Call};
 
@@ -85,12 +85,7 @@ impl RpcEnv {
 
         let chain_id = provider.get_chain_id().await?;
 
-        // Chain IDs from genesis/*.json (mirrors bootnodes() in spec.rs)
-        let chain_spec = match chain_id {
-            4217 => PRESTO.clone(), // mainnet
-            42431 => MODERATO.clone(),
-            _ => DEV.clone(),
-        };
+        let chain_spec = chainspec_from_chain_id(chain_id).unwrap_or_else(|| DEV.clone());
         let latest_block: alloy::rpc::types::Block = provider
             .get_block_by_number(Default::default())
             .await?

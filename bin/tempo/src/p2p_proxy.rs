@@ -60,7 +60,7 @@ pub struct P2pProxyArgs {
     rpc_url: String,
 
     /// Chain to connect to.
-    #[arg(long, default_value = "mainnet")]
+    #[arg(long, default_value = "nvnm-testnet")]
     chain: String,
 
     /// Port for the P2P listener.

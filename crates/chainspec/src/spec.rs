@@ -131,7 +131,7 @@ impl TempoGenesisInfo {
 pub struct TempoChainSpecParser;
 
 /// Chains supported by Tempo. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "mainnet", "moderato", "testnet"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -142,6 +142,7 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
+        "nvnm-testnet" => NVNM_TESTNET.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -165,6 +166,7 @@ pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
         42431 => Some(MODERATO.clone()),
+        787223 => Some(NVNM_TESTNET.clone()),
         _ => None,
     }
 }
@@ -187,6 +189,14 @@ pub static PRESTO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .with_network_identity(NetworkIdentity::mainnet())
         .with_default_follow_url("wss://rpc.presto.tempo.xyz")
         .into()
+});
+
+/// NVNM testnet, chain 787223, still on its genesis DKG identity.
+pub static NVNM_TESTNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-testnet.json"))
+        .expect("`./genesis/nvnm-testnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis).into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -1091,5 +1101,21 @@ mod tests {
         .unwrap();
         let ethereum = super::TempoChainSpec::from_genesis(genesis);
         assert_eq!(ethereum.bootnodes(), Some(Vec::new()));
+    }
+
+    /// Block 0 and config as the live nodes report them (`debug_chainConfig`).
+    #[test]
+    fn nvnm_testnet_matches_the_live_network() {
+        use alloy_primitives::b256;
+
+        let spec = &*super::NVNM_TESTNET;
+        assert_eq!(spec.chain().id(), 787223);
+        assert_eq!(
+            spec.genesis_hash(),
+            b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300")
+        );
+        assert_eq!(spec.info.epoch_length().map(|n| n.get()), Some(21_600));
+        assert_eq!(spec.info.fork_time(TempoHardfork::T12), None);
+        assert!(spec.network_identity.is_some());
     }
 }
