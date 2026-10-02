@@ -472,6 +472,10 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
         |spec: Arc<TempoChainSpec>| (TempoEvmConfig::new(spec.clone()), TempoConsensus::new(spec));
 
     cli.run_with_components::<TempoNode>(components, async move |builder, args| {
+        // Not at parse time: `--chain` is read before logging starts.
+        for key in &builder.config().chain.unknown_config_keys {
+            warn!(%key, "genesis config key is unknown to Tempo and ignored");
+        }
         if let Some(value) = args.consensus.message_backlog {
             warn!(
                 flag = "--consensus.message-backlog",
