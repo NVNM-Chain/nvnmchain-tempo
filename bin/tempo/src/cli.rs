@@ -78,7 +78,7 @@ pub struct TempoArgs {
     #[arg(
         long = "tempo.bootnodes-endpoint",
         value_name = "URL",
-        default_value = "https://peers.tempo.xyz",
+        default_value = "none",
         env = "TEMPO_BOOTNODES_ENDPOINT"
     )]
     pub(crate) bootnodes_endpoint: String,

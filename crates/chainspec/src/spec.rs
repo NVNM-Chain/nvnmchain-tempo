@@ -141,7 +141,7 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "mainnet" => PRESTO.clone(),
-        "testnet" | "moderato" | "nvm-testnet" => MODERATO.clone(),
+        "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
@@ -164,7 +164,7 @@ impl reth_cli::chainspec::ChainSpecParser for TempoChainSpecParser {
 pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
-        787222 => Some(MODERATO.clone()),
+        42431 => Some(MODERATO.clone()),
         _ => None,
     }
 }
@@ -175,7 +175,7 @@ pub static MODERATO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
 
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::testnet())
-        .with_default_follow_url("wss://rpc.testnet.nvnm.xyz")
+        .with_default_follow_url("wss://rpc.moderato.tempo.xyz")
         .into()
 });
 
@@ -392,8 +392,9 @@ impl EthChainSpec for TempoChainSpec {
     fn bootnodes(&self) -> Option<Vec<NodeRecord>> {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
-            787222 => Some(moderato_nodes()),
-            _ => self.inner.bootnodes(),
+            42431 => Some(moderato_nodes()),
+            // `None` makes reth seed discovery with Ethereum mainnet's bootnodes.
+            _ => Some(Vec::new()),
         }
     }
 
@@ -1074,5 +1075,21 @@ mod tests {
 
             assert_eq!(spec.chain(), resolved.chain(), "chain mismatch for {name}");
         }
+    }
+
+    #[test]
+    fn bootnodes_are_never_none() {
+        assert!(!super::PRESTO.bootnodes().unwrap().is_empty());
+        assert!(!super::MODERATO.bootnodes().unwrap().is_empty());
+        assert_eq!(super::DEV.bootnodes(), Some(Vec::new()));
+
+        // Even an id reth knows (Ethereum mainnet) gets none of reth's lists.
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1 },
+            "alloc": {}
+        }))
+        .unwrap();
+        let ethereum = super::TempoChainSpec::from_genesis(genesis);
+        assert_eq!(ethereum.bootnodes(), Some(Vec::new()));
     }
 }
