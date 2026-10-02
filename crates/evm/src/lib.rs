@@ -14,7 +14,7 @@ use alloy_consensus::BlockHeader as _;
 pub use assemble::TempoBlockAssembler;
 pub use pool::{TempoPoolValidationEvm, TempoPoolValidationResult};
 mod block;
-pub use block::{TempoBlockExecutor, TempoReceiptBuilder, TempoTxResult};
+pub use block::{TempoBlockExecutor, TempoReceiptBuilder, TempoTxResult, registry_fee_recipient};
 mod context;
 pub use context::{TempoBlockExecutionCtx, TempoNextBlockEnvAttributes};
 pub mod consensus;
@@ -202,6 +202,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
+                fee_router_factory: self.chain_spec().info.fee_router_factory(),
             },
         })
     }
@@ -257,6 +258,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
+                fee_router_factory: self.chain_spec().info.fee_router_factory(),
             },
         })
     }

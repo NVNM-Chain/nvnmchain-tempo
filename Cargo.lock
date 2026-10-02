@@ -13873,6 +13873,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
+ "tempo-validator-config",
  "thiserror 2.0.18",
  "tikv-jemallocator",
  "tracing",

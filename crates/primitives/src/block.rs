@@ -30,6 +30,9 @@ pub struct TempoBlockEnv {
 
     /// Proposer's Ed25519 public key. `Some` only for post-T4 blocks.
     pub proposer_public_key: Option<PublicKey>,
+
+    /// The genesis' fee router factory, if any, whose `routerOf` binds fee recipients from T12.
+    pub fee_router_factory: Option<Address>,
 }
 
 impl Default for TempoBlockEnv {
@@ -39,6 +42,7 @@ impl Default for TempoBlockEnv {
             timestamp_millis_part: 0,
             epoch_length: NonZeroU64::MIN,
             proposer_public_key: None,
+            fee_router_factory: None,
         }
     }
 }

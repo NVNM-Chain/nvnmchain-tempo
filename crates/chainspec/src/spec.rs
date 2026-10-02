@@ -35,6 +35,10 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// The fee router factory; from T12 a validator's fee recipient may only be the router it
+    /// holds for it (`routerOf`). Unset leaves recipients free.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee_router_factory: Option<Address>,
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
@@ -117,6 +121,10 @@ impl TempoGenesisInfo {
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    pub fn fee_router_factory(&self) -> Option<Address> {
+        self.fee_router_factory
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
@@ -696,6 +704,15 @@ mod tests {
                     .contains("malformed Tempo genesis extra_fields")
             );
         }
+    }
+
+    #[test]
+    fn the_fee_router_factory_is_read() {
+        let factory = alloy_primitives::Address::repeat_byte(0xF0);
+        let genesis = genesis_with(serde_json::json!({ "feeRouterFactory": factory }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
+        assert_eq!(info.fee_router_factory(), Some(factory));
+        assert_eq!(info.unrecognized_keys(&genesis), Vec::<String>::new());
     }
 
     #[test]

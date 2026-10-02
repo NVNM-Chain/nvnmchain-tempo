@@ -228,6 +228,11 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     t14_time: Option<u64>,
 
+    /// The FeeRouterFactory; from T12 a validator's fee recipient may only be the router it
+    /// holds for it. Unset leaves recipients free.
+    #[arg(long)]
+    fee_router_factory: Option<Address>,
+
     /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
     /// networks want.
     #[arg(long)]
@@ -684,6 +689,11 @@ impl GenesisArgs {
                     .extra_fields
                     .insert_value(key.to_string(), time)?;
             }
+        }
+        if let Some(factory) = self.fee_router_factory {
+            chain_config
+                .extra_fields
+                .insert_value("feeRouterFactory".to_string(), factory)?;
         }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 

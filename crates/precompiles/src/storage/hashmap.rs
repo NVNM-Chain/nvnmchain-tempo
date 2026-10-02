@@ -394,6 +394,11 @@ impl HashMapStorageProvider {
         self.block_env.number = U256::from(block_number);
     }
 
+    /// Overrides the fee router factory the genesis names.
+    pub fn set_fee_router_factory(&mut self, factory: Option<Address>) {
+        self.block_env.fee_router_factory = factory;
+    }
+
     /// Overrides the active hardfork spec.
     pub fn set_spec(&mut self, spec: TempoHardfork) {
         self.spec = spec;

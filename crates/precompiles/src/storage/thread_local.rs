@@ -148,6 +148,11 @@ impl StorageCtx {
         self.with_block_env(|block_env| block_env.number.saturating_to::<u64>())
     }
 
+    /// The genesis' fee router factory, if it names one.
+    pub fn fee_router_factory(&self) -> Option<Address> {
+        self.with_block_env(|block_env| block_env.fee_router_factory)
+    }
+
     /// Executes a closure with access to the current Tempo block environment.
     pub fn with_block_env<R>(&self, f: impl FnOnce(&TempoBlockEnv) -> R) -> R {
         Self::with_storage(|s| f(s.block_env()))
