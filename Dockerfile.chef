@@ -21,6 +21,10 @@ WORKDIR /app
 
 FROM chef AS planner
 
+# `COPY . .` lands in layers that CI exports to a registry buildcache
+# (ghcr.io/<owner>/tempo-buildcache). Anything the build context carries is
+# therefore published, which is why .dockerignore excludes credential-shaped
+# files rather than relying on the final image being multi-stage.
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -48,6 +52,11 @@ ENV CARGO_INCREMENTAL=0 \
 
 COPY --from=planner /app/recipe.json recipe.json
 
+# Deliberately not `--locked`: cargo-chef cooks a masked skeleton whose member
+# versions do not match the real Cargo.lock, so the flag is unreliable here.
+# It is not a gap - this stage only warms the dependency cache, and the build
+# that actually produces the shipped binaries (Dockerfile) runs `--locked`
+# against the real tree, rebuilding anything whose resolution differs.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git-${TARGETARCH} \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \

@@ -17,3 +17,24 @@ default_*_*.profraw
 .idea/
 .vscode/
 *.swp
+
+# Nothing below is tracked in this repo, so excluding it cannot change the
+# bytes of the binary. The patterns exist so a rebuilder's local credentials
+# cannot be swept into the build context by `COPY . .`.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/.ssh/
+**/.aws/
+**/.kube/
+**/.netrc
+**/.npmrc
+**/secrets/
