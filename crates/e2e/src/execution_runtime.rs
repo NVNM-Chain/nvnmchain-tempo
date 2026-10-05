@@ -14,7 +14,7 @@ use alloy::{
 };
 use alloy_evm::{EvmFactory as _, revm::context::JournalTr};
 use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::{Address, B256, Keccak256, U256};
+use alloy_primitives::{Address, B256, Bytes, Keccak256, U256, keccak256};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Signer,
@@ -77,6 +77,7 @@ pub struct Builder {
     epoch_length: Option<u64>,
     initial_dkg_outcome: Option<OnchainDkgOutcome>,
     validators: Option<ordered::Map<PublicKey, ConsensusNodeConfig>>,
+    proposer_weights: Option<Vec<u64>>,
 }
 
 impl Builder {
@@ -86,6 +87,7 @@ impl Builder {
             epoch_length: None,
             initial_dkg_outcome: None,
             validators: None,
+            proposer_weights: None,
         }
     }
 
@@ -114,12 +116,22 @@ impl Builder {
         }
     }
 
+    /// Names an election at [`ELECTION_ADDRESS`] that seats every validator it is offered and
+    /// weighs the `i`th it is asked about at `weights[i]`.
+    pub fn with_proposer_weights(self, proposer_weights: Option<Vec<u64>>) -> Self {
+        Self {
+            proposer_weights,
+            ..self
+        }
+    }
+
     pub fn launch(self) -> eyre::Result<ExecutionRuntime> {
         let Self {
             t12_time,
             epoch_length,
             initial_dkg_outcome,
             validators,
+            proposer_weights,
         } = self;
 
         let epoch_length = epoch_length.ok_or_eyre("must specify epoch length")?;
@@ -162,6 +174,21 @@ impl Builder {
         }
 
         genesis.extra_data = initial_dkg_outcome.encode().into();
+
+        if let Some(weights) = proposer_weights {
+            genesis
+                .config
+                .extra_fields
+                .insert_value("stakingElection".to_string(), ELECTION_ADDRESS)
+                .unwrap();
+            genesis.alloc.insert(
+                ELECTION_ADDRESS,
+                GenesisAccount {
+                    code: Some(election_code(&weights)),
+                    ..Default::default()
+                },
+            );
+        }
 
         // Just remove whatever is already written into chainspec.
         genesis.alloc.remove(&VALIDATOR_CONFIG_V2_ADDRESS);
@@ -248,6 +275,36 @@ impl Builder {
             TempoChainSpec::from_genesis(genesis),
         ))
     }
+}
+
+/// Where [`Builder::with_proposer_weights`] puts its election.
+pub const ELECTION_ADDRESS: Address = Address::new([0xE1; 20]);
+
+/// Runtime code answering `electionWeight` with `weights`, whoever is asked about, and every
+/// other call with its own arguments: `computeCommittee(address[])` seats all it is offered.
+fn election_code(weights: &[u64]) -> Bytes {
+    let mut blob = U256::from(32).to_be_bytes_vec();
+    blob.extend(U256::from(weights.len()).to_be_bytes::<32>());
+    for &weight in weights {
+        blob.extend(U256::from(weight).to_be_bytes::<32>());
+    }
+    let len = u16::try_from(blob.len()).unwrap().to_be_bytes();
+    let selector = keccak256("electionWeight(address[])");
+
+    let mut code = vec![0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c, 0x63]; // CALLDATALOAD(0) >> 224, PUSH4
+    code.extend_from_slice(&selector[..4]);
+    code.extend([
+        0x14, 0x60, 28, 0x57, // EQ, JUMPI to the weights
+        0x60, 0x04, 0x36, 0x03, 0x80, // size = CALLDATASIZE - 4, twice
+        0x60, 0x04, 0x60, 0x00, 0x37, // CALLDATACOPY(0, 4, size)
+        0x60, 0x00, 0xf3, // RETURN(0, size)
+        0x5b, // JUMPDEST
+        0x61, len[0], len[1], 0x60, 43, 0x60, 0x00, 0x39, // CODECOPY(0, 43, len)
+        0x61, len[0], len[1], 0x60, 0x00, 0xf3, // RETURN(0, len)
+    ]);
+    assert_eq!(code.len(), 43, "the weights start at byte 43");
+    code.extend(blob);
+    code.into()
 }
 
 /// Configuration for launching an execution node.

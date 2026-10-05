@@ -24,6 +24,7 @@ pub mod storage;
 pub(crate) mod test_utils;
 pub(crate) mod utils;
 pub(crate) mod validators;
+pub(crate) mod weighted_elector;
 
 use std::sync::Arc;
 

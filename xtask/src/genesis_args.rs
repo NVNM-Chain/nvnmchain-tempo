@@ -254,6 +254,7 @@ impl ConsensusConfig {
             )
             .unwrap(),
             is_next_full_dkg: false,
+            proposer_units: None,
         }
     }
 }

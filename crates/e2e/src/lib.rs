@@ -75,6 +75,7 @@ fn generate_consensus_node_config(
         output: initial_dkg_outcome,
         next_players: shares.keys().clone(),
         is_next_full_dkg: false,
+        proposer_units: None,
     };
 
     let verifier_keys = repeat_with(|| PrivateKey::random(&mut *rng))
@@ -150,6 +151,9 @@ pub struct Setup {
     /// Whether validators announce `tempo/1` and publish finalization
     /// certificates over it.
     pub with_gossip: bool,
+
+    /// Election weights of the signers by key order, from genesis.
+    pub proposer_weights: Option<Vec<u64>>,
 }
 
 impl Setup {
@@ -169,6 +173,7 @@ impl Setup {
             proposal_return_budget: Duration::from_millis(300),
             fee_recipient: Address::ZERO,
             with_gossip: false,
+            proposer_weights: None,
         }
     }
 
@@ -230,6 +235,13 @@ impl Setup {
             ..self
         }
     }
+
+    pub fn proposer_weights(self, proposer_weights: Vec<u64>) -> Self {
+        Self {
+            proposer_weights: Some(proposer_weights),
+            ..self
+        }
+    }
 }
 
 impl Default for Setup {
@@ -256,6 +268,7 @@ pub async fn setup_validators(
         proposal_return_budget,
         fee_recipient,
         with_gossip,
+        proposer_weights,
         ..
     }: Setup,
 ) -> (Vec<TestingNode<Context>>, ExecutionRuntime) {
@@ -292,6 +305,7 @@ pub async fn setup_validators(
         .with_initial_dkg_outcome(onchain_dkg_outcome)
         .with_t12_time(t12_time)
         .with_validators(validators.clone())
+        .with_proposer_weights(proposer_weights)
         .launch()
         .unwrap();
 

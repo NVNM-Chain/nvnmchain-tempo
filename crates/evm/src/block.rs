@@ -838,6 +838,7 @@ mod tests {
             output,
             next_players: shares.keys().clone(),
             is_next_full_dkg: false,
+            proposer_units: None,
         }
     }
 

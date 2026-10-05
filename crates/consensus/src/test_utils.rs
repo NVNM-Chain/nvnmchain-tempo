@@ -67,6 +67,7 @@ pub(crate) fn dkg_fixture(rng: &mut impl CryptoRng, epoch: Epoch) -> DkgFixture 
         next_players: output.players().clone(),
         output,
         is_next_full_dkg: false,
+        proposer_units: None,
     };
 
     DkgFixture { outcome, schemes }

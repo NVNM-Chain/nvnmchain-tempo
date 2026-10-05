@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
 };
 
 use alloy_consensus::BlockHeader;
 use alloy_evm::Evm as _;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall as _;
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
@@ -24,11 +24,13 @@ use reth_provider::{
 use tempo_node::{TempoFullNode, evm::evm::TempoEvm};
 use tempo_precompiles::{
     storage::{StorageActions, StorageCtx},
-    validator_config_v2::{IValidatorConfigV2, ValidatorConfigV2},
+    validator_config_v2::{IValidatorConfigV2, ValidatorConfigV2, ValidatorConfigV2Error},
 };
 use tempo_primitives::TempoHeader;
 
 use tracing::{Level, debug, info, instrument, warn};
+
+use crate::utils::public_key_to_b256;
 
 /// Minimal execution-node interface needed to read validator config state.
 ///
@@ -182,11 +184,21 @@ where
 type ConfigEvm = TempoEvm<State<StateProviderDatabase<EvmStateProviderBox>>>;
 
 alloy_sol_types::sol! {
-    /// `NVNMStaking.computeCommittee`: the committee as addresses (the engine is unit-weighted),
-    /// drawn only from `eligible`, the registry's addresses.
+    /// `NVNMStaking.computeCommittee`: the committee as addresses, drawn only from `eligible`, the
+    /// registry's addresses. `electionWeight` scores any address as the election ranks it.
     interface IStakingElection {
         function computeCommittee(address[] eligible) external view returns (address[] vals);
+        function electionWeight(address[] who) external view returns (uint256[] weights);
     }
+}
+
+/// The next epoch's players, read with the election weights proposers are drawn by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NextPlayers {
+    pub(crate) players: ordered::Set<PublicKey>,
+    /// `Some` once proposers are weighted: the election weight of each `current_players` key the
+    /// registry knows, empty when the election is inactive or cannot answer.
+    pub(crate) weights: Option<BTreeMap<PublicKey, U256>>,
 }
 
 /// The smallest committee the election, or its fallback, may seat (3f+1, f=1).
@@ -195,7 +207,8 @@ const MIN_ELECTED_COMMITTEE: usize = 4;
 /// The next epoch's players where the genesis names a staking election, read from `state`, the
 /// post-state of the block with `header`. Once the election is active: the elected committee,
 /// else the `current_players` still registered, else the whole registry; before that, the
-/// registry. Each choice is a function of state, so every node makes it; an `Err` is node-local.
+/// registry. If `weighted`, the election weights come with them. Each choice is a function of
+/// state, so every node makes it; an `Err` is node-local.
 #[instrument(skip_all, fields(%staking_election), err(Display))]
 pub(crate) fn read_elected_players(
     node: impl ExecutionNode,
@@ -203,20 +216,34 @@ pub(crate) fn read_elected_players(
     header: &TempoHeader,
     staking_election: Address,
     staking_election_time: Option<u64>,
+    weighted: bool,
     current_players: &ordered::Set<PublicKey>,
-) -> eyre::Result<ordered::Set<PublicKey>> {
+) -> eyre::Result<NextPlayers> {
     let mut evm = evm_with_state(node, state, header)?;
     let registry = read_registry(&mut evm).wrap_err("failed reading validator config v2")?;
 
     // The block's time, not the wall clock, so every node flips at the same boundary.
     let active = staking_election_time.is_none_or(|from| header.timestamp() >= from);
+    // The players weighed are the ones the output hands the next epoch's shares, whichever
+    // committee the election seats for the epoch after.
+    let weights = if !weighted {
+        None
+    } else if active {
+        Some(proposer_weights(
+            &mut evm,
+            staking_election,
+            current_players,
+        )?)
+    } else {
+        Some(BTreeMap::new())
+    };
     if active {
         if let Some(players) = elected_players(&mut evm, staking_election, &registry)? {
             info!(
                 players = players.len(),
                 "next committee elected by staking contract"
             );
-            return Ok(players);
+            return Ok(NextPlayers { players, weights });
         }
         // Not the registry: after a long run, entries outside the committee may be offline.
         if let Some(players) = seated_players(&registry, |validator| {
@@ -226,7 +253,7 @@ pub(crate) fn read_elected_players(
                 players = players.len(),
                 "election fell back to the current players"
             );
-            return Ok(players);
+            return Ok(NextPlayers { players, weights });
         }
     }
 
@@ -240,7 +267,9 @@ pub(crate) fn read_elected_players(
         players = keys.len(),
         active, "next committee is the full registry"
     );
-    Ok(ordered::Set::try_from_iter(keys).expect("a hash set does not contain duplicates"))
+    let players =
+        ordered::Set::try_from_iter(keys).expect("a hash set does not contain duplicates");
+    Ok(NextPlayers { players, weights })
 }
 
 fn evm_with_state(
@@ -255,9 +284,11 @@ fn evm_with_state(
         .wrap_err("failed instantiating evm for block")
 }
 
-/// The active validator set in contract order, skipping entries that do not decode. Duplicate
-/// keys are kept: the election falls back on them.
-fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
+/// Runs a registry read against an already-built EVM.
+fn read_config_on_evm<T>(
+    evm: &mut ConfigEvm,
+    read_fn: impl FnOnce(&ValidatorConfigV2) -> eyre::Result<T>,
+) -> eyre::Result<T> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -265,19 +296,31 @@ fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
         &ctx.cfg,
         &ctx.tx,
         StorageActions::disabled(),
-        || {
-            let mut registry = Vec::new();
-            for raw in ValidatorConfigV2::default()
-                .get_active_validators()
-                .wrap_err("failed getting active validator set")?
-            {
-                if let Ok(decoded) = DecodedValidatorV2::decode_from_contract(raw) {
-                    registry.push(decoded);
-                }
-            }
-            Ok(registry)
-        },
+        || read_fn(&ValidatorConfigV2::default()),
     )
+}
+
+/// The active validator set in contract order, skipping entries that do not decode. Duplicate
+/// keys are kept: the election falls back on them.
+fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
+    read_config_on_evm(evm, |config| {
+        let mut registry = Vec::new();
+        for (position, raw) in config
+            .get_active_validators()
+            .wrap_err("failed getting active validator set")?
+            .into_iter()
+            .enumerate()
+        {
+            if let Ok(decoded) =
+                DecodedValidatorV2::decode_from_contract(raw).inspect_err(|error| {
+                    warn!(%error, position, "failed decoding active validator in contract");
+                })
+            {
+                registry.push(decoded);
+            }
+        }
+        Ok(registry)
+    })
 }
 
 /// The elected committee's consensus keys, or `None` (a function of state) to fall back.
@@ -296,12 +339,96 @@ fn elected_players(
         return Ok(None);
     }
 
-    // Running out of the system call's 250M gas is a revert too; nvnm-contracts' CommitteeGas
-    // puts the worst case at 33M.
     let call = IStakingElection::computeCommitteeCall {
         eligible: registry.iter().map(|v| v.address).collect(),
     };
-    let result = match evm.transact_system_call(Address::ZERO, contract, call.abi_encode().into()) {
+    let Some(output) = election_call(evm, contract, call.abi_encode())? else {
+        return Ok(None);
+    };
+    let Ok(elected) = IStakingElection::computeCommitteeCall::abi_decode_returns(&output) else {
+        warn!(%contract, "failed decoding computeCommittee's return; falling back");
+        return Ok(None);
+    };
+    let named: HashSet<Address> = elected.into_iter().collect();
+    let players = seated_players(registry, |validator| named.contains(&validator.address));
+    if players.is_none() {
+        warn!(%contract, "elected committee below minimum; falling back");
+    }
+    Ok(players)
+}
+
+/// `None` where the registry holds no such validator.
+fn registered<T>(looked_up: tempo_precompiles::Result<T>) -> eyre::Result<Option<T>> {
+    match looked_up {
+        Ok(found) => Ok(Some(found)),
+        Err(error) if error == ValidatorConfigV2Error::validator_not_found().into() => Ok(None),
+        Err(error) => Err(eyre::Report::new(error)),
+    }
+}
+
+/// Each of `proposers`' election weight, by key, at the staking address the registry holds for
+/// it, deactivated entries included: a rotated key proposes until its successor holds a share,
+/// while a key whose address a later entry took, or that lost it, is not weighed.
+/// Empty when the contract cannot answer, as one without `electionWeight`; all then draw alike.
+fn proposer_weights(
+    evm: &mut ConfigEvm,
+    contract: Address,
+    proposers: &ordered::Set<PublicKey>,
+) -> eyre::Result<BTreeMap<PublicKey, U256>> {
+    let staked: Vec<(PublicKey, Address)> = read_config_on_evm(evm, |config| {
+        let mut staked = Vec::new();
+        for key in proposers.iter() {
+            let found = config.validator_by_public_key(public_key_to_b256(key));
+            let Some(entry) = registered(found)? else {
+                continue;
+            };
+            // A rotation parks the old key on a later snapshot and leaves the address on the
+            // original slot; a newcomer taking a deactivated entry's address holds it on a
+            // later one. A transfer drops the address, so a snapshot naming it has no holder.
+            let Some(holder) = registered(config.validator_by_address(entry.validatorAddress))?
+            else {
+                continue;
+            };
+            if holder.index <= entry.index {
+                staked.push((key.clone(), entry.validatorAddress));
+            }
+        }
+        Ok(staked)
+    })
+    .wrap_err("failed reading the proposers' registry entries")?;
+    if staked.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let call = IStakingElection::electionWeightCall {
+        who: staked.iter().map(|(_, address)| *address).collect(),
+    };
+    let Some(output) = election_call(evm, contract, call.abi_encode())? else {
+        return Ok(BTreeMap::new());
+    };
+    match IStakingElection::electionWeightCall::abi_decode_returns(&output) {
+        Ok(weights) if weights.len() == staked.len() => Ok(staked
+            .into_iter()
+            .map(|(key, _)| key)
+            .zip(weights)
+            .collect()),
+        _ => {
+            warn!(%contract, "electionWeight answered badly; every proposer draws alike");
+            Ok(BTreeMap::new())
+        }
+    }
+}
+
+/// The election contract's answer to `input`, or `None` when the call fails as every node sees
+/// it. A failure this node's alone is an `Err`.
+fn election_call(
+    evm: &mut ConfigEvm,
+    contract: Address,
+    input: Vec<u8>,
+) -> eyre::Result<Option<Bytes>> {
+    // Running out of the system call's 250M gas is a revert too; nvnm-contracts' CommitteeGas
+    // puts the worst case at 33M.
+    let result = match evm.transact_system_call(Address::ZERO, contract, input.into()) {
         Ok(result) => result,
         // Validation fails alike on every node.
         Err(error @ (EVMError::Transaction(_) | EVMError::Header(_))) => {
@@ -316,18 +443,7 @@ fn elected_players(
         warn!(%contract, result = ?result.result, "election call did not succeed; falling back");
         return Ok(None);
     };
-    let Ok(elected) = IStakingElection::computeCommitteeCall::abi_decode_returns(output.data())
-    else {
-        warn!(%contract, "failed decoding computeCommittee's return; falling back");
-        return Ok(None);
-    };
-
-    let named: HashSet<Address> = elected.into_iter().collect();
-    let players = seated_players(registry, |validator| named.contains(&validator.address));
-    if players.is_none() {
-        warn!(%contract, "elected committee below minimum; falling back");
-    }
-    Ok(players)
+    Ok(Some(output.into_data()))
 }
 
 /// The registry entries `seat` picks, or `None` below `MIN_ELECTED_COMMITTEE` (capped at the
@@ -430,8 +546,10 @@ mod tests {
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use tempo_node::evm::TempoEvmConfig;
     use tempo_precompiles::{
-        PATH_USD_ADDRESS, storage::hashmap::HashMapStorageProvider, tip20::tip20_slots,
-        validator_config_v2::VALIDATOR_NS_ADD,
+        PATH_USD_ADDRESS,
+        storage::hashmap::HashMapStorageProvider,
+        tip20::tip20_slots,
+        validator_config_v2::{VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE},
     };
 
     use super::*;
@@ -493,47 +611,84 @@ mod tests {
         Address::repeat_byte(seed)
     }
 
-    fn add_validator_call(seed: u8) -> IValidatorConfigV2::addValidatorCall {
-        let ingress = format!("192.168.1.{seed}:{}", 8000 + u16::from(seed));
-        let egress = format!("192.168.1.{seed}");
-        let public_key = public_key_to_b256(&key(seed).public_key());
-        let message = tempo_validator_config::ValidatorConfig {
+    fn endpoints(seed: u8) -> (String, String) {
+        (
+            format!("192.168.1.{seed}:{}", 8000 + u16::from(seed)),
+            format!("192.168.1.{seed}"),
+        )
+    }
+
+    /// What the validator of `seed` signs to enter the registry at `validator_address`.
+    fn config(seed: u8, validator_address: Address) -> tempo_validator_config::ValidatorConfig {
+        let (ingress, egress) = endpoints(seed);
+        tempo_validator_config::ValidatorConfig {
             chain_id: 1,
-            validator_address: address(seed),
-            public_key,
+            validator_address,
+            public_key: public_key_to_b256(&key(seed).public_key()),
             ingress: ingress.parse().unwrap(),
             egress: egress.parse().unwrap(),
         }
-        .add_validator_message_hash(address(seed));
+    }
+
+    fn sign(seed: u8, namespace: &[u8], message: B256) -> Bytes {
+        key(seed)
+            .sign(namespace, message.as_slice())
+            .encode()
+            .to_vec()
+            .into()
+    }
+
+    /// Adds the validator of `seed` at `validator_address`.
+    fn add_validator_call(
+        seed: u8,
+        validator_address: Address,
+    ) -> IValidatorConfigV2::addValidatorCall {
+        let (ingress, egress) = endpoints(seed);
+        let message = config(seed, validator_address).add_validator_message_hash(validator_address);
         IValidatorConfigV2::addValidatorCall {
-            validatorAddress: address(seed),
-            publicKey: public_key,
+            validatorAddress: validator_address,
+            publicKey: public_key_to_b256(&key(seed).public_key()),
             ingress,
             egress,
-            feeRecipient: address(seed),
-            signature: key(seed)
-                .sign(VALIDATOR_NS_ADD, message.as_slice())
-                .encode()
-                .to_vec()
-                .into(),
+            feeRecipient: validator_address,
+            signature: sign(seed, VALIDATOR_NS_ADD, message),
         }
     }
 
-    /// A node whose registry holds the validators of `seeds`, in that order, and whose election
-    /// contract runs `code`, if any.
-    fn election_among(
-        seeds: impl IntoIterator<Item = u8>,
+    /// Rotates entry `idx` onto the key of `seed`. The signature covers `validator_address`, the
+    /// staking address that stays put.
+    fn rotate_validator_call(
+        seed: u8,
+        idx: u64,
+        validator_address: Address,
+    ) -> IValidatorConfigV2::rotateValidatorCall {
+        let (ingress, egress) = endpoints(seed);
+        let message = config(seed, validator_address).rotate_validator_message_hash();
+        IValidatorConfigV2::rotateValidatorCall {
+            idx,
+            publicKey: public_key_to_b256(&key(seed).public_key()),
+            ingress,
+            egress,
+            signature: sign(seed, VALIDATOR_NS_ROTATE, message),
+        }
+    }
+
+    /// The registry's owner on a seeded node.
+    const OWNER: Address = Address::repeat_byte(0xAA);
+
+    /// A node whose registry `seed` fills, as [`OWNER`], and whose election contract runs `code`,
+    /// if any.
+    fn seeded(
+        seed: impl FnOnce(&mut ValidatorConfigV2) -> eyre::Result<()>,
         code: Option<Bytes>,
     ) -> TestExecutionNode {
         let mut storage = HashMapStorageProvider::new(1);
-        let owner = Address::repeat_byte(0xAA);
+        // A deactivation stamps the block number, and at 0 it would read as never.
+        storage.set_block_number(1);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
             let mut config = ValidatorConfigV2::new();
-            config.initialize(owner)?;
-            for seed in seeds {
-                config.add_validator(owner, add_validator_call(seed))?;
-            }
-            Ok(())
+            config.initialize(OWNER)?;
+            seed(&mut config)
         })
         .expect("seeded registry");
 
@@ -560,26 +715,83 @@ mod tests {
         TestExecutionNode { provider }
     }
 
-    /// Validators 1 through 6 in the registry.
-    fn election(code: Option<Bytes>) -> TestExecutionNode {
-        election_among(1..=6, code)
+    /// A node whose registry holds the validators of `seeds`, in that order, the entries at
+    /// `deactivated` deactivated after, and whose election contract runs `code`, if any.
+    fn election_among(
+        seeds: impl IntoIterator<Item = u8>,
+        deactivated: &[u64],
+        code: Option<Bytes>,
+    ) -> TestExecutionNode {
+        seeded(
+            |config| {
+                for seed in seeds {
+                    config.add_validator(OWNER, add_validator_call(seed, address(seed)))?;
+                }
+                for &idx in deactivated {
+                    let call = IValidatorConfigV2::deactivateValidatorCall { idx };
+                    config.deactivate_validator(OWNER, call)?;
+                }
+                Ok(())
+            },
+            code,
+        )
     }
 
-    /// Runtime code that returns `blob` verbatim: CODECOPY it from the code's tail, then RETURN.
-    fn returning(blob: &[u8]) -> Bytes {
-        let len = (blob.len() as u16).to_be_bytes();
-        let mut code = vec![
-            0x61, len[0], len[1], // PUSH2 size
-            0x80,   // DUP1
-            0x38,   // CODESIZE
-            0x03,   // SUB: the tail's offset
-            0x60, 0x00, // PUSH1 0 (destOffset)
-            0x39, // CODECOPY
-            0x61, len[0], len[1], // PUSH2 size
-            0x60, 0x00, // PUSH1 0 (offset)
-            0xf3, // RETURN
-        ];
-        code.extend_from_slice(blob);
+    /// Validators 1 through 6 in the registry.
+    fn election(code: Option<Bytes>) -> TestExecutionNode {
+        election_among(1..=6, &[], code)
+    }
+
+    /// How a mock contract answers a selector.
+    enum Answer {
+        /// Return these bytes.
+        With(Vec<u8>),
+        /// Return the call's arguments: an `address[]` argument reads back as the `uint256[]` of
+        /// the addresses.
+        Echo,
+    }
+
+    /// Runtime code answering each selector as given and reverting every other.
+    fn answering(answers: &[([u8; 4], Answer)]) -> Bytes {
+        // Each dispatch is 16 bytes and the revert 5; the answers' bodies follow.
+        let mut start = 16 * answers.len() + 5;
+        let (mut code, mut bodies) = (Vec::new(), Vec::new());
+        for (selector, answer) in answers {
+            code.extend([0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c, 0x63]); // CALLDATALOAD(0) >> 224, PUSH4
+            code.extend_from_slice(selector);
+            code.extend([0x14, 0x61]); // EQ, PUSH2 the body
+            code.extend_from_slice(&(start as u16).to_be_bytes());
+            code.push(0x57); // JUMPI
+            let body = match answer {
+                Answer::Echo => vec![
+                    0x5b, // JUMPDEST
+                    0x60, 0x04, 0x36, 0x03, 0x80, // size = CALLDATASIZE - 4, twice
+                    0x60, 0x04, 0x60, 0x00, 0x37, // CALLDATACOPY(0, 4, size)
+                    0x60, 0x00, 0xf3, // RETURN(0, size)
+                ],
+                Answer::With(blob) => {
+                    // CODECOPY the blob from right after this 16-byte stub, then RETURN it.
+                    let len = (blob.len() as u16).to_be_bytes();
+                    let offset = ((start + 16) as u16).to_be_bytes();
+                    let mut body = vec![
+                        0x5b, // JUMPDEST
+                        0x61, len[0], len[1], // PUSH2 size
+                        0x61, offset[0], offset[1], // PUSH2 offset
+                        0x60, 0x00, // PUSH1 0
+                        0x39, // CODECOPY
+                        0x61, len[0], len[1], // PUSH2 size
+                        0x60, 0x00, // PUSH1 0
+                        0xf3, // RETURN
+                    ];
+                    body.extend_from_slice(blob);
+                    body
+                }
+            };
+            start += body.len();
+            bodies.push(body);
+        }
+        code.extend([0x60, 0x00, 0x60, 0x00, 0xfd]); // REVERT(0, 0)
+        code.extend(bodies.concat());
         code.into()
     }
 
@@ -588,12 +800,29 @@ mod tests {
         Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd])
     }
 
-    /// Runtime code whose `computeCommittee` returns these validators, whoever is eligible.
-    fn electing(seeds: &[u8]) -> Bytes {
-        let addresses: Vec<Address> = seeds.iter().map(|&seed| address(seed)).collect();
-        returning(&IStakingElection::computeCommitteeCall::abi_encode_returns(
-            &addresses,
-        ))
+    /// `computeCommittee`'s answer: these validators, whoever is eligible.
+    fn committee(seeds: &[u8]) -> ([u8; 4], Answer) {
+        let elected: Vec<Address> = seeds.iter().map(|&seed| address(seed)).collect();
+        (
+            IStakingElection::computeCommitteeCall::SELECTOR,
+            Answer::With(IStakingElection::computeCommitteeCall::abi_encode_returns(
+                &elected,
+            )),
+        )
+    }
+
+    /// Each validator's key, weighed at its staking address read as a number, as the echoing
+    /// mock answers.
+    fn weighed_at_address(seeds: &[u8]) -> BTreeMap<PublicKey, U256> {
+        seeds
+            .iter()
+            .map(|&seed| {
+                (
+                    key(seed).public_key(),
+                    U256::from_be_slice(address(seed).as_slice()),
+                )
+            })
+            .collect()
     }
 
     /// The keys of these validators.
@@ -607,20 +836,32 @@ mod tests {
         elected_players(&mut evm, ELECTION, &registry)
     }
 
-    fn next_players(
+    fn read_next_players(
         node: &TestExecutionNode,
         from: Option<u64>,
+        weighted: bool,
         current: &[u8],
-    ) -> ordered::Set<PublicKey> {
+    ) -> NextPlayers {
         read_elected_players(
             node,
             node.state(),
             &TestExecutionNode::header(),
             ELECTION,
             from,
+            weighted,
             &keys(current),
         )
         .unwrap()
+    }
+
+    fn next_players(
+        node: &TestExecutionNode,
+        from: Option<u64>,
+        current: &[u8],
+    ) -> ordered::Set<PublicKey> {
+        let next = read_next_players(node, from, false, current);
+        assert_eq!(next.weights, None);
+        next.players
     }
 
     fn registry(n: u8) -> Vec<DecodedValidatorV2> {
@@ -666,17 +907,21 @@ mod tests {
 
     #[test]
     fn an_election_that_cannot_answer_falls_back() {
-        for code in [None, Some(reverting()), Some(returning(&[0x01]))] {
+        let garbage = answering(&[(
+            IStakingElection::computeCommitteeCall::SELECTOR,
+            Answer::With(vec![0x01]),
+        )]);
+        for code in [None, Some(reverting()), Some(garbage)] {
             assert_eq!(elected_at(&election(code)).unwrap(), None);
         }
     }
 
     #[test]
     fn an_elected_committee_is_seated_from_the_floor_up() {
-        let seated = elected_at(&election(Some(electing(&[1, 2, 3, 4])))).unwrap();
+        let seated = elected_at(&election(Some(answering(&[committee(&[1, 2, 3, 4])])))).unwrap();
         assert_eq!(seated, Some(keys(&[1, 2, 3, 4])));
         assert_eq!(
-            elected_at(&election(Some(electing(&[1, 2, 3])))).unwrap(),
+            elected_at(&election(Some(answering(&[committee(&[1, 2, 3])])))).unwrap(),
             None
         );
     }
@@ -691,7 +936,7 @@ mod tests {
             0x60, 0xc0, 0x60, 0x00, 0xf3, // RETURN(0, 0xc0)
         ]);
         // Registered in reverse, so registry order differs from address order.
-        let node = election_among((1..=6).rev(), Some(code));
+        let node = election_among((1..=6).rev(), &[], Some(code));
         assert_eq!(elected_at(&node).unwrap(), Some(keys(&[6, 5, 4, 3])));
     }
 
@@ -718,12 +963,146 @@ mod tests {
 
     #[test]
     fn the_election_takes_effect_at_its_activation_time() {
-        let node = election(Some(electing(&[1, 2, 3, 4])));
+        let node = election(Some(answering(&[committee(&[1, 2, 3, 4])])));
         // The mock header sits at timestamp 1.
         for from in [None, Some(1)] {
             assert_eq!(next_players(&node, from, &[]), keys(&[1, 2, 3, 4]));
         }
         assert_eq!(next_players(&node, Some(2), &[]), keys(&[1, 2, 3, 4, 5, 6]));
+    }
+
+    /// The weighed are the keys holding the next epoch's shares, not the committee seated for the
+    /// epoch after: one the election has dropped keeps its score, and a deactivated entry, as a
+    /// rotated key leaves behind, still names its staking address. A key the registry never
+    /// held is not weighed.
+    #[test]
+    fn weighted_proposers_are_weighed_at_their_staking_addresses() {
+        let code = answering(&[
+            committee(&[1, 2, 3, 4]),
+            (IStakingElection::electionWeightCall::SELECTOR, Answer::Echo),
+        ]);
+        // Entry 5, validator 6, is deactivated.
+        let node = election_among(1..=6, &[5], Some(code));
+        let next = read_next_players(&node, None, true, &[1, 2, 5, 6, 9]);
+        assert_eq!(next.players, keys(&[1, 2, 3, 4]));
+        assert_eq!(next.weights, Some(weighed_at_address(&[1, 2, 5, 6])));
+    }
+
+    /// Validators 1 through 6 in the registry, `then` applied to it, and an election echoing
+    /// each address.
+    fn after_six_validators(
+        then: impl FnOnce(&mut ValidatorConfigV2) -> eyre::Result<()>,
+    ) -> TestExecutionNode {
+        let code = answering(&[
+            committee(&[1, 2, 3, 4]),
+            (IStakingElection::electionWeightCall::SELECTOR, Answer::Echo),
+        ]);
+        seeded(
+            |config| {
+                for seed in 1..=6 {
+                    config.add_validator(OWNER, add_validator_call(seed, address(seed)))?;
+                }
+                then(config)
+            },
+            Some(code),
+        )
+    }
+
+    /// A deactivated entry keeps its staking address, which the registry lets a newcomer take:
+    /// the old key, a player until the epoch ends, must not draw by the newcomer's score.
+    #[test]
+    fn a_key_whose_address_was_taken_over_is_not_weighed() {
+        // Validator 7's key at validator 6's address, once entry 5, validator 6, is deactivated.
+        let node = after_six_validators(|config| {
+            let deactivate = IValidatorConfigV2::deactivateValidatorCall { idx: 5 };
+            config.deactivate_validator(OWNER, deactivate)?;
+            config.add_validator(OWNER, add_validator_call(7, address(6)))?;
+            Ok(())
+        });
+
+        let next = read_next_players(&node, None, true, &[1, 6, 7]);
+        let mut expected = weighed_at_address(&[1]);
+        expected.insert(
+            key(7).public_key(),
+            U256::from_be_slice(address(6).as_slice()),
+        );
+        assert_eq!(
+            next.weights,
+            Some(expected),
+            "validator 6 draws alike, validator 7 by that address"
+        );
+    }
+
+    /// Rotation keeps the staking address on the original slot and parks the old key on a later
+    /// snapshot. That key still proposes this epoch, so it keeps the address's score.
+    #[test]
+    fn a_rotated_key_keeps_its_address_score() {
+        let node = after_six_validators(|config| {
+            config.rotate_validator(OWNER, rotate_validator_call(7, 5, address(6)))?;
+            Ok(())
+        });
+
+        // The successor's key holds no share yet, so only the old key is weighed.
+        let next = read_next_players(&node, None, true, &[1, 6]);
+        assert_eq!(next.weights, Some(weighed_at_address(&[1, 6])));
+    }
+
+    /// An ownership transfer deletes the old address's lookup, while a snapshot a rotation left
+    /// behind still names it: that key draws alike, and the boundary goes on.
+    #[test]
+    fn a_key_whose_address_was_transferred_away_is_not_weighed() {
+        let moved_to = Address::repeat_byte(0xAB);
+        let node = after_six_validators(|config| {
+            config.rotate_validator(OWNER, rotate_validator_call(7, 5, address(6)))?;
+            let transfer = IValidatorConfigV2::transferValidatorOwnershipCall {
+                idx: 5,
+                newAddress: moved_to,
+            };
+            config.transfer_validator_ownership(OWNER, transfer)?;
+            Ok(())
+        });
+
+        let next = read_next_players(&node, None, true, &[1, 6, 7]);
+        let mut expected = weighed_at_address(&[1]);
+        expected.insert(
+            key(7).public_key(),
+            U256::from_be_slice(moved_to.as_slice()),
+        );
+        assert_eq!(
+            next.weights,
+            Some(expected),
+            "validator 6 draws alike, validator 7 at the new address"
+        );
+    }
+
+    #[test]
+    fn weighted_proposers_fall_back_to_no_weights() {
+        // Fewer weights than proposers: every proposer alike.
+        let short = answering(&[(
+            IStakingElection::electionWeightCall::SELECTOR,
+            Answer::With(IStakingElection::electionWeightCall::abi_encode_returns(
+                &vec![U256::from(1)],
+            )),
+        )]);
+        // A reverting contract, then an election not yet active.
+        for (code, from) in [
+            (Some(short), None),
+            (Some(reverting()), None),
+            (None, Some(2)),
+        ] {
+            let next = read_next_players(&election(code), from, true, &[1, 2, 3, 4]);
+            assert_eq!(next.weights, Some(BTreeMap::new()));
+        }
+    }
+
+    /// An older staking contract has only `computeCommittee`: it still seats its committee, and
+    /// every proposer draws alike.
+    #[test]
+    fn a_contract_without_election_weight_still_elects() {
+        let node = election(Some(answering(&[committee(&[1, 2, 3, 4])])));
+        let next = read_next_players(&node, None, true, &[1, 2, 3, 4]);
+        assert_eq!(next.players, keys(&[1, 2, 3, 4]));
+        assert_eq!(next.weights, Some(BTreeMap::new()));
     }
 
     #[test]

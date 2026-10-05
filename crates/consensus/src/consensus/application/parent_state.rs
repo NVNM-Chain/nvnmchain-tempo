@@ -1,8 +1,10 @@
 //! The part of a boundary block's DKG outcome that comes from the post-state
 //! of its parent.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use alloy_consensus::BlockHeader as _;
+use alloy_primitives::U256;
 use commonware_consensus::{
     Heightable as _,
     types::{Epocher as _, FixedEpocher, Height},
@@ -14,6 +16,7 @@ use commonware_cryptography::{
 use commonware_utils::ordered;
 use eyre::{Report, WrapErr as _};
 use reth_provider::{EvmStateProviderBox, StateProvider as _};
+use tempo_chainspec::TempoHardforks as _;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{ExecutedState, TempoFullNode};
 use tempo_precompiles::validator_config_v2::ValidatorConfigV2;
@@ -21,7 +24,10 @@ use tracing::{Level, debug, info, instrument};
 
 use crate::{
     consensus::block::Block,
-    validators::{read_active_peers, read_elected_players, read_validator_config_with_state},
+    validators::{
+        NextPlayers, read_active_peers, read_elected_players, read_validator_config_with_state,
+    },
+    weighted_elector,
 };
 
 /// Reads the post-state of a boundary block's parent through
@@ -50,16 +56,20 @@ impl TempoParentState {
             .wrap_err("could not determine the next full DKG epoch")?;
         // Whoever holds the output runs the next epoch: the players if the ceremony succeeded,
         // the dealers it carried forward if not.
-        let next_players = self
+        let next = self
             .next_players(parent, output.players())
             .wrap_err("could not determine who the next players are supposed to be")?;
+        let proposer_units = next
+            .weights
+            .map(|weights| proposer_units(output.players(), &weights));
 
         let outcome = assemble_boundary_outcome(
             epoch_strategy,
             parent.height(),
             output,
-            next_players,
+            next.players,
             next_full_dkg_epoch,
+            proposer_units,
         );
         info!(
             outcome.is_next_full_dkg,
@@ -73,7 +83,8 @@ impl TempoParentState {
     /// `parent`. They are the players of the ceremony in the next epoch.
     ///
     /// Where the genesis names a staking election, that contract picks them
-    /// among the active validators; `current_players` stay if it cannot.
+    /// among the active validators; `current_players` stay if it cannot. From
+    /// T12 its weights for `current_players` come with them.
     #[instrument(
         skip_all,
         fields(parent.height = %parent.height()),
@@ -83,22 +94,28 @@ impl TempoParentState {
         &self,
         parent: &Block,
         current_players: &ordered::Set<PublicKey>,
-    ) -> eyre::Result<ordered::Set<PublicKey>> {
-        let info = &self.node.chain_spec().info;
-        let next_players = match info.staking_election() {
+    ) -> eyre::Result<NextPlayers> {
+        let chain_spec = self.node.chain_spec();
+        let next_players = match chain_spec.info.staking_election() {
             Some(staking_election) => read_elected_players(
                 self.node.as_ref(),
                 self.parent_post_state(parent)?,
                 parent.header(),
                 staking_election,
-                info.staking_election_time(),
+                chain_spec.info.staking_election_time(),
+                chain_spec
+                    .tempo_hardfork_at(parent.header().timestamp())
+                    .is_t12(),
                 current_players,
             )
             .wrap_err("failed determining the elected players")?,
-            None => self
-                .read_validator_config(parent, read_active_peers)
-                .wrap_err("failed reading peers from validator config v2")?
-                .into_keys(),
+            None => NextPlayers {
+                players: self
+                    .read_validator_config(parent, read_active_peers)
+                    .wrap_err("failed reading peers from validator config v2")?
+                    .into_keys(),
+                weights: None,
+            },
         };
 
         debug!(?next_players, "determined next players");
@@ -143,6 +160,19 @@ impl TempoParentState {
     }
 }
 
+/// Each of `players`' proposer units, in their order, as the election weighs them at the parent,
+/// elected for the epoch after or not; one it does not rank gets a unit.
+fn proposer_units(
+    players: &ordered::Set<PublicKey>,
+    weights: &BTreeMap<PublicKey, U256>,
+) -> Vec<u16> {
+    let weights: Vec<U256> = players
+        .iter()
+        .map(|player| weights.get(player).copied().unwrap_or_default())
+        .collect();
+    weighted_elector::units(&weights, weighted_elector::CAP_BPS)
+}
+
 /// Returns the DKG outcome of a boundary block whose parent is at
 /// `parent_height`. The outcome is for the epoch after the parent's epoch.
 fn assemble_boundary_outcome(
@@ -151,6 +181,7 @@ fn assemble_boundary_outcome(
     output: Output<MinSig, PublicKey>,
     next_players: ordered::Set<PublicKey>,
     next_full_dkg_epoch: u64,
+    proposer_units: Option<Vec<u16>>,
 ) -> OnchainDkgOutcome {
     let next_epoch = epoch_strategy
         .containing(parent_height)
@@ -163,6 +194,7 @@ fn assemble_boundary_outcome(
         output,
         next_players,
         is_next_full_dkg: next_full_dkg_epoch == next_epoch.get(),
+        proposer_units,
     }
 }
 
@@ -199,15 +231,34 @@ mod tests {
                     output.clone(),
                     next_players.clone(),
                     next_full_dkg_epoch,
+                    None,
                 ),
                 OnchainDkgOutcome {
                     epoch: 2,
                     output: output.clone(),
                     next_players: next_players.clone(),
                     is_next_full_dkg,
+                    proposer_units: None,
                 },
                 "full DKG scheduled for epoch {next_full_dkg_epoch}",
             );
         }
+    }
+    #[test]
+    fn proposer_units_follow_the_players_in_their_order() {
+        // Seven seats, so the 20% cap leaves room for unequal odds; the last is not ranked.
+        let players = ordered::Set::try_from_iter(
+            (0..7).map(|seed| PrivateKey::from_seed(seed).public_key()),
+        )
+        .unwrap();
+        let weights = players
+            .iter()
+            .cloned()
+            .zip([40u64, 10, 10, 10, 10, 10].map(U256::from))
+            .collect();
+        assert_eq!(
+            proposer_units(&players, &weights),
+            [1_389, 1_111, 1_111, 1_111, 1_111, 1_111, 1]
+        );
     }
 }

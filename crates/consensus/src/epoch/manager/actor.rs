@@ -39,6 +39,7 @@
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use alloy_consensus::BlockHeader as _;
+use commonware_codec::ReadExt as _;
 use commonware_consensus::{
     simplex::{self, config::Floor, elector, scheme::bls12381_threshold::vrf::Scheme},
     types::{Epoch, EpochDelta, Epocher as _, Height},
@@ -60,6 +61,7 @@ use futures::{StreamExt as _, channel::mpsc};
 use rand_core::{CryptoRng, Rng};
 use reth_ethereum::chainspec::EthChainSpec;
 use tempo_chainspec::TempoHardforks as _;
+use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_primitives::TempoHeader;
 use tracing::{Level, Span, debug, error, error_span, info, instrument, warn, warn_span};
 
@@ -67,6 +69,7 @@ use crate::{
     consensus::Digest,
     epoch::manager::ingress::{EpochTransition, Exit},
     storage::FinalizedBlocksProvider as _,
+    weighted_elector::WeightedRandom,
 };
 
 use super::ingress::{Content, Message};
@@ -326,7 +329,7 @@ where
 
         self.config.scheme_provider.register(epoch, scheme.clone());
 
-        let (floor, boundary_timestamp) = match epoch.previous().map(|prev| {
+        let (floor, boundary_timestamp, proposer_units) = match epoch.previous().map(|prev| {
             self.config
                 .epoch_strategy
                 .last(prev)
@@ -348,13 +351,29 @@ where
                     })?;
 
                 let header = self.get_header(boundary_height).await?;
-                (Floor::Genesis(digest), header.timestamp())
+                // The outcome this epoch's players come from, and with them their odds of
+                // proposing, so every node draws leaders alike however it entered the epoch.
+                let outcome = OnchainDkgOutcome::read(&mut header.extra_data().as_ref()).map_err(
+                    |error| {
+                        eyre!("boundary block `{boundary_height}` holds no DKG outcome: {error}")
+                    },
+                )?;
+                let proposer_units = outcome.proposer_units.as_ref().map(|units| {
+                    outcome
+                        .players()
+                        .iter()
+                        .cloned()
+                        .zip(units.iter().copied())
+                        .collect()
+                });
+                (Floor::Genesis(digest), header.timestamp(), proposer_units)
             }
             None => {
                 let chain_spec = self.config.execution_node.chain_spec();
                 (
                     Floor::Genesis(Digest(chain_spec.genesis_hash())),
                     chain_spec.genesis_header().timestamp(),
+                    None,
                 )
             }
         };
@@ -393,7 +412,7 @@ where
                 epoch,
                 floor,
                 scheme,
-                elector: elector::Random::<commonware_cryptography::Sha256>::new(elector),
+                elector: WeightedRandom::new(elector, proposer_units),
                 strategy: Sequential,
 
                 reporter: self.config.marshal.clone(),

@@ -22,6 +22,7 @@ mod snapshot;
 mod sync;
 mod t12;
 mod testing_node;
+mod weighted_proposers;
 
 #[test_traced]
 fn spawning_execution_node_works() {

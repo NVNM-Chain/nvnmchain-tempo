@@ -20,6 +20,11 @@ use commonware_utils::{NZU32, ordered};
 
 const MAX_VALIDATORS: NonZeroU32 = NZU32!(u16::MAX as u32);
 
+/// Takes `is_next_full_dkg`'s byte when the outcome carries proposer units. A decoder that
+/// predates the units reads it as an invalid bool and stops, rather than drawing leaders the
+/// upgraded nodes do not.
+const WITH_PROPOSER_UNITS: u8 = 2;
+
 /// The outcome of a DKG ceremony as it is written to the chain.
 ///
 /// This DKG outcome can encode up to [`u16::MAX`] validators. Note that in
@@ -42,6 +47,10 @@ pub struct OnchainDkgOutcome {
     /// Whether the next DKG ceremony should be a full ceremony (new polynomial)
     /// instead of a reshare. Set when `nextFullDkgCeremony == epoch`.
     pub is_next_full_dkg: bool,
+
+    /// Each player's odds of proposing during `epoch`, in [`Self::players`] order, once proposers
+    /// are weighted by stake. `None` keeps the uniform elector.
+    pub proposer_units: Option<Vec<u16>>,
 }
 
 impl OnchainDkgOutcome {
@@ -77,7 +86,13 @@ impl Write for OnchainDkgOutcome {
         UInt(self.epoch).write(buf);
         self.output.write(buf);
         self.next_players.write(buf);
-        self.is_next_full_dkg.write(buf);
+        if let Some(units) = &self.proposer_units {
+            WITH_PROPOSER_UNITS.write(buf);
+            self.is_next_full_dkg.write(buf);
+            units.write(buf);
+        } else {
+            self.is_next_full_dkg.write(buf);
+        }
     }
 }
 
@@ -86,17 +101,29 @@ impl Read for OnchainDkgOutcome {
 
     fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let epoch = UInt::<u64>::read(buf)?.into();
-        let output = Read::read_cfg(buf, &(MAX_VALIDATORS, ModeVersion::v0()))?;
+        let output: Output<MinSig, PublicKey> =
+            Read::read_cfg(buf, &(MAX_VALIDATORS, ModeVersion::v0()))?;
         let next_players = Read::read_cfg(
             buf,
             &(RangeCfg::from(1..=(MAX_VALIDATORS.get() as usize)), ()),
         )?;
-        let is_next_full_dkg = ReadExt::read(buf)?;
+        let (is_next_full_dkg, proposer_units) = match u8::read(buf)? {
+            0 => (false, None),
+            1 => (true, None),
+            WITH_PROPOSER_UNITS => {
+                let is_next_full_dkg = ReadExt::read(buf)?;
+                let players = output.players().len();
+                let units: Vec<u16> = Read::read_cfg(buf, &(RangeCfg::exact(players), ()))?;
+                (is_next_full_dkg, Some(units))
+            }
+            other => return Err(commonware_codec::Error::InvalidEnum(other)),
+        };
         Ok(Self {
             epoch,
             output,
             next_players,
             is_next_full_dkg,
+            proposer_units,
         })
     }
 }
@@ -107,6 +134,9 @@ impl EncodeSize for OnchainDkgOutcome {
             + self.output.encode_size()
             + self.next_players.encode_size()
             + self.is_next_full_dkg.encode_size()
+            + self.proposer_units.as_ref().map_or(0, |units| {
+                WITH_PROPOSER_UNITS.encode_size() + units.encode_size()
+            })
     }
 }
 
@@ -114,7 +144,7 @@ impl EncodeSize for OnchainDkgOutcome {
 mod tests {
     use std::iter::repeat_with;
 
-    use commonware_codec::{Encode as _, EncodeSize as _, ReadExt as _};
+    use commonware_codec::{Encode as _, EncodeSize as _, Error, ReadExt as _};
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{
         Signer as _,
@@ -127,8 +157,7 @@ mod tests {
 
     use super::OnchainDkgOutcome;
 
-    #[test]
-    fn onchain_dkg_outcome_roundtrip() {
+    fn outcome(proposer_units: Option<Vec<u16>>) -> OnchainDkgOutcome {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
 
         let mut player_keys = repeat_with(|| PrivateKey::random(&mut rng))
@@ -142,30 +171,61 @@ mod tests {
         )
         .unwrap();
 
-        let mut on_chain = OnchainDkgOutcome {
+        OnchainDkgOutcome {
             epoch: 42,
             output,
             next_players: ordered::Set::try_from_iter(
                 player_keys.iter().map(|key| key.public_key()),
             )
             .unwrap(),
-            is_next_full_dkg: false,
-        };
-        // Preserve Commonware Epoch's wire encoding, including varint boundaries.
-        let payload = on_chain.encode()[Epoch::new(on_chain.epoch).encode_size()..].to_vec();
-        for epoch in [0, 127, 128, 16383, 16384, u64::MAX] {
-            let prefix = Epoch::new(epoch).encode();
-            on_chain.epoch = epoch;
-            #[cfg(feature = "commonware-consensus")]
-            assert_eq!(on_chain.epoch(), Epoch::new(epoch));
-            let bytes = on_chain.encode();
-            assert_eq!(&bytes[..prefix.len()], prefix.as_ref());
-            assert_eq!(&bytes[prefix.len()..], payload);
-            assert_eq!(bytes.len(), on_chain.encode_size());
-            assert_eq!(
-                OnchainDkgOutcome::read(&mut bytes.as_ref()).unwrap(),
-                on_chain
-            );
+            is_next_full_dkg: true,
+            proposer_units,
         }
+    }
+
+    #[test]
+    fn onchain_dkg_outcome_roundtrip() {
+        for units in [None, Some((1..=10).collect())] {
+            let mut on_chain = outcome(units);
+            // Preserve Commonware Epoch's wire encoding, including varint boundaries.
+            let payload = on_chain.encode()[Epoch::new(on_chain.epoch).encode_size()..].to_vec();
+            for epoch in [0, 127, 128, 16383, 16384, u64::MAX] {
+                let prefix = Epoch::new(epoch).encode();
+                on_chain.epoch = epoch;
+                #[cfg(feature = "commonware-consensus")]
+                assert_eq!(on_chain.epoch(), Epoch::new(epoch));
+                let bytes = on_chain.encode();
+                assert_eq!(&bytes[..prefix.len()], prefix.as_ref());
+                assert_eq!(&bytes[prefix.len()..], payload);
+                assert_eq!(bytes.len(), on_chain.encode_size());
+                assert_eq!(
+                    OnchainDkgOutcome::read(&mut bytes.as_ref()).unwrap(),
+                    on_chain
+                );
+            }
+        }
+    }
+
+    /// The units' marker sits where a decoder without them expects `is_next_full_dkg`, which
+    /// it refuses.
+    #[test]
+    fn a_decoder_without_units_refuses_an_outcome_with_them() {
+        let legacy = outcome(None).encode();
+        let weighted = outcome(Some(vec![1; 10])).encode();
+        let flag = legacy.len() - 1;
+        assert_eq!(legacy[..flag], weighted[..flag]);
+        assert!(matches!(
+            bool::read(&mut &weighted[flag..]),
+            Err(Error::InvalidBool)
+        ));
+    }
+
+    #[test]
+    fn units_must_cover_every_player() {
+        let mut bytes = outcome(Some(vec![1; 10])).encode().to_vec();
+        let flag = outcome(None).encode().len() - 1;
+        bytes[flag + 2] = 9; // the units' length prefix
+        bytes.pop();
+        assert!(OnchainDkgOutcome::read(&mut bytes.as_slice()).is_err());
     }
 }
