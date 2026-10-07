@@ -39,7 +39,7 @@ pub(crate) static NVNM_TESTNET_BOOTNODES: &[&str] = &[
     "enode://2d91f00d8305eb5faf7a002a260ac0d83b6ac4b1a61de7cbdf4021b4476a03360db071e6842f4d3d176c90d9a12c264d77e6c3792634a09a4f483bbceb5c8d70@34.92.172.118:30303",
 ];
 
-pub(crate) const NVNM_TESTNET_FOLLOW_URL: Option<&str> = None;
+pub(crate) const NVNM_TESTNET_FOLLOW_URL: Option<&str> = Some("wss://ws.nvnm.testnet.nvnmchain.io");
 
 pub(crate) fn nvnm_testnet_nodes() -> Vec<NodeRecord> {
     parse_nodes(NVNM_TESTNET_BOOTNODES)
