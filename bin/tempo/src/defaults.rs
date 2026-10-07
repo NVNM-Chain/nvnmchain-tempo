@@ -13,8 +13,6 @@ use url::Url;
 
 pub(crate) const DEFAULT_DOWNLOAD_URL: &str = "https://snapshots.tempoxyz.dev/4217";
 const SNAPSHOT_API_URL: &str = "https://snapshots.tempoxyz.dev/api/snapshots";
-/// NVNM snapshot root serving `/api/snapshots`; `None` keeps Tempo's.
-const NVNM_SNAPSHOT_URL: Option<&str> = None;
 /// NVNM peers list, `{"<chain id>": ["enode://…"]}`; "none" disables it.
 pub(crate) const BOOTNODES_ENDPOINT: &str = "none";
 const MAINNET_TESTNET_EPOCH_LENGTH_BLOCKS: u64 = 21_600;
@@ -162,11 +160,6 @@ fn init_download_urls() {
         snapshot_api_url: Cow::Borrowed(SNAPSHOT_API_URL),
         long_help: None,
     };
-    let download_defaults = match NVNM_SNAPSHOT_URL {
-        Some(url) => download_defaults.with_snapshot_source_url(url),
-        None => download_defaults,
-    };
-
     download_defaults
         .try_init()
         .expect("failed to initialize download URLs");

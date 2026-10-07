@@ -1,10 +1,11 @@
 use std::{
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     time::Instant,
 };
 
-use clap::{ArgMatches, FromArgMatches, Parser};
+use clap::{ArgMatches, CommandFactory as _, FromArgMatches, Parser};
 use eyre::{Context as _, OptionExt, ensure};
 use futures::TryStreamExt;
 use reth_cli_commands::download::{
@@ -12,6 +13,7 @@ use reth_cli_commands::download::{
     manifest::{OutputFileChecksum, SnapshotManifest},
 };
 use reth_cli_runner::CliRunner;
+use reth_ethereum::chainspec::EthChainSpec as _;
 use tempo_chainspec::spec::TempoChainSpecParser;
 use tempo_telemetry_util::display_duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -49,12 +51,68 @@ pub(crate) struct Args {
     consensus_datadir: Option<PathBuf>,
 }
 
+/// Where a chain publishes its snapshots: the `latest.json` naming its newest manifest.
+fn latest_snapshot_url(chain_id: u64) -> Option<&'static str> {
+    match chain_id {
+        787223 => Some("https://snapshot.nvnm.testnet.nvnmchain.io/latest.json"),
+        _ => None,
+    }
+}
+
+/// Whether the command line already says where the snapshot comes from.
+fn names_a_source(matches: &ArgMatches) -> bool {
+    matches.get_flag("list")
+        || ["url", "manifest_url", "manifest_path"]
+            .iter()
+            .any(|id| matches.value_source(id).is_some())
+}
+
+/// The manifest that `latest`, a chain's `latest.json`, names.
+async fn latest_manifest_url(latest: &str) -> eyre::Result<String> {
+    let body = reqwest::get(latest)
+        .await
+        .and_then(|resp| resp.error_for_status())
+        .wrap_err_with(|| format!("failed to fetch {latest}"))?
+        .bytes()
+        .await?;
+    let pointer: serde_json::Value = serde_json::from_slice(&body)?;
+    let manifest_url = pointer["manifest_url"]
+        .as_str()
+        .ok_or_eyre("the latest snapshot names no manifest_url")?;
+    info!(manifest_url, "found the latest snapshot");
+    Ok(manifest_url.to_owned())
+}
+
+/// `argv` parsed again, as the download it is, with `manifest_url` for its source: reth keeps
+/// that argument to itself.
+fn args_from(argv: impl IntoIterator<Item = OsString>, manifest_url: &str) -> eyre::Result<Args> {
+    let argv = argv
+        .into_iter()
+        .chain(["--manifest-url".into(), manifest_url.into()]);
+    let matches = crate::cli::TempoCli::command()
+        .mut_subcommand("download", |_| Args::command())
+        .try_get_matches_from(argv)?;
+    let (_, download) = matches.subcommand().ok_or_eyre("not a download")?;
+    Args::from_arg_matches(download).wrap_err("failed to parse args")
+}
+
 pub(crate) fn run_with_runner(matches: &ArgMatches, runner: CliRunner) -> eyre::Result<()> {
     let args = Args::from_arg_matches(matches).wrap_err("failed to parse args")?;
 
     let force = matches.get_one::<bool>("force").copied().unwrap_or(false);
+    // With no source named, a chain that publishes its own snapshots gets the latest of them.
+    let latest = args
+        .inner
+        .chain_spec()
+        .and_then(|spec| latest_snapshot_url(spec.chain().id()))
+        .filter(|_| !names_a_source(matches));
 
     runner.block_on(async move {
+        let args = match latest {
+            Some(latest) => args_from(std::env::args_os(), &latest_manifest_url(latest).await?)?,
+            None => args,
+        };
+
         if args.inner.prints_plan_json() {
             let (mut plan, prepared) = args
                 .inner
@@ -402,6 +460,33 @@ mod tests {
 
     use alloy_primitives::B256;
     use clap::CommandFactory;
+
+    fn download(argv: &[&str]) -> ArgMatches {
+        Args::command().get_matches_from(argv)
+    }
+
+    #[test]
+    fn only_a_download_naming_no_source_follows_the_latest_snapshot() {
+        assert!(!names_a_source(&download(&["tempo", "-y"])));
+        for source in [
+            &["--manifest-url", "https://snap/manifest.json"][..],
+            &["--manifest-path", "manifest.json"],
+            &["-u", "https://snap/snapshot.tar.lz4"],
+            &["--list"],
+        ] {
+            assert!(names_a_source(&download(&[&["tempo"], source].concat())));
+        }
+    }
+
+    #[test]
+    fn the_latest_manifest_joins_the_arguments_given() {
+        let argv = ["tempo", "download", "--datadir", "/d", "--archive"].map(OsString::from);
+        let args = args_from(argv, "https://snap/manifest.json").unwrap();
+
+        let parsed = format!("{:?}", args.inner);
+        assert!(parsed.contains(r#"manifest_url: Some("https://snap/manifest.json")"#));
+        assert!(parsed.contains("archive: true"), "{parsed}");
+    }
 
     #[test]
     fn help_hides_skip_consensus_override() {
