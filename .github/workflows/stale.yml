@@ -14,7 +14,6 @@ jobs:
       issues: write
       pull-requests: write
       id-token: write
-    if: ${{ github.event_name != 'schedule' || github.repository == 'tempoxyz/tempo' }}
     runs-on: ubuntu-latest
     steps:
       - name: Secure runner

@@ -3,6 +3,7 @@
 use crate::{defaults, follow, tempo_cmd};
 use reth_ethereum_cli::Cli;
 use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection, RpcModuleValidator};
+use tempo_anchoring_index::AnchoringIndexArgs;
 use tempo_chainspec::spec::TempoChainSpecParser;
 use tempo_faucet::args::FaucetArgs;
 use tempo_node::TempoNodeArgs;
@@ -10,7 +11,8 @@ use tempo_node::TempoNodeArgs;
 pub type TempoCli =
     Cli<TempoChainSpecParser, TempoArgs, TempoRpcModuleValidator, tempo_cmd::TempoSubcommand>;
 
-pub(crate) const TEMPO_CUSTOM_RPC_MODULES: &[&str] = &["consensus", "operator", "tempo", "token"];
+pub(crate) const TEMPO_CUSTOM_RPC_MODULES: &[&str] =
+    &["anchoring", "consensus", "operator", "tempo", "token"];
 
 #[derive(Debug, Clone, Copy)]
 pub struct TempoRpcModuleValidator;
@@ -76,7 +78,7 @@ pub struct TempoArgs {
     #[arg(
         long = "tempo.bootnodes-endpoint",
         value_name = "URL",
-        default_value = "https://peers.tempo.xyz",
+        default_value = crate::defaults::BOOTNODES_ENDPOINT,
         env = "TEMPO_BOOTNODES_ENDPOINT"
     )]
     pub(crate) bootnodes_endpoint: String,
@@ -89,6 +91,9 @@ pub struct TempoArgs {
 
     #[command(flatten)]
     pub(crate) faucet_args: FaucetArgs,
+
+    #[command(flatten)]
+    pub(crate) anchoring_index: AnchoringIndexArgs,
 
     #[command(flatten)]
     pub(crate) node_args: TempoNodeArgs,
@@ -135,4 +140,16 @@ pub(crate) struct PyroscopeArgs {
     /// Sample rate for profiling (default: 100 Hz)
     #[arg(long = "pyroscope.sample-rate", default_value_t = 100)]
     pub(crate) sample_rate: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory as _;
+
+    /// clap checks ids when the command is built, which is otherwise the first `tempo node`.
+    #[test]
+    fn no_two_arguments_claim_the_same_id() {
+        TempoCli::command().debug_assert();
+    }
 }

@@ -2,8 +2,8 @@
 use std::net::SocketAddr;
 
 use crate::{
-    bootstrap_shadowfork::BootstrapShadowfork, check_abi::CheckAbi,
-    generate_devnet::GenerateDevnet, generate_genesis::GenerateGenesis,
+    anchoring_runtime::AnchoringRuntime, bootstrap_shadowfork::BootstrapShadowfork,
+    check_abi::CheckAbi, generate_devnet::GenerateDevnet, generate_genesis::GenerateGenesis,
     generate_hardfork::AddHardfork, generate_localnet::GenerateLocalnet,
     generate_shadowfork::GenerateShadowfork, generate_state_bloat::GenerateStateBloat,
     get_dkg_outcome::GetDkgOutcome, identity_transitions::GetIdentityTransitions,
@@ -14,6 +14,7 @@ use clap::Parser as _;
 use commonware_codec::DecodeExt;
 use eyre::Context;
 
+mod anchoring_runtime;
 mod bootstrap_shadowfork;
 mod check_abi;
 mod generate_devnet;
@@ -32,6 +33,9 @@ async fn main() -> eyre::Result<()> {
     let args = Args::parse();
     match args.action {
         Action::CheckAbi(args) => args.run().wrap_err("failed ABI alignment check"),
+        Action::AnchoringRuntime(args) => {
+            args.run().wrap_err("failed copying the contract runtimes")
+        }
         Action::GetDkgOutcome(args) => args.run().await.wrap_err("failed to get DKG outcome"),
         Action::GetIdentityTransitions(args) => args
             .run()
@@ -75,6 +79,7 @@ struct Args {
 #[derive(Debug, clap::Subcommand)]
 enum Action {
     CheckAbi(CheckAbi),
+    AnchoringRuntime(AnchoringRuntime),
     GetDkgOutcome(GetDkgOutcome),
     GetIdentityTransitions(GetIdentityTransitions),
     GenerateGenesis(GenerateGenesis),

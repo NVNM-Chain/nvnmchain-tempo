@@ -452,7 +452,7 @@ pub struct ValidatorTransactionArgs {
     wallet: WalletArgs,
 
     /// The RPC URL to submit the transaction to.
-    #[arg(long, default_value = "https://rpc.presto.tempo.xyz")]
+    #[arg(long, default_value = "https://rpc.nvnm.testnet.nvnmchain.io")]
     rpc_url: String,
 
     /// Skip the interactive confirmation prompt.
@@ -679,7 +679,7 @@ pub struct CreateAddValidatorSignatureArgs {
     #[arg(
         long,
         value_name = "RPC_URL",
-        default_value = "https://rpc.presto.tempo.xyz"
+        default_value = "https://rpc.nvnm.testnet.nvnmchain.io"
     )]
     chain_id_from_rpc_url: String,
     #[command(flatten)]
@@ -720,7 +720,7 @@ pub struct CreateRotateValidatorSignatureArgs {
     #[arg(
         long,
         value_name = "RPC_URL",
-        default_value = "https://rpc.presto.tempo.xyz"
+        default_value = "https://rpc.nvnm.testnet.nvnmchain.io"
     )]
     chain_id_from_rpc_url: String,
     #[command(flatten)]
@@ -1205,11 +1205,11 @@ pub struct ValidatorInfo {
     id: ValidatorId,
 
     /// RPC URL to query.
-    #[arg(long, default_value = "https://rpc.presto.tempo.xyz")]
+    #[arg(long, default_value = "https://rpc.nvnm.testnet.nvnmchain.io")]
     rpc_url: String,
 
-    /// Chain spec override for local/unknown chains (mainnet, testnet, moderato, or path to
-    /// chainspec file). Resolved automatically from the RPC chain id when omitted.
+    /// Chain spec override for local/unknown chains (a built-in name or a chainspec file).
+    /// Resolved automatically from the RPC chain id when omitted.
     #[arg(long, short, value_parser = tempo_chainspec::spec::chain_value_parser)]
     chain: Option<Arc<TempoChainSpec>>,
 
@@ -1369,12 +1369,12 @@ struct InfoOutput {
 
 #[derive(Debug, clap::Args)]
 pub struct Info {
-    /// RPC URL to query. Defaults to <https://rpc.presto.tempo.xyz>
-    #[arg(long, default_value = "https://rpc.presto.tempo.xyz")]
+    /// RPC URL to query.
+    #[arg(long, default_value = "https://rpc.nvnm.testnet.nvnmchain.io")]
     rpc_url: String,
 
-    /// Chain spec override for local/unknown chains (mainnet, testnet, moderato, or path to
-    /// chainspec file). Resolved automatically from the RPC chain id when omitted.
+    /// Chain spec override for local/unknown chains (a built-in name or a chainspec file).
+    /// Resolved automatically from the RPC chain id when omitted.
     #[arg(long, short, value_parser = tempo_chainspec::spec::chain_value_parser)]
     chain: Option<Arc<TempoChainSpec>>,
 }
