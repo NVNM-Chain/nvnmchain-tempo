@@ -507,9 +507,7 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
         };
         let chain_id = builder.config().chain.chain().id();
 
-        // Resolve the bootnodes endpoint:
-        // --tempo.bootnodes-endpoint=none -> disabled
-        // otherwise -> use the provided/default URL
+        // "none" (the default) disables the bootnodes endpoint.
         let bootnodes_endpoint = match args.bootnodes_endpoint.trim() {
             value if value.eq_ignore_ascii_case("none") => None,
             url => Some(url.to_string()),
