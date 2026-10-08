@@ -143,8 +143,7 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     no_extra_tokens: bool,
 
-    /// A temporary gas token: the generated accounts and validators pay fees in it, the coinbase
-    /// and validators take it.
+    /// Enable creating deployment gas token.
     #[arg(long)]
     deployment_gas_token: bool,
 
@@ -216,11 +215,9 @@ pub(crate) struct GenesisArgs {
     #[arg(long, default_value = "0")]
     t11_time: u64,
 
-    /// T12 hardfork activation time. Unset leaves it unscheduled, as do T13 and T14: a genesis
-    /// should not pin a fork this chain has not chosen to run, or one whose contents are still
-    /// moving upstream.
-    #[arg(long)]
-    t12_time: Option<u64>,
+    /// T12 hardfork activation time.
+    #[arg(long, default_value = "0")]
+    t12_time: u64,
 
     /// T13 hardfork activation time. Unset, the genesis carries the pre-T13 zone runtimes, and a
     /// chain that schedules T13 later gets the shared ones at its activation boundary.
@@ -675,8 +672,10 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("t11Time".to_string(), self.t11_time)?;
+        chain_config
+            .extra_fields
+            .insert_value("t12Time".to_string(), self.t12_time)?;
         for (key, time) in [
-            ("t12Time", self.t12_time),
             ("t13Time", self.t13_time),
             ("t14Time", self.t14_time),
         ] {
