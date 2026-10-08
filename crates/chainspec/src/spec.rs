@@ -1,7 +1,7 @@
 pub use tempo_hardfork::constants::gas::*;
 
 use crate::{
-    bootnodes::{NVNM_TESTNET_FOLLOW_URL, moderato_nodes, nvnm_testnet_nodes, presto_nodes},
+    bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -196,7 +196,9 @@ pub static NVNM_TESTNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-testnet.json"))
         .expect("`./genesis/nvnm-testnet.json` must be present and deserializable");
 
-    TempoChainSpec::from_genesis(genesis).into()
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://ws.nvnm.testnet.nvnmchain.io")
+        .into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -224,10 +226,7 @@ pub struct TempoChainSpec {
 impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
-        self.default_follow_url.or(match self.inner.chain_id() {
-            787223 => NVNM_TESTNET_FOLLOW_URL,
-            _ => None,
-        })
+        self.default_follow_url
     }
 
     /// Returns the shared gas limit for the given timestamp and block gas limit.
@@ -1121,5 +1120,9 @@ mod tests {
         assert_eq!(spec.info.epoch_length().map(|n| n.get()), Some(21_600));
         assert_eq!(spec.info.fork_time(TempoHardfork::T12), None);
         assert!(spec.network_identity.is_some());
+        assert_eq!(
+            spec.default_follow_url(),
+            Some("wss://ws.nvnm.testnet.nvnmchain.io")
+        );
     }
 }
