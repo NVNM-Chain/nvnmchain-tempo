@@ -11,7 +11,8 @@ use std::{str::FromStr, time::Duration};
 use tempo_chainspec::spec::TEMPO_T7_BASE_FEE_FLOOR;
 use url::Url;
 
-/// NVNM's snapshot host: `tempo download` discovers snapshots at its `/api/snapshots`.
+/// NVNM's snapshot host. `tempo download` reads its `latest.json` pointer when no source is named;
+/// the host does not serve Reth's `/api/snapshots` listing.
 const SNAPSHOT_URL: &str = "https://snapshot.nvnm.testnet.nvnmchain.io";
 /// NVNM peers list, `{"<chain id>": ["enode://…"]}`; "none" disables it.
 pub(crate) const BOOTNODES_ENDPOINT: &str = "none";
