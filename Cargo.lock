@@ -14237,6 +14237,7 @@ dependencies = [
  "pyroscope",
  "pyroscope_pprofrs",
  "rand 0.10.3",
+ "rayon",
  "reqwest 0.13.5",
  "reth-chainspec",
  "reth-cli",
@@ -14271,6 +14272,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tempo-alloy",
+ "tempo-anchoring-index",
  "tempo-chainspec",
  "tempo-consensus",
  "tempo-consensus-config",
@@ -14340,6 +14342,29 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tower",
+ "tracing",
+]
+
+[[package]]
+name = "tempo-anchoring-index"
+version = "1.18.2"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "async-trait",
+ "clap",
+ "eyre",
+ "futures",
+ "jsonrpsee",
+ "reth-ethereum",
+ "reth-node-api",
+ "reth-node-core",
+ "reth-storage-api",
+ "rocksdb",
+ "serde",
+ "tempfile",
+ "tempo-primitives",
+ "tokio",
  "tracing",
 ]
 
@@ -15026,6 +15051,7 @@ version = "1.18.2"
 dependencies = [
  "alloy",
  "alloy-primitives",
+ "alloy-rlp",
  "clap",
  "coins-bip32",
  "eyre",
@@ -15038,8 +15064,10 @@ dependencies = [
  "reth-db-api",
  "reth-etl",
  "reth-evm",
+ "reth-metrics",
  "reth-primitives-traits",
  "reth-provider",
+ "reth-prune-types",
  "reth-tasks",
  "reth-trie",
  "reth-trie-db",
@@ -15049,6 +15077,7 @@ dependencies = [
  "tempo-primitives",
  "tokio",
  "tracing",
+ "zstd 0.14.3",
 ]
 
 [[package]]

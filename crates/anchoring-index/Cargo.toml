@@ -1,0 +1,49 @@
+[package]
+name = "tempo-anchoring-index"
+description = "Registry name index for the anchoring contract, maintained by a reth ExEx"
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Tempo
+tempo-primitives = { workspace = true, features = ["default"] }
+
+# Reth
+reth-ethereum = { workspace = true, features = ["node", "exex", "provider"] }
+reth-node-api.workspace = true
+reth-node-core.workspace = true
+reth-storage-api.workspace = true
+
+# Alloy
+alloy-consensus.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+
+# The index. Already in the node: reth-provider links it.
+rocksdb.workspace = true
+
+# General
+async-trait.workspace = true
+clap.workspace = true
+eyre.workspace = true
+futures.workspace = true
+# Must match reth's jsonrpsee exactly: the RPC module is merged into reth's server, so a
+# different version would be a different (incompatible) set of traits.
+jsonrpsee.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

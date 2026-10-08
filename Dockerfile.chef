@@ -1,7 +1,21 @@
 FROM rust:1.96-bookworm@sha256:19817ead3289c8c631c73df281e18b59b172f6a31f4f563290f69cddd06c30e9 AS chef
 
-RUN cargo install cargo-chef --version 0.1.77 --locked \
- && cargo install sccache --version 0.14.0 --locked
+# The published binary, rather than five minutes of `cargo install`.
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) triple=x86_64-unknown-linux-musl; \
+             sha=a3733ab416c3ffddd37914cd13919ca05fee1a1cf654f3016dcfe7f399d89cd1 ;; \
+      arm64) triple=aarch64-unknown-linux-musl; \
+             sha=3bff2e7ff979db837c7e820dfd8d51d2d97b9c94283506c6e596ae4887ef178b ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 --retry-all-errors -o chef.tar.xz \
+      "https://github.com/LukeMathWalker/cargo-chef/releases/download/v0.1.77/cargo-chef-${triple}.tar.xz"; \
+    echo "${sha}  chef.tar.xz" | sha256sum -c -; \
+    tar -xJf chef.tar.xz -C "${CARGO_HOME}/bin" --strip-components=1 \
+      "cargo-chef-${triple}/cargo-chef"; \
+    rm chef.tar.xz
 
 WORKDIR /app
 
@@ -27,8 +41,8 @@ RUN apt-get update \
     mold \
     && rm -rf /var/lib/apt/lists/*
 
-ENV RUSTC_WRAPPER=sccache \
-    SCCACHE_DIR=/sccache \
+# Every build starts from a fresh target dir, so incremental artifacts are never read.
+ENV CARGO_INCREMENTAL=0 \
     CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=clang
 
@@ -36,6 +50,5 @@ COPY --from=planner /app/recipe.json recipe.json
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git-${TARGETARCH} \
-    --mount=type=cache,target=$SCCACHE_DIR,sharing=locked,id=sccache-${TARGETARCH} \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
     cargo chef cook --profile ${RUST_PROFILE} --features "${RUST_FEATURES}" --recipe-path recipe.json

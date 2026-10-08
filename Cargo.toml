@@ -14,6 +14,7 @@ publish = false
 members = [
   "bin/tempo",
   "crates/alloy",
+  "crates/anchoring-index",
   "crates/chainspec",
   "crates/consensus",
   "crates/corpus",
@@ -208,6 +209,7 @@ tempo-alloy = { path = "crates/alloy" }
 tempo-node = { path = "crates/node" }
 tempo-node-launcher = { path = "crates/node-launcher" }
 tempo-nitro-attestation = { path = "crates/nitro-attestation", default-features = false }
+tempo-anchoring-index = { path = "crates/anchoring-index" }
 tempo-chainspec = { path = "crates/chainspec", default-features = false }
 tempo-consensus = { path = "crates/consensus", default-features = false }
 tempo-corpus = { path = "crates/corpus" }
@@ -384,6 +386,8 @@ rand_09 = { package = "rand", version = "0.9" }
 rand_08 = { package = "rand", version = "0.8.5" }
 rand_core = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# Pinned to reth's: reth-provider already links it, and two versions would be two builds.
+rocksdb = "0.24"
 rustls = { version = "0.23.46", default-features = false, features = ["ring"] }
 semver = "1"
 serde = { version = "1.0.228", features = ["derive"], default-features = false }
