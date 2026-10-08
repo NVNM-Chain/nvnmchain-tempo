@@ -130,8 +130,8 @@ impl TempoGenesisInfo {
 #[derive(Debug, Clone, Default)]
 pub struct TempoChainSpecParser;
 
-/// Chains supported by Tempo. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "mainnet", "moderato", "testnet"];
+/// NVNM's chains by name; the first is the default.
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -140,9 +140,10 @@ pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "mainnet", "moderato", "
 #[cfg(feature = "cli")]
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
+        "nvnm-testnet" => NVNM_TESTNET.clone(),
+        // Tempo's, unlisted: shadowfork names them.
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
-        "nvnm-testnet" => NVNM_TESTNET.clone(),
         "dev" => DEV.clone(),
         _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
