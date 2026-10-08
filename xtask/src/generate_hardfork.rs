@@ -7,7 +7,6 @@ const HARDFORK_SOURCE: &str = "crates/hardfork/src/lib.rs";
 const CHAINSPEC_SOURCE: &str = "crates/chainspec/src/spec.rs";
 const GENESIS_ARGS_SOURCE: &str = "xtask/src/genesis_args.rs";
 const FOUNDRY_CONFIG: &str = "tips/verify/foundry.toml";
-const BENCH_WORKFLOW: &str = ".github/workflows/bench.yml";
 const DEV_GENESIS: &str = "crates/chainspec/src/genesis/dev.json";
 const TEST_GENESIS: &str = "crates/node/tests/assets/test-genesis.json";
 const SNAPSHOT_DIR: &str = "crates/evm/src/snapshots";
@@ -104,13 +103,6 @@ fn add_hardfork(root: &Path, hardfork: &str) -> eyre::Result<HardforkMetadata> {
     write(
         &foundry_path,
         &rotate_profiles(&foundry, previous, hardfork)?,
-    )?;
-
-    let bench_path = root.join(BENCH_WORKFLOW);
-    let bench = read(&bench_path)?;
-    write(
-        &bench_path,
-        &append_bench_hardfork(&bench, &variants, previous, hardfork)?,
     )?;
 
     for path in [DEV_GENESIS, TEST_GENESIS] {
@@ -333,53 +325,6 @@ fn replace_profile_hardfork(source: &str, profile: &str, hardfork: &str) -> eyre
     Ok(output)
 }
 
-fn append_bench_hardfork(
-    source: &str,
-    variants: &[String],
-    previous: &str,
-    hardfork: &str,
-) -> eyre::Result<String> {
-    let marker = format!("'{previous}'");
-    let replacement = format!("'{previous}', '{hardfork}'");
-    let count = source.matches(&marker).count();
-    if count == 0 {
-        return Ok(source.to_owned());
-    }
-    ensure!(
-        count == 1,
-        "expected one benchmark hardfork allowlist entry"
-    );
-    let mut output = source.replacen(&marker, &replacement, 1);
-    let usage_values = variants
-        .iter()
-        .skip(1)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("|");
-
-    for prefix in ["baseline-hardfork=", "feature-hardfork="] {
-        let mut search_from = 0;
-        let mut replacements = 0;
-        while let Some(relative_start) = output[search_from..].find(prefix) {
-            let start = search_from + relative_start;
-            let values_start = start + prefix.len();
-            let end = values_start
-                + output[values_start..]
-                    .find(']')
-                    .ok_or_else(|| eyre::eyre!("unterminated benchmark usage range"))?;
-            output.replace_range(values_start..end, &usage_values);
-            search_from = values_start + usage_values.len();
-            replacements += 1;
-        }
-        ensure!(
-            replacements == 2,
-            "expected two benchmark usage ranges for {prefix}, found {replacements}"
-        );
-    }
-
-    Ok(output)
-}
-
 fn append_genesis_time(source: &str, previous: &str, hardfork: &str) -> eyre::Result<String> {
     let marker = format!("    \"{}Time\": 0,\n", previous.to_ascii_lowercase());
     let insertion = format!(
@@ -490,39 +435,5 @@ mod tests {
         let updated = append_hardfork_source(&source, "T10", "T11").unwrap();
         assert_eq!(updated.matches("Self::T11 => None").count(), 4);
         assert!(updated.contains("        T11,\n"));
-    }
-
-    #[test]
-    fn updates_benchmark_allowlist_and_usage() {
-        let variants = ["Genesis", "T9", "T10", "T11"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let source = concat!(
-            "const hardforkValues = new Set(['T9', 'T10']);\n",
-            "[baseline-hardfork=T0|T8] [feature-hardfork=T0|T8]\n",
-            "[baseline-hardfork=T0|T8] [feature-hardfork=T0|T8]\n",
-        );
-        let updated = append_bench_hardfork(source, &variants, "T10", "T11").unwrap();
-        assert!(updated.contains("['T9', 'T10', 'T11']"));
-        assert_eq!(updated.matches("T9|T10|T11").count(), 4);
-    }
-
-    #[test]
-    fn current_benchmark_workflow_without_allowlist_does_not_break_add_hardfork() {
-        let variants = [
-            "Genesis", "T0", "T1", "T1A", "T1B", "T1C", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
-            "T9", "T10",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-        let source = include_str!("../../.github/workflows/bench.yml");
-
-        let updated = append_bench_hardfork(source, &variants, "T10", "T11")
-            .expect("add-hardfork should tolerate the current benchmark workflow shape without an in-workflow hardfork allowlist");
-
-        assert!(updated.contains("baseline-hardfork=HARDFORK"));
-        assert!(updated.contains("feature-hardfork=HARDFORK"));
     }
 }
