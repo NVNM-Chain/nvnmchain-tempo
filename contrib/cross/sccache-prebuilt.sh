@@ -57,9 +57,11 @@ main() {
     # our binary. An unverified tarball is never unpacked.
     td="$(mktemp -d)"
     pushd "${td}"
-    curl --proto '=https' --tlsv1.2 -LSfs --retry 3 --retry-all-errors \
-        "${url}/releases/download/${tag}/sccache-${tag}-${triple}.tar.gz" \
-        -o sccache.tar.gz
+    # The base image's curl 7.68 has no --retry-all-errors: retry here, resuming a cut transfer.
+    for _ in 1 2 3 4 5; do
+        curl --proto '=https' --tlsv1.2 -LSfs -C - \
+            "${url}/releases/download/${tag}/sccache-${tag}-${triple}.tar.gz" -o sccache.tar.gz && break
+    done
     echo "${sha}  sccache.tar.gz" | sha256sum -c -
     tar -xvf sccache.tar.gz
     rm sccache.tar.gz
