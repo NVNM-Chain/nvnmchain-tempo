@@ -58,8 +58,9 @@ fn proposals(
     })
 }
 
-/// A signer the election weighs at zero keeps its vote but stops proposing from epoch 1, the
-/// first whose DKG outcome carries proposer units. View 1 of every epoch is round robin.
+/// A signer the election weighs at zero keeps its vote and one unit in 10,001: from epoch 1, the
+/// first whose DKG outcome carries proposer units, this seed draws it for no round. View 1 of
+/// every epoch is round robin.
 #[test_traced]
 fn a_signer_weighed_at_zero_stops_proposing() {
     let _ = tempo_eyre::install();

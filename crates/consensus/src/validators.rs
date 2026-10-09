@@ -197,7 +197,7 @@ alloy_sol_types::sol! {
 pub(crate) struct NextPlayers {
     pub(crate) players: ordered::Set<PublicKey>,
     /// `Some` once proposers are weighted: the election weight of each `current_players` key the
-    /// registry knows, empty when the election is inactive or cannot answer.
+    /// registry knows, empty unless the election seats a committee and answers for them.
     pub(crate) weights: Option<BTreeMap<PublicKey, U256>>,
 }
 
@@ -207,8 +207,8 @@ const MIN_ELECTED_COMMITTEE: usize = 4;
 /// The next epoch's players where the genesis names a staking election, read from `state`, the
 /// post-state of the block with `header`. Once the election is active: the elected committee,
 /// else the `current_players` still registered, else the whole registry; before that, the
-/// registry. If `weighted`, the election weights come with them. Each choice is a function of
-/// state, so every node makes it; an `Err` is node-local.
+/// registry. If `weighted`, a seated election's weights come with them. Each choice is a function
+/// of state, so every node makes it; an `Err` is node-local.
 #[instrument(skip_all, fields(%staking_election), err(Display))]
 pub(crate) fn read_elected_players(
     node: impl ExecutionNode,
@@ -224,51 +224,56 @@ pub(crate) fn read_elected_players(
 
     // The block's time, not the wall clock, so every node flips at the same boundary.
     let active = staking_election_time.is_none_or(|from| header.timestamp() >= from);
-    // The players weighed are the ones the output hands the next epoch's shares, whichever
-    // committee the election seats for the epoch after.
-    let weights = if !weighted {
-        None
-    } else if active {
-        Some(proposer_weights(
-            &mut evm,
-            staking_election,
-            current_players,
-        )?)
+    let elected = if active {
+        elected_players(&mut evm, staking_election, &registry)?
     } else {
-        Some(BTreeMap::new())
+        None
     };
-    if active {
-        if let Some(players) = elected_players(&mut evm, staking_election, &registry)? {
-            info!(
-                players = players.len(),
-                "next committee elected by staking contract"
-            );
-            return Ok(NextPlayers { players, weights });
+    let seated = elected.is_some();
+    let players = if let Some(players) = elected {
+        info!(
+            players = players.len(),
+            "next committee elected by staking contract"
+        );
+        players
+    } else if let Some(players) = active
+        .then(|| {
+            // Not the registry: after a long run, entries outside the committee may be offline.
+            seated_players(&registry, |validator| {
+                current_players.position(validator.public_key()).is_some()
+            })
+        })
+        .flatten()
+    {
+        info!(
+            players = players.len(),
+            "election fell back to the current players"
+        );
+        players
+    } else {
+        let mut keys = HashSet::new();
+        for validator in &registry {
+            if !keys.insert(validator.public_key().clone()) {
+                warn!(duplicate = %validator.public_key(), "found duplicate public keys");
+            }
         }
-        // Not the registry: after a long run, entries outside the committee may be offline.
-        if let Some(players) = seated_players(&registry, |validator| {
-            current_players.position(validator.public_key()).is_some()
-        }) {
-            info!(
-                players = players.len(),
-                "election fell back to the current players"
-            );
-            return Ok(NextPlayers { players, weights });
-        }
-    }
-
-    let mut keys = HashSet::new();
-    for validator in &registry {
-        if !keys.insert(validator.public_key().clone()) {
-            warn!(duplicate = %validator.public_key(), "found duplicate public keys");
-        }
-    }
-    info!(
-        players = keys.len(),
-        active, "next committee is the full registry"
-    );
-    let players =
-        ordered::Set::try_from_iter(keys).expect("a hash set does not contain duplicates");
+        info!(
+            players = keys.len(),
+            active, "next committee is the full registry"
+        );
+        ordered::Set::try_from_iter(keys).expect("a hash set does not contain duplicates")
+    };
+    // The players weighed are the ones the output hands the next epoch's shares, whichever
+    // committee the election seats for the epoch after; on every fallback they draw alike.
+    let weights = weighted
+        .then(|| {
+            if seated {
+                proposer_weights(&mut evm, staking_election, current_players)
+            } else {
+                Ok(BTreeMap::new())
+            }
+        })
+        .transpose()?;
     Ok(NextPlayers { players, weights })
 }
 
@@ -1075,15 +1080,37 @@ mod tests {
         );
     }
 
+    /// The weights are a seated election's: one that seats no committee weighs nobody, whatever it
+    /// scores, on either fallback.
+    #[test]
+    fn an_election_that_seats_no_committee_weighs_nobody() {
+        // Three seats are under the floor of four.
+        let code = answering(&[
+            committee(&[1, 2, 3]),
+            (IStakingElection::electionWeightCall::SELECTOR, Answer::Echo),
+        ]);
+        let kept = read_next_players(&election(Some(code.clone())), None, true, &[1, 2, 3, 4, 5]);
+        assert_eq!(kept.players, keys(&[1, 2, 3, 4, 5]));
+        assert_eq!(kept.weights, Some(BTreeMap::new()));
+
+        let registry = read_next_players(&election(Some(code)), None, true, &[1, 2, 9]);
+        assert_eq!(registry.players, keys(&[1, 2, 3, 4, 5, 6]));
+        assert_eq!(registry.weights, Some(BTreeMap::new()));
+    }
+
     #[test]
     fn weighted_proposers_fall_back_to_no_weights() {
-        // Fewer weights than proposers: every proposer alike.
-        let short = answering(&[(
-            IStakingElection::electionWeightCall::SELECTOR,
-            Answer::With(IStakingElection::electionWeightCall::abi_encode_returns(
-                &vec![U256::from(1)],
-            )),
-        )]);
+        // Fewer weights than proposers, from an election that does seat its committee: every
+        // proposer alike.
+        let short = answering(&[
+            committee(&[1, 2, 3, 4]),
+            (
+                IStakingElection::electionWeightCall::SELECTOR,
+                Answer::With(IStakingElection::electionWeightCall::abi_encode_returns(
+                    &vec![U256::from(1)],
+                )),
+            ),
+        ]);
         // A reverting contract, then an election not yet active.
         for (code, from) in [
             (Some(short), None),
