@@ -1,5 +1,7 @@
 **/.git
 contrib/
+# Cross.toml builds contrib/cross/Dockerfile.* with the repo root as context.
+!contrib/cross/
 docs/
 localnet/
 scripts/
