@@ -431,8 +431,8 @@ fn election_call(
     contract: Address,
     input: Vec<u8>,
 ) -> eyre::Result<Option<Bytes>> {
-    // Running out of the system call's 250M gas is a revert too; nvnm-contracts' CommitteeGas
-    // puts the worst case at 33M.
+    // Running out of the system call's 250M gas halts, which falls back like a revert;
+    // nvnm-contracts' CommitteeGas puts the worst case at 33M.
     let result = match evm.transact_system_call(Address::ZERO, contract, input.into()) {
         Ok(result) => result,
         // Validation fails alike on every node.
@@ -548,6 +548,7 @@ mod tests {
     use alloy_primitives::{Bytes, U256};
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use reth_ethereum::evm::revm::context::result::HaltReason;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
     use tempo_node::evm::TempoEvmConfig;
     use tempo_precompiles::{
@@ -805,6 +806,11 @@ mod tests {
         Bytes::from_static(&[0x60, 0x00, 0x60, 0x00, 0xfd])
     }
 
+    /// Runtime code that runs out of gas: a store 4 GiB into memory costs more than any limit.
+    fn out_of_gas() -> Bytes {
+        Bytes::from_static(&[0x60, 0x00, 0x63, 0xff, 0xff, 0xff, 0xff, 0x52]) // MSTORE(2^32 - 1, 0)
+    }
+
     /// `computeCommittee`'s answer: these validators, whoever is eligible.
     fn committee(seeds: &[u8]) -> ([u8; 4], Answer) {
         let elected: Vec<Address> = seeds.iter().map(|&seed| address(seed)).collect();
@@ -916,9 +922,30 @@ mod tests {
             IStakingElection::computeCommitteeCall::SELECTOR,
             Answer::With(vec![0x01]),
         )]);
-        for code in [None, Some(reverting()), Some(garbage)] {
+        for code in [None, Some(reverting()), Some(out_of_gas()), Some(garbage)] {
             assert_eq!(elected_at(&election(code)).unwrap(), None);
         }
+    }
+
+    /// Exhausted gas is a halt, not a revert: the fixture above is one.
+    #[test]
+    fn an_election_out_of_gas_halts() {
+        let node = election(Some(out_of_gas()));
+        let mut evm = evm_with_state(&node, node.state(), &TestExecutionNode::header()).unwrap();
+        let call = evm
+            .transact_system_call(Address::ZERO, ELECTION, Bytes::new())
+            .unwrap();
+        assert!(
+            matches!(
+                call.result,
+                ExecutionResult::Halt {
+                    reason: HaltReason::OutOfGas(_),
+                    ..
+                }
+            ),
+            "{:?}",
+            call.result
+        );
     }
 
     #[test]
