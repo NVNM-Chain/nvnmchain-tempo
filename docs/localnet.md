@@ -101,6 +101,16 @@ Remove the volume when a test needs a fresh genesis:
 docker volume rm tempo-localnet-data
 ```
 
+The container runs as UID and GID 10001. A volume first used by an image that ran as root needs its ownership changed once:
+
+```bash
+docker run --rm --user 0 --entrypoint chown \
+  -v tempo-localnet-data:/data \
+  ghcr.io/tempoxyz/tempo-localnet:latest -R 10001:10001 /data
+```
+
+A host directory mounted at `/data` must be writable by that user, or the container started with `--user "$(id -u):$(id -g)"`.
+
 See [`examples/localnet/compose.yaml`](../examples/localnet/compose.yaml) for the equivalent Docker Compose configuration.
 
 ## Configure an SDK
