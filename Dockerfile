@@ -61,6 +61,9 @@ LABEL org.opencontainers.image.vendor="NVNM Chain" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.documentation="https://docs.tempo.xyz"
 
+# Numeric, so `runAsNonRoot` can verify it; the stages below inherit it.
+USER ${TEMPO_UID}:${TEMPO_GID}
+
 # tempo
 FROM base AS tempo
 ARG RUST_PROFILE=profiling
@@ -72,7 +75,6 @@ LABEL org.opencontainers.image.title="tempo"
 # Binaries stay root-owned and world-executable: the runtime user may run them
 # but may not rewrite them.
 COPY --from=builder /app/target/${RUST_PROFILE}/tempo /usr/local/bin/tempo
-USER tempo:tempo
 ENTRYPOINT ["/usr/local/bin/tempo"]
 
 # tempo-localnet
@@ -86,7 +88,6 @@ EXPOSE 8545
 # unprivileged ownership instead of being seeded root-owned.
 VOLUME ["/data"]
 HEALTHCHECK --interval=2s --timeout=2s --start-period=120s --retries=5 CMD ["/usr/local/bin/tempo-localnet", "--health"]
-USER tempo:tempo
 ENTRYPOINT ["/usr/local/bin/tempo-localnet"]
 
 # tempo-sidecar
@@ -94,7 +95,6 @@ FROM base AS tempo-sidecar
 ARG RUST_PROFILE=profiling
 LABEL org.opencontainers.image.title="tempo-sidecar"
 COPY --from=builder /app/target/${RUST_PROFILE}/tempo-sidecar /usr/local/bin/tempo-sidecar
-USER tempo:tempo
 ENTRYPOINT ["/usr/local/bin/tempo-sidecar"]
 
 # tempo-xtask
@@ -102,5 +102,4 @@ FROM base AS tempo-xtask
 ARG RUST_PROFILE=profiling
 LABEL org.opencontainers.image.title="tempo-xtask"
 COPY --from=builder /app/target/${RUST_PROFILE}/tempo-xtask /usr/local/bin/tempo-xtask
-USER tempo:tempo
 ENTRYPOINT ["/usr/local/bin/tempo-xtask"]
