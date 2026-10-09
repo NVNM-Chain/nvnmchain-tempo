@@ -28,6 +28,7 @@ use commonware_cryptography::{
 use commonware_parallel::Strategy;
 use commonware_utils::{N3f1, iter::NonEmpty, ordered::Set};
 use rand_core::CryptoRng;
+use tracing::error;
 
 use crate::equivocation::{Ballot, Signed, Votes, namespace};
 
@@ -38,6 +39,9 @@ type Threshold = vrf::Scheme<PublicKey, MinSig>;
 pub(crate) struct Scheme {
     threshold: Threshold,
     signer: PrivateKey,
+    /// Whether our share sits at our key's place among the participants. Where it does not, a
+    /// vote of ours would fail its own check, so we verify and do not sign.
+    signs: bool,
     /// This chain's [`namespace`], which the signers' own signatures are made under.
     namespace: Namespace,
 }
@@ -49,16 +53,17 @@ impl Scheme {
         chain_id: u64,
         genesis: B256,
     ) -> Self {
-        let me = certificate::Scheme::me(&threshold);
-        assert!(
-            me.is_none_or(
-                |me| threshold.participants().get(me.into()) == Some(&signer.public_key())
-            ),
-            "our share must sit at our key's place among the participants",
-        );
+        let signs = certificate::Scheme::me(&threshold)
+            .is_none_or(|me| threshold.participants().get(me.into()) == Some(&signer.public_key()));
+        if !signs {
+            error!(
+                "our share does not sit at our key's place among the participants; verifying only"
+            );
+        }
         Self {
             threshold,
             signer,
+            signs,
             namespace: namespace(chain_id, genesis),
         }
     }
@@ -168,7 +173,9 @@ impl certificate::Scheme for Scheme {
     type Signature = Signature;
 
     fn me(&self) -> Option<Participant> {
-        certificate::Scheme::me(&self.threshold)
+        self.signs
+            .then(|| certificate::Scheme::me(&self.threshold))
+            .flatten()
     }
 
     fn participants(&self) -> &Set<PublicKey> {
@@ -176,6 +183,9 @@ impl certificate::Scheme for Scheme {
     }
 
     fn sign<D: Digest>(&self, subject: Subject<'_, D>) -> Option<Attestation<Self>> {
+        if !self.signs {
+            return None;
+        }
         let Attestation { signer, signature } = self.threshold.sign(subject)?;
         let signature = Signature {
             threshold: signature.get()?.clone(),
@@ -480,6 +490,29 @@ pub(crate) mod tests {
         let checked = scheme.verify_attestations(&mut rng, subject, votes.clone(), &Sequential);
         assert_eq!(checked.invalid, vec![votes[1].signer]);
         assert_eq!(checked.verified.len(), signers.len() - 1);
+    }
+
+    /// A node whose share is not its key's would sign votes that fail their own check: it
+    /// verifies instead of stopping.
+    #[test]
+    fn a_share_at_another_keys_place_makes_a_verifier() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let signers = signers(6, CHAIN_ID, GENESIS);
+        let proposal = proposal();
+        let subject = Subject::Notarize {
+            proposal: &proposal,
+        };
+        let mismatched = Scheme::new(
+            signers[0].0.clone(),
+            signers[1].1.signer.clone(),
+            CHAIN_ID,
+            GENESIS,
+        );
+        assert_eq!(certificate::Scheme::me(&mismatched), None);
+        assert!(mismatched.sign(subject).is_none());
+
+        let vote = signers[2].1.sign(subject).unwrap();
+        assert!(mismatched.verify_attestation(&mut rng, subject, &vote, &Sequential));
     }
 
     #[test]
