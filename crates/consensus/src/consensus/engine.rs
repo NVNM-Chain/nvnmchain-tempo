@@ -311,6 +311,7 @@ where
             mailbox_size: self.mailbox_size,
             marshal: marshal_mailbox,
             scheme_provider,
+            signer: self.signer.clone(),
             time_to_collect_notarizations: self.time_to_collect_notarizations,
             time_to_retry_nullify_broadcast: self.time_to_retry_nullify_broadcast,
             partition_prefix: format!("{}_epoch_manager", self.partition_prefix),

@@ -41,6 +41,10 @@ pub struct TempoGenesisInfo {
     /// When the election activates, in the style of the hardfork times. Unset means genesis.
     #[serde(skip_serializing_if = "Option::is_none")]
     staking_election_time: Option<u64>,
+    /// From when, at T12 or later, each consensus vote also carries its signer's ed25519
+    /// signature, in the style of the hardfork times. Unset leaves votes as upstream has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attributable_votes_time: Option<u64>,
     /// The fee router factory; from T12 a validator's fee recipient may only be the router it
     /// holds for it (`routerOf`), set by the registry owner, and its blocks must pay it. Unset
     /// leaves recipients as upstream has them.
@@ -137,6 +141,10 @@ impl TempoGenesisInfo {
 
     pub fn fee_router_factory(&self) -> Option<Address> {
         self.fee_router_factory
+    }
+
+    pub fn attributable_votes_time(&self) -> Option<u64> {
+        self.attributable_votes_time
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
@@ -724,6 +732,17 @@ mod tests {
         let genesis = genesis_with(serde_json::json!({ "feeRouterFactory": factory }));
         let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
         assert_eq!(info.fee_router_factory(), Some(factory));
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_attributable_votes_time_is_read() {
+        let genesis = genesis_with(serde_json::json!({ "attributableVotesTime": 7 }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
+        assert_eq!(info.attributable_votes_time(), Some(7));
         assert_eq!(
             super::TempoGenesisInfo::unrecognized_keys(&genesis),
             Vec::<String>::new()

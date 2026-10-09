@@ -4,7 +4,7 @@ pub(super) mod ingress;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub(crate) use actor::Actor;
-use commonware_cryptography::ed25519::PublicKey;
+use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
 pub(crate) use ingress::Mailbox;
 
 use commonware_consensus::types::{FixedEpocher, ViewDelta};
@@ -34,6 +34,8 @@ where
     pub(crate) mailbox_size: NonZeroUsize,
     pub(crate) marshal: crate::alias::marshal::Mailbox,
     pub(crate) scheme_provider: SchemeProvider,
+    /// Signs this node's votes once they are attributable.
+    pub(crate) signer: PrivateKey,
     pub(crate) time_to_collect_notarizations: Duration,
     pub(crate) time_to_retry_nullify_broadcast: Duration,
     pub(crate) partition_prefix: String,

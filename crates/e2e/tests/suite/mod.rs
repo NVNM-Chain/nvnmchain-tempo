@@ -6,6 +6,7 @@ use crate::{
     execution_runtime::{chainspec, test_db_args},
 };
 
+mod attributable_votes;
 mod backfill;
 mod blocked_transfers;
 mod consensus_context;

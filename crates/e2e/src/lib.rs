@@ -154,6 +154,9 @@ pub struct Setup {
 
     /// Election weights of the signers by key order, from genesis.
     pub proposer_weights: Option<Vec<u64>>,
+
+    /// The genesis' `attributableVotesTime`.
+    pub attributable_votes_time: Option<u64>,
 }
 
 impl Setup {
@@ -174,6 +177,14 @@ impl Setup {
             fee_recipient: Address::ZERO,
             with_gossip: false,
             proposer_weights: None,
+            attributable_votes_time: None,
+        }
+    }
+
+    pub fn attributable_votes_time(self, attributable_votes_time: u64) -> Self {
+        Self {
+            attributable_votes_time: Some(attributable_votes_time),
+            ..self
         }
     }
 
@@ -269,6 +280,7 @@ pub async fn setup_validators(
         fee_recipient,
         with_gossip,
         proposer_weights,
+        attributable_votes_time,
         ..
     }: Setup,
 ) -> (Vec<TestingNode<Context>>, ExecutionRuntime) {
@@ -306,6 +318,7 @@ pub async fn setup_validators(
         .with_t12_time(t12_time)
         .with_validators(validators.clone())
         .with_proposer_weights(proposer_weights)
+        .with_attributable_votes_time(attributable_votes_time)
         .launch()
         .unwrap();
 

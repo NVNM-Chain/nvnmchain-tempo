@@ -41,7 +41,10 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 use alloy_consensus::BlockHeader as _;
 use commonware_codec::ReadExt as _;
 use commonware_consensus::{
-    simplex::{self, config::Floor, elector, scheme::bls12381_threshold::vrf::Scheme},
+    Reporter,
+    simplex::{
+        self, config::Floor, elector, scheme::bls12381_threshold::vrf::Scheme, types::Activity,
+    },
     types::{Epoch, EpochDelta, Epocher as _, Height},
 };
 use commonware_cryptography::ed25519::PublicKey;
@@ -66,6 +69,7 @@ use tempo_primitives::TempoHeader;
 use tracing::{Level, Span, debug, error, error_span, info, instrument, warn, warn_span};
 
 use crate::{
+    attributable,
     consensus::Digest,
     epoch::manager::ingress::{EpochTransition, Exit},
     storage::FinalizedBlocksProvider as _,
@@ -123,6 +127,10 @@ where
             "elector_version",
             "the elector version in the most recently started epoch (0 = V0, 1 = V1)",
         );
+        let attributable_votes = context.gauge(
+            "attributable_votes",
+            "whether votes in the most recently started epoch carry their signer's own signature",
+        );
         let how_often_signer = context.counter(
             "how_often_signer",
             "how often a node is a signer; a node is a signer if it has a share",
@@ -141,6 +149,7 @@ where
                 latest_epoch,
                 latest_participants,
                 elector_version,
+                attributable_votes,
                 how_often_signer,
                 how_often_verifier,
             },
@@ -366,12 +375,12 @@ where
                         .zip(units.iter().copied())
                         .collect()
                 });
-                (Floor::Genesis(digest), header.timestamp(), proposer_units)
+                (digest, header.timestamp(), proposer_units)
             }
             None => {
                 let chain_spec = self.config.execution_node.chain_spec();
                 (
-                    Floor::Genesis(Digest(chain_spec.genesis_hash())),
+                    Digest(chain_spec.genesis_hash()),
                     chain_spec.genesis_header().timestamp(),
                     None,
                 )
@@ -399,23 +408,112 @@ where
             elector::RandomVersion::V1 => 1,
         });
 
-        let engine_ctx = self.context.child("simplex").with_attribute("epoch", epoch);
-        let vote = vote_mux.register(epoch.get()).await.unwrap();
-        let certificate = certificates_mux.register(epoch.get()).await.unwrap();
-        let resolver = resolver_mux.register(epoch.get()).await.unwrap();
+        // Chosen as the elector is, by the epoch's preceding boundary: a node expecting the other
+        // format takes these votes for garbage.
+        let chain_spec = self.config.execution_node.chain_spec();
+        let attributable = chain_spec.tempo_hardfork_at(boundary_timestamp).is_t12()
+            && chain_spec
+                .info
+                .attributable_votes_time()
+                .is_some_and(|from| boundary_timestamp >= from);
+        self.metrics
+            .attributable_votes
+            .metric()
+            .set(i64::from(attributable));
 
-        info!(mode = %self.config.verification_mode, "starting simplex engine");
+        let networks = (
+            vote_mux.register(epoch.get()).await.unwrap(),
+            certificates_mux.register(epoch.get()).await.unwrap(),
+            resolver_mux.register(epoch.get()).await.unwrap(),
+        );
 
-        let engine = simplex::Engine::new(
-            engine_ctx,
+        info!(
+            mode = %self.config.verification_mode,
+            attributable,
+            "starting simplex engine"
+        );
+
+        let elector = WeightedRandom::new(elector, proposer_units);
+        let marshal = self.config.marshal.clone();
+        let engine = if attributable {
+            let scheme = attributable::Scheme::new(
+                scheme,
+                self.config.signer.clone(),
+                chain_spec.chain_id(),
+                chain_spec.genesis_hash(),
+            );
+            let certificates = attributable::Certificates(marshal);
+            self.start_engine(epoch, floor, scheme, elector, certificates, networks)
+        } else {
+            self.start_engine(epoch, floor, scheme, elector, marshal, networks)
+        };
+
+        assert!(
+            self.active_epochs.insert(epoch, engine).is_none(),
+            "there must be no other active engine running: this was ensured at \
+            the beginning of this method",
+        );
+
+        info!("started consensus engine backing the epoch");
+
+        let _ = self.metrics.latest_epoch.metric().try_set(epoch.get());
+        self.metrics.active_epochs.metric().inc();
+
+        self.metrics
+            .latest_participants
+            .metric()
+            .set(n_participants as i64);
+        self.metrics
+            .how_often_signer
+            .metric()
+            .inc_by(u64::from(is_signer));
+        self.metrics
+            .how_often_verifier
+            .metric()
+            .inc_by(u64::from(!is_signer));
+
+        Ok(())
+    }
+
+    /// Starts the engine backing `epoch` on top of the block `floor`. The two vote formats are
+    /// two schemes, and so two engine types.
+    fn start_engine<S, F>(
+        &self,
+        epoch: Epoch,
+        floor: Digest,
+        scheme: S,
+        elector: WeightedRandom<PublicKey>,
+        reporter: F,
+        (vote, certificate, resolver): (
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+        ),
+    ) -> Handle<()>
+    where
+        S: simplex::scheme::Scheme<Digest, PublicKey = PublicKey>,
+        WeightedRandom<PublicKey>: elector::Config<S>,
+        F: Reporter<Activity = Activity<S, Digest>>,
+    {
+        simplex::Engine::new(
+            self.context.child("simplex").with_attribute("epoch", epoch),
             simplex::Config {
                 epoch,
-                floor,
+                floor: Floor::Genesis(floor),
                 scheme,
-                elector: WeightedRandom::new(elector, proposer_units),
+                elector,
                 strategy: Sequential,
 
-                reporter: self.config.marshal.clone(),
+                reporter,
                 partition: format!(
                     "{partition_prefix}_consensus_epoch_{epoch}",
                     partition_prefix = self.config.partition_prefix
@@ -443,33 +541,7 @@ where
                 track_historical_votes: true,
             },
         )
-        .start(vote, certificate, resolver);
-
-        assert!(
-            self.active_epochs.insert(epoch, engine).is_none(),
-            "there must be no other active engine running: this was ensured at \
-            the beginning of this method",
-        );
-
-        info!("started consensus engine backing the epoch");
-
-        let _ = self.metrics.latest_epoch.metric().try_set(epoch.get());
-        self.metrics.active_epochs.metric().inc();
-
-        self.metrics
-            .latest_participants
-            .metric()
-            .set(n_participants as i64);
-        self.metrics
-            .how_often_signer
-            .metric()
-            .inc_by(u64::from(is_signer));
-        self.metrics
-            .how_often_verifier
-            .metric()
-            .inc_by(u64::from(!is_signer));
-
-        Ok(())
+        .start(vote, certificate, resolver)
     }
 
     #[instrument(parent = &cause, skip_all, fields(epoch))]
@@ -551,6 +623,7 @@ struct Metrics {
     latest_epoch: Gauge,
     latest_participants: Gauge,
     elector_version: Gauge,
+    attributable_votes: Gauge,
     how_often_signer: Counter,
     how_often_verifier: Counter,
 }

@@ -78,6 +78,7 @@ pub struct Builder {
     initial_dkg_outcome: Option<OnchainDkgOutcome>,
     validators: Option<ordered::Map<PublicKey, ConsensusNodeConfig>>,
     proposer_weights: Option<Vec<u64>>,
+    attributable_votes_time: Option<u64>,
 }
 
 impl Builder {
@@ -88,6 +89,14 @@ impl Builder {
             initial_dkg_outcome: None,
             validators: None,
             proposer_weights: None,
+            attributable_votes_time: None,
+        }
+    }
+
+    pub fn with_attributable_votes_time(self, attributable_votes_time: Option<u64>) -> Self {
+        Self {
+            attributable_votes_time,
+            ..self
         }
     }
 
@@ -132,6 +141,7 @@ impl Builder {
             initial_dkg_outcome,
             validators,
             proposer_weights,
+            attributable_votes_time,
         } = self;
 
         let epoch_length = epoch_length.ok_or_eyre("must specify epoch length")?;
@@ -174,6 +184,14 @@ impl Builder {
         }
 
         genesis.extra_data = initial_dkg_outcome.encode().into();
+
+        if let Some(time) = attributable_votes_time {
+            genesis
+                .config
+                .extra_fields
+                .insert_value("attributableVotesTime".to_string(), time)
+                .unwrap();
+        }
 
         if let Some(weights) = proposer_weights {
             genesis

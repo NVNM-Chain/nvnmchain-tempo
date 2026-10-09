@@ -17,7 +17,7 @@ use commonware_consensus::{
     types::{Participant, Round, View},
 };
 use commonware_cryptography::{
-    Hasher as _, PublicKey, Sha256, bls12381::primitives::variant::Variant,
+    Hasher as _, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
 };
 use commonware_utils::{modulo, ordered::Set};
 
@@ -97,10 +97,15 @@ impl<P> WeightedRandom<P> {
     }
 }
 
-impl<P: PublicKey, V: Variant> Config<vrf::Scheme<P, V>> for WeightedRandom<P> {
-    type Elector = WeightedRandomElector<vrf::Scheme<P, V>>;
+/// For any scheme whose certificates are the threshold scheme's, and so carry the seed.
+impl<S, V> Config<S> for WeightedRandom<S::PublicKey>
+where
+    S: Scheme<Certificate = vrf::Certificate<V>>,
+    V: Variant,
+{
+    type Elector = WeightedRandomElector<S>;
 
-    fn build(self, participants: &Set<P>) -> Self::Elector {
+    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
         assert!(!participants.is_empty(), "no participants");
         let draw = match self.units {
             None => Draw::Uniform {
@@ -161,8 +166,10 @@ fn weighted(ends: &[u64], round: Round, seed: Option<&[u8]>) -> Participant {
     Participant::from_usize(ends.partition_point(|&end| end <= draw))
 }
 
-impl<P: PublicKey, V: Variant> Elector<vrf::Scheme<P, V>>
-    for WeightedRandomElector<vrf::Scheme<P, V>>
+impl<S, V> Elector<S> for WeightedRandomElector<S>
+where
+    S: Scheme<Certificate = vrf::Certificate<V>>,
+    V: Variant,
 {
     fn terms(&self) -> Terms {
         Terms::rotating()
