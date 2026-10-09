@@ -399,6 +399,11 @@ impl HashMapStorageProvider {
         self.block_env.fee_router_factory = factory;
     }
 
+    /// Overrides the genesis' `attributableVotesTime`.
+    pub fn set_attributable_votes_time(&mut self, time: Option<u64>) {
+        self.block_env.attributable_votes_time = time;
+    }
+
     /// Overrides the active hardfork spec.
     pub fn set_spec(&mut self, spec: TempoHardfork) {
         self.spec = spec;

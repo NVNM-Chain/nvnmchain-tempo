@@ -176,7 +176,8 @@ pub enum ConsensusSubcommand {
     SetValidatorFeeRecipient(SetValidatorFeeRecipient),
     /// Set the validator fee token.
     SetValidatorToken(SetValidatorToken),
-    /// Transfer validator ownership
+    /// Transfer validator ownership (refused once consensus votes carry their signer's
+    /// signature: the address is then where the bond is)
     TransferValidatorOwnership(TransferValidatorOwnership),
     /// Look up a validator by etheruem address, e25519 public key, or index.
     Validator(ValidatorInfo),

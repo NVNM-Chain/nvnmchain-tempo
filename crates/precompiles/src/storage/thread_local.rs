@@ -153,6 +153,11 @@ impl StorageCtx {
         self.with_block_env(|block_env| block_env.fee_router_factory)
     }
 
+    /// The genesis' `attributableVotesTime`, if it sets one.
+    pub fn attributable_votes_time(&self) -> Option<u64> {
+        self.with_block_env(|block_env| block_env.attributable_votes_time)
+    }
+
     /// Executes a closure with access to the current Tempo block environment.
     pub fn with_block_env<R>(&self, f: impl FnOnce(&TempoBlockEnv) -> R) -> R {
         Self::with_storage(|s| f(s.block_env()))

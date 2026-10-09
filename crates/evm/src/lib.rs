@@ -203,6 +203,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
                 fee_router_factory: self.chain_spec().info.fee_router_factory(),
+                attributable_votes_time: self.chain_spec().info.attributable_votes_time(),
             },
         })
     }
@@ -259,6 +260,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
                 fee_router_factory: self.chain_spec().info.fee_router_factory(),
+                attributable_votes_time: self.chain_spec().info.attributable_votes_time(),
             },
         })
     }

@@ -33,6 +33,9 @@ pub struct TempoBlockEnv {
 
     /// The genesis' fee router factory, if any, whose `routerOf` binds fee recipients from T12.
     pub fee_router_factory: Option<Address>,
+
+    /// The genesis' `attributableVotesTime`, if any.
+    pub attributable_votes_time: Option<u64>,
 }
 
 impl Default for TempoBlockEnv {
@@ -43,6 +46,7 @@ impl Default for TempoBlockEnv {
             epoch_length: NonZeroU64::MIN,
             proposer_public_key: None,
             fee_router_factory: None,
+            attributable_votes_time: None,
         }
     }
 }
