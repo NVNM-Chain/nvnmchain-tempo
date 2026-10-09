@@ -169,7 +169,8 @@ pub enum ConsensusSubcommand {
     RotateValidator(RotateValidator),
     /// Set the validator Ip Address
     SetValidatorIpAddress(SetValidatorIpAddress),
-    /// Set the validator fee recipient (the registry owner only, from T12)
+    /// Set the validator fee recipient (from T12 the registry owner only, where the genesis names
+    /// a fee router factory)
     SetValidatorFeeRecipient(SetValidatorFeeRecipient),
     /// Set the validator fee token.
     SetValidatorToken(SetValidatorToken),

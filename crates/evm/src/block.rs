@@ -539,9 +539,10 @@ where
             return Err(BlockValidationError::msg("withdrawals are not permitted").into());
         }
 
-        // From T12 a block's fees go to its proposer's registered recipient, zero included, not
-        // one it picks.
+        // From T12, where the genesis names a fee router factory, a block's fees go to its
+        // proposer's registered recipient, zero included, not one it picks.
         if self.evm().cfg.spec.is_t12()
+            && self.evm().block().fee_router_factory.is_some()
             && let Some(proposer) = self.evm().block().proposer_public_key.map(B256::from)
         {
             let ctx = self.evm_mut().ctx_mut();
@@ -2113,6 +2114,7 @@ mod tests {
     }
 
     const ROUTER: Address = Address::new([0x03; 20]);
+    const FACTORY: Address = Address::new([0x05; 20]);
     const PROPOSER_SEED: u64 = 7;
 
     /// A T11 block-2 executor whose proposer was registered in the V2 registry at block 1, with
@@ -2185,7 +2187,9 @@ mod tests {
             let mut db = State::builder().with_bundle_update().build();
             let mut executor = executor_with_registry(&mut db, &chainspec, recipient);
             executor.inner.evm.cfg.spec = TempoHardfork::T12;
-            executor.evm_mut().ctx_mut().block.beneficiary = Address::new([0x04; 20]);
+            let block = &mut executor.evm_mut().ctx_mut().block;
+            block.fee_router_factory = Some(FACTORY);
+            block.beneficiary = Address::new([0x04; 20]);
             let err = executor.apply_pre_execution_changes().unwrap_err();
             assert!(
                 err.to_string()
@@ -2199,12 +2203,20 @@ mod tests {
     }
 
     #[test]
-    fn test_pre_t12_ignores_the_beneficiary() {
-        let chainspec = test_chainspec();
-        let mut db = State::builder().with_bundle_update().build();
-        let mut executor = executor_with_registry(&mut db, &chainspec, ROUTER);
-        executor.evm_mut().ctx_mut().block.beneficiary = Address::new([0x04; 20]);
-        executor.apply_pre_execution_changes().unwrap();
+    fn test_the_beneficiary_is_free_before_t12_or_without_a_factory() {
+        for (spec, factory) in [
+            (TempoHardfork::T11, Some(FACTORY)),
+            (TempoHardfork::T12, None),
+        ] {
+            let chainspec = test_chainspec();
+            let mut db = State::builder().with_bundle_update().build();
+            let mut executor = executor_with_registry(&mut db, &chainspec, ROUTER);
+            executor.inner.evm.cfg.spec = spec;
+            let block = &mut executor.evm_mut().ctx_mut().block;
+            block.fee_router_factory = factory;
+            block.beneficiary = Address::new([0x04; 20]);
+            executor.apply_pre_execution_changes().unwrap();
+        }
     }
 
     #[test]

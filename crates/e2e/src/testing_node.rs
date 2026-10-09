@@ -153,9 +153,8 @@ where
         }
     }
 
-    /// Its own address, as genesis enrols it: from T12 the registry refuses zero.
     pub fn fee_recipient(&self) -> Address {
-        self.chain_address
+        Address::ZERO
     }
 
     pub fn private_key(&self) -> &PrivateKey {

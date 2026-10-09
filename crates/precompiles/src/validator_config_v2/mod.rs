@@ -450,18 +450,18 @@ impl ValidatorConfigV2 {
         Ok(())
     }
 
-    /// From T12 a zero recipient would strand the validator's fees, and where the genesis names
-    /// a fee router factory only the router it holds for `validator` splits them. Reuses
+    /// From T12, where the genesis names a fee router factory, only the router it holds for
+    /// `validator` splits the fees, and a zero recipient would strand them. Reuses
     /// `InvalidValidatorAddress`, so the ABI stays upstream's.
     fn require_fee_recipient(&self, validator: Address, recipient: Address) -> Result<()> {
         if !self.storage.spec().is_t12() {
             return Ok(());
         }
-        if recipient.is_zero() {
-            Err(ValidatorConfigV2Error::invalid_validator_address())?
-        }
-        if let Some(factory) = self.storage.fee_router_factory()
-            && Address::from_word(
+        let Some(factory) = self.storage.fee_router_factory() else {
+            return Ok(());
+        };
+        if recipient.is_zero()
+            || Address::from_word(
                 self.storage
                     .sload(factory, router_of_slot(validator))?
                     .into(),
@@ -544,8 +544,8 @@ impl ValidatorConfigV2 {
     /// - `Unauthorized` — `sender` is not the owner
     /// - `InvalidPublicKey` — `publicKey` is zero or not a valid Ed25519 key
     /// - `PublicKeyAlreadyExists` — the public key is already registered
-    /// - `InvalidValidatorAddress` — `validatorAddress` is zero, or from T12 `feeRecipient` is zero or
-    ///   not the validator's router
+    /// - `InvalidValidatorAddress` — `validatorAddress` is zero, or from T12 with a fee router
+    ///   factory `feeRecipient` is zero or not the validator's router
     /// - `AddressAlreadyHasValidator` — the address belongs to an active validator
     /// - `NotIpPort` / `NotIp` — endpoints fail validation
     /// - `IngressAlreadyExists` — the new ingress is already in use
@@ -789,13 +789,14 @@ impl ValidatorConfigV2 {
     }
 
     /// Updates the fee recipient address for a validator (owner or the validator itself; from
-    /// T12 the owner only).
+    /// T12 with a fee router factory the owner only).
     ///
     /// # Errors
     /// - `NotInitialized` — the contract has not been initialized
     /// - `ValidatorNotFound` / `ValidatorAlreadyDeleted` — `idx` is invalid
     /// - `Unauthorized` — `sender` may not update it
-    /// - `InvalidValidatorAddress` — from T12, `feeRecipient` is zero or not the validator's router
+    /// - `InvalidValidatorAddress` — from T12 with a fee router factory, `feeRecipient` is zero or
+    ///   not the validator's router
     pub fn set_fee_recipient(
         &mut self,
         sender: Address,
@@ -803,7 +804,7 @@ impl ValidatorConfigV2 {
     ) -> Result<()> {
         let mut v = self.get_active_validator(call.idx)?;
         let config = self.config.read()?.require_init()?;
-        if self.storage.spec().is_t12() {
+        if self.storage.spec().is_t12() && self.storage.fee_router_factory().is_some() {
             config.require_owner(sender)?;
         } else {
             config.require_owner_or_validator(sender, v.validator_address)?;
@@ -1620,39 +1621,71 @@ mod tests {
 
     #[test]
     fn test_set_fee_recipient_owner_only_from_t12() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        let (factory, router) = (Address::random(), Address::random());
+        storage.set_fee_router_factory(Some(factory));
+        let owner = Address::random();
+        let validator = Address::random();
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            let mut vc = ValidatorConfigV2::new();
+            vc.initialize(owner)?;
+            vc.storage.set_block_number(200);
+            vc.storage.sstore(
+                factory,
+                router_of_slot(validator),
+                U256::from_be_slice(router.as_slice()),
+            )?;
+            // Before T12 it pays itself, and stays so across the fork.
+            vc.add_validator(
+                owner,
+                make_valid_add_call(validator, "192.168.1.1:8000", "192.168.1.1", validator),
+            )?;
+            Ok(())
+        })?;
+
+        storage.set_spec(TempoHardfork::T12);
+        StorageCtx::enter(&mut storage, || {
+            let mut vc = ValidatorConfigV2::new();
+            let to_router = IValidatorConfigV2::setFeeRecipientCall {
+                idx: 0,
+                feeRecipient: router,
+            };
+            let result = vc.set_fee_recipient(validator, to_router.clone());
+            assert_eq!(result, Err(ValidatorConfigV2Error::unauthorized().into()));
+            assert_eq!(vc.validator_by_address(validator)?.feeRecipient, validator);
+
+            vc.set_fee_recipient(owner, to_router)?;
+            assert_eq!(vc.validator_by_address(validator)?.feeRecipient, router);
+
+            Ok(())
+        })
+    }
+
+    /// Without a fee router factory T12 changes nothing: zero means "unset" and a validator sets
+    /// its own recipient, as upstream.
+    #[test]
+    fn test_t12_without_a_factory_leaves_fee_recipients_free() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T12);
         let owner = Address::random();
         let validator = Address::random();
         StorageCtx::enter(&mut storage, || {
             let mut vc = ValidatorConfigV2::new();
             vc.initialize(owner)?;
-
             vc.storage.set_block_number(200);
             vc.add_validator(
                 owner,
-                make_valid_add_call(validator, "192.168.1.1:8000", "192.168.1.1", validator),
+                make_valid_add_call(validator, "192.168.1.1:8000", "192.168.1.1", Address::ZERO),
             )?;
 
             let elsewhere = Address::random();
-            let result = vc.set_fee_recipient(
+            vc.set_fee_recipient(
                 validator,
                 IValidatorConfigV2::setFeeRecipientCall {
                     idx: 0,
                     feeRecipient: elsewhere,
                 },
-            );
-            assert_eq!(result, Err(ValidatorConfigV2Error::unauthorized().into()));
-            assert_eq!(vc.validator_by_address(validator)?.feeRecipient, validator);
-
-            let router = Address::random();
-            vc.set_fee_recipient(
-                owner,
-                IValidatorConfigV2::setFeeRecipientCall {
-                    idx: 0,
-                    feeRecipient: router,
-                },
             )?;
-            assert_eq!(vc.validator_by_address(validator)?.feeRecipient, router);
+            assert_eq!(vc.validator_by_address(validator)?.feeRecipient, elsewhere);
 
             Ok(())
         })
@@ -1661,6 +1694,8 @@ mod tests {
     #[test]
     fn test_zero_fee_recipient_refused_from_t12() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
+        // No router is created, so `routerOf` is zero as well: zero is refused all the same.
+        storage.set_fee_router_factory(Some(Address::random()));
         let owner = Address::random();
         let (first, second) = (Address::random(), Address::random());
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {

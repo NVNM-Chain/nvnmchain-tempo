@@ -42,7 +42,8 @@ pub struct TempoGenesisInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     staking_election_time: Option<u64>,
     /// The fee router factory; from T12 a validator's fee recipient may only be the router it
-    /// holds for it (`routerOf`). Unset leaves recipients free.
+    /// holds for it (`routerOf`), set by the registry owner, and its blocks must pay it. Unset
+    /// leaves recipients as upstream has them.
     #[serde(skip_serializing_if = "Option::is_none")]
     fee_router_factory: Option<Address>,
     /// Optional override for the general (non-payment) gas limit.
