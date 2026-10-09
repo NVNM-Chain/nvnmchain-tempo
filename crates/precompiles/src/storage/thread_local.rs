@@ -158,6 +158,11 @@ impl StorageCtx {
         self.with_block_env(|block_env| block_env.attributable_votes_time)
     }
 
+    /// The hash of the chain's genesis block.
+    pub fn genesis_hash(&self) -> B256 {
+        self.with_block_env(|block_env| block_env.genesis_hash)
+    }
+
     /// Executes a closure with access to the current Tempo block environment.
     pub fn with_block_env<R>(&self, f: impl FnOnce(&TempoBlockEnv) -> R) -> R {
         Self::with_storage(|s| f(s.block_env()))

@@ -404,6 +404,11 @@ impl HashMapStorageProvider {
         self.block_env.attributable_votes_time = time;
     }
 
+    /// Overrides the hash of the chain's genesis block.
+    pub fn set_genesis_hash(&mut self, genesis: B256) {
+        self.block_env.genesis_hash = genesis;
+    }
+
     /// Overrides the active hardfork spec.
     pub fn set_spec(&mut self, spec: TempoHardfork) {
         self.spec = spec;

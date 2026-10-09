@@ -528,4 +528,77 @@ mod tests {
             assert!(pair(&chain, gathered).is_empty());
         }
     }
+
+    /// The registry checks evidence without the consensus library, from the bytes alone, so the
+    /// two must agree on them and on the namespace.
+    #[test]
+    fn the_registry_reads_evidence_as_the_node_writes_it() {
+        use alloy_primitives::Address;
+        use tempo_chainspec::hardfork::TempoHardfork;
+        use tempo_precompiles::{
+            storage::{StorageCtx, hashmap::HashMapStorageProvider},
+            validator_config_v2::{
+                IEquivocation, IValidatorConfigV2, VALIDATOR_NS_ADD, ValidatorConfigV2,
+            },
+        };
+
+        let (chain_id, genesis) = (787_222, B256::repeat_byte(1));
+        let chain = namespace(chain_id, genesis);
+        let key = PrivateKey::from_seed(1);
+        let (owner, validator) = (Address::repeat_byte(1), Address::repeat_byte(2));
+        let (a, b) = (proposal(2, 1), proposal(2, 2));
+
+        let mut storage = HashMapStorageProvider::new_with_spec(chain_id, TempoHardfork::T12);
+        storage.set_attributable_votes_time(Some(0));
+        storage.set_genesis_hash(genesis);
+        StorageCtx::enter(&mut storage, || {
+            let mut registry = ValidatorConfigV2::new();
+            registry.initialize(owner).unwrap();
+            let config = tempo_validator_config::ValidatorConfig {
+                chain_id,
+                validator_address: validator,
+                public_key: B256::from_slice(key.public_key().as_ref()),
+                ingress: "192.168.1.1:8000".parse().unwrap(),
+                egress: "192.168.1.1".parse().unwrap(),
+            };
+            let signature = key.sign(
+                VALIDATOR_NS_ADD,
+                config.add_validator_message_hash(validator).as_slice(),
+            );
+            registry
+                .add_validator(
+                    owner,
+                    IValidatorConfigV2::addValidatorCall {
+                        validatorAddress: validator,
+                        publicKey: config.public_key,
+                        ingress: config.ingress.to_string(),
+                        egress: config.egress.to_string(),
+                        feeRecipient: validator,
+                        signature: signature.encode().to_vec().into(),
+                    },
+                )
+                .unwrap();
+
+            for (first, second) in [
+                (Ballot::Notarize(a.clone()), Ballot::Notarize(b.clone())),
+                (Ballot::Finalize(a.clone()), Ballot::Finalize(b)),
+                (Ballot::Nullify(round(2)), Ballot::Finalize(a.clone())),
+                (Ballot::Finalize(a), Ballot::Nullify(round(2))),
+            ] {
+                let evidence = Evidence {
+                    signer: key.public_key(),
+                    first: sign(&chain, &key, first),
+                    second: sign(&chain, &key, second),
+                };
+                assert!(evidence.verify(&chain));
+                let found = registry
+                    .equivocator(IEquivocation::equivocatorCall {
+                        evidence: evidence.encode().to_vec().into(),
+                    })
+                    .unwrap();
+                assert_eq!(found.validator, validator);
+                assert_eq!((found.epoch, found.viewNumber), (0, 2));
+            }
+        });
+    }
 }

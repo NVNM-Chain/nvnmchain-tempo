@@ -204,6 +204,7 @@ impl ConfigureEvm for TempoEvmConfig {
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
                 fee_router_factory: self.chain_spec().info.fee_router_factory(),
                 attributable_votes_time: self.chain_spec().info.attributable_votes_time(),
+                genesis_hash: self.chain_spec().genesis_hash(),
             },
         })
     }
@@ -261,6 +262,7 @@ impl ConfigureEvm for TempoEvmConfig {
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
                 fee_router_factory: self.chain_spec().info.fee_router_factory(),
                 attributable_votes_time: self.chain_spec().info.attributable_votes_time(),
+                genesis_hash: self.chain_spec().genesis_hash(),
             },
         })
     }

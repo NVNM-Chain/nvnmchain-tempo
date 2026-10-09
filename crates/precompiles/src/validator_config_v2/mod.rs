@@ -4,8 +4,9 @@
 //! [consensus]: <https://docs.tempo.xyz/protocol/blockspace/consensus>
 
 pub mod dispatch;
+mod equivocation;
 
-pub use tempo_contracts::precompiles::{IValidatorConfigV2, ValidatorConfigV2Error};
+pub use tempo_contracts::precompiles::{IEquivocation, IValidatorConfigV2, ValidatorConfigV2Error};
 use tempo_contracts::precompiles::{VALIDATOR_CONFIG_V2_ADDRESS, ValidatorConfigV2Event};
 use tempo_precompiles_macros::{Storable, contract};
 
@@ -876,12 +877,7 @@ impl ValidatorConfigV2 {
     ) -> Result<()> {
         let mut v = self.get_active_validator(call.idx)?;
         let config = self.config.read()?.require_init()?;
-        if self.storage.spec().is_t12()
-            && self
-                .storage
-                .attributable_votes_time()
-                .is_some_and(|from| self.storage.timestamp() >= U256::from(from))
-        {
+        if self.votes_are_attributable() {
             Err(ValidatorConfigV2Error::unauthorized())?
         }
         config.require_owner_or_validator(sender, v.validator_address)?;

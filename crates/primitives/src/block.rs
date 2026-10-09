@@ -36,6 +36,9 @@ pub struct TempoBlockEnv {
 
     /// The genesis' `attributableVotesTime`, if any.
     pub attributable_votes_time: Option<u64>,
+
+    /// The hash of the chain's genesis block, which attributable votes are signed under.
+    pub genesis_hash: B256,
 }
 
 impl Default for TempoBlockEnv {
@@ -47,6 +50,7 @@ impl Default for TempoBlockEnv {
             proposer_public_key: None,
             fee_router_factory: None,
             attributable_votes_time: None,
+            genesis_hash: B256::ZERO,
         }
     }
 }
