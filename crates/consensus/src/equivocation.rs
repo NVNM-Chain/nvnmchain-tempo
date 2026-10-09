@@ -5,7 +5,10 @@
 //! namespace. A signer that splits the pair between its peers shows each node only one, so a node
 //! keeps what it saw for whoever compares several nodes.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use alloy_primitives::B256;
 use bytes::{Buf, BufMut};
@@ -23,9 +26,14 @@ use commonware_cryptography::{
     ed25519::{PublicKey, Signature},
 };
 use parking_lot::Mutex;
+use tracing::warn;
 
 /// How many rounds a node keeps the votes of.
 const RETAINED_ROUNDS: usize = 4_096;
+
+/// How many disputed rounds a node keeps beyond that, for whoever pairs their votes with other
+/// nodes': a split pair is evidence only once both halves meet.
+const RETAINED_DISPUTED: usize = 1_024;
 
 /// How many pieces of evidence a node keeps.
 const RETAINED_EVIDENCE: usize = 1_024;
@@ -283,7 +291,29 @@ impl<D: Digest> Held<D> {
     }
 }
 
+/// Whether a round's ballots disagree: two proposals voted for, or a nullify beside a finalize.
+/// Another node may then hold the vote that conflicts with one held here.
+fn is_disputed<D: Digest>(signers: &Ballots<D>) -> bool {
+    let ballots = || {
+        signers
+            .values()
+            .flatten()
+            .flatten()
+            .map(|signed| &signed.ballot)
+    };
+    let mut proposals = ballots().filter_map(|ballot| match ballot {
+        Ballot::Notarize(proposal) | Ballot::Finalize(proposal) => Some(proposal),
+        Ballot::Nullify(_) => None,
+    });
+    proposals
+        .next()
+        .is_some_and(|first| proposals.any(|other| other != first))
+        || (ballots().any(|ballot| matches!(ballot, Ballot::Nullify(_)))
+            && ballots().any(|ballot| matches!(ballot, Ballot::Finalize(_))))
+}
+
 /// The signed votes a node saw in its latest rounds, and the evidence they make on their own.
+/// All of it in memory: a restart drops it, so it is read off a node as it appears.
 #[derive(Clone)]
 pub struct Votes<D: Digest> {
     namespace: Namespace,
@@ -292,6 +322,7 @@ pub struct Votes<D: Digest> {
 
 struct Inner<D: Digest> {
     held: Held<D>,
+    disputed: BTreeSet<Round>,
     evidence: Vec<Evidence<D>>,
 }
 
@@ -301,6 +332,7 @@ impl<D: Digest> Votes<D> {
             namespace,
             inner: Arc::new(Mutex::new(Inner {
                 held: Held::default(),
+                disputed: BTreeSet::new(),
                 evidence: Vec::new(),
             })),
         }
@@ -308,6 +340,7 @@ impl<D: Digest> Votes<D> {
 
     /// Keeps a vote the engine reported, not yet verified.
     pub(crate) fn record(&self, signer: PublicKey, signed: Signed<D>) {
+        let round = signed.ballot.round();
         let mut inner = self.inner.lock();
         let evidence = inner
             .held
@@ -315,10 +348,27 @@ impl<D: Digest> Votes<D> {
         if let Some(evidence) = evidence
             && inner.evidence.len() < RETAINED_EVIDENCE
         {
+            warn!(signer = %evidence.signer, ?round, "a validator signed conflicting votes");
             inner.evidence.push(evidence);
         }
-        while inner.held.0.len() > RETAINED_ROUNDS {
-            inner.held.0.pop_first();
+        if inner.held.0.get(&round).is_some_and(is_disputed) {
+            inner.disputed.insert(round);
+        }
+        // The oldest rounds go, but a disputed one outlives them: its other half may be held
+        // elsewhere, and the pairing waits on whoever compares nodes.
+        while inner.held.0.len() > RETAINED_ROUNDS + inner.disputed.len() {
+            let oldest = inner
+                .held
+                .0
+                .keys()
+                .find(|round| !inner.disputed.contains(round));
+            let Some(oldest) = oldest.copied() else { break };
+            inner.held.0.remove(&oldest);
+        }
+        while inner.disputed.len() > RETAINED_DISPUTED {
+            if let Some(oldest) = inner.disputed.pop_first() {
+                inner.held.0.remove(&oldest);
+            }
         }
     }
 
@@ -341,35 +391,9 @@ impl<D: Digest> Votes<D> {
             .collect()
     }
 
-    /// Rounds whose votes disagree, so that another node may hold the other half of a pair: two
-    /// proposals voted for, or a nullify beside a finalize.
+    /// Rounds whose votes disagree, so that another node may hold the other half of a pair.
     pub fn disputed(&self) -> Vec<Round> {
-        let inner = self.inner.lock();
-        inner
-            .held
-            .0
-            .iter()
-            .filter(|(_, signers)| {
-                let ballots = || {
-                    signers
-                        .values()
-                        .flatten()
-                        .flatten()
-                        .map(|signed| &signed.ballot)
-                };
-                let mut proposals = ballots().filter_map(|ballot| match ballot {
-                    Ballot::Notarize(proposal) | Ballot::Finalize(proposal) => Some(proposal),
-                    Ballot::Nullify(_) => None,
-                });
-                let split = proposals
-                    .next()
-                    .is_some_and(|first| proposals.any(|other| other != first));
-                split
-                    || (ballots().any(|ballot| matches!(ballot, Ballot::Nullify(_)))
-                        && ballots().any(|ballot| matches!(ballot, Ballot::Finalize(_))))
-            })
-            .map(|(round, _)| *round)
-            .collect()
+        self.inner.lock().disputed.iter().copied().collect()
     }
 
     /// Evidence this node's own votes make.
@@ -527,6 +551,36 @@ mod tests {
                 .map(|signed| (honest.public_key(), signed));
             assert!(pair(&chain, gathered).is_empty());
         }
+    }
+
+    /// A split seen in one round must still be there when someone compares nodes, however many
+    /// rounds have passed since.
+    #[test]
+    fn a_disputed_round_outlives_the_retained_rounds() {
+        let chain = chain();
+        let (one, other) = (PrivateKey::from_seed(1), PrivateKey::from_seed(2));
+        let node = Votes::new(chain.clone());
+        node.record(
+            one.public_key(),
+            sign(&chain, &one, Ballot::Notarize(proposal(2, 1))),
+        );
+        node.record(
+            other.public_key(),
+            sign(&chain, &other, Ballot::Notarize(proposal(2, 2))),
+        );
+        for view in 3..3 + RETAINED_ROUNDS as u64 + 1 {
+            node.record(
+                one.public_key(),
+                sign(&chain, &one, Ballot::Nullify(round(view))),
+            );
+        }
+
+        assert_eq!(node.disputed(), [round(2)]);
+        assert_eq!(node.in_round(round(2)).len(), 2);
+        assert!(
+            node.in_round(round(3)).is_empty(),
+            "the oldest undisputed round went"
+        );
     }
 
     /// The registry checks evidence without the consensus library, from the bytes alone, so the
