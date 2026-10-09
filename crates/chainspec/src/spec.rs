@@ -111,18 +111,15 @@ impl TempoGenesisInfo {
         genesis.config.extra_fields.deserialize_as()
     }
 
-    /// Keys in extra_fields that do not serialize back out, so Tempo ignores them. A null is
-    /// unset, never reported.
+    /// Keys in extra_fields that no field here reads, so Tempo ignores them: the ones its
+    /// derived `Deserialize` skips.
     #[cfg(feature = "std")]
-    fn unrecognized_keys(&self, genesis: &Genesis) -> Vec<alloc::string::String> {
-        let kept = serde_json::to_value(self).unwrap_or_default();
-        genesis
-            .config
-            .extra_fields
-            .iter()
-            .filter(|(key, value)| !value.is_null() && kept.get(key.as_str()).is_none())
-            .map(|(key, _)| key.clone())
-            .collect()
+    fn unrecognized_keys(genesis: &Genesis) -> Vec<alloc::string::String> {
+        let mut ignored = Vec::new();
+        let fields = serde_json::to_value(&genesis.config.extra_fields).unwrap_or_default();
+        let _: Result<Self, _> =
+            serde_ignored::deserialize(fields, |path| ignored.push(alloc::format!("{path}")));
+        ignored
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -304,7 +301,7 @@ impl TempoChainSpec {
     pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
         let info = TempoGenesisInfo::extract_from(&genesis)?;
         #[cfg(feature = "std")]
-        let unknown_config_keys = info.unrecognized_keys(&genesis);
+        let unknown_config_keys = TempoGenesisInfo::unrecognized_keys(&genesis);
         #[cfg(not(feature = "std"))]
         let unknown_config_keys = alloc::vec::Vec::new();
 
@@ -726,18 +723,24 @@ mod tests {
         let genesis = genesis_with(serde_json::json!({ "feeRouterFactory": factory }));
         let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
         assert_eq!(info.fee_router_factory(), Some(factory));
-        assert_eq!(info.unrecognized_keys(&genesis), Vec::<String>::new());
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
-    fn a_misspelled_key_is_named_and_a_null_one_is_not() {
+    fn a_misspelled_key_is_named_whatever_it_holds() {
         let genesis = genesis_with(serde_json::json!({
             "epochLength": 20,
             "epochLenght": 20,
+            "t12Time": null,
             "t12Tme": null,
         }));
-        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
-        assert_eq!(info.unrecognized_keys(&genesis), ["epochLenght"]);
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            ["epochLenght", "t12Tme"]
+        );
     }
 
     /// A genesis carrying `extra` alongside the fields every genesis needs.
