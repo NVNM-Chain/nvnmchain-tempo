@@ -2,8 +2,8 @@
 //!
 //! Once an epoch's DKG outcome carries proposer units, a seat proposes in proportion to its
 //! election weight, quantized to [`UNITS`] and capped at [`CAP_BPS`]. Voting stays one vote per
-//! seat. Units come only from T12, where upstream's schedule is [`RandomVersion::V1`], which
-//! equal units reproduce.
+//! seat. Units come only from T12, where upstream's schedule is [`RandomVersion::V1`]: one unit a
+//! seat reproduces it exactly, equal larger units only its odds.
 
 use std::{collections::BTreeMap, marker::PhantomData};
 
