@@ -49,12 +49,8 @@ ENV CARGO_INCREMENTAL=0 \
 
 COPY --from=planner /app/recipe.json recipe.json
 
-# Deliberately not `--locked`: cargo-chef cooks a masked skeleton whose member
-# versions do not match the real Cargo.lock, so the flag is unreliable here.
-# It is not a gap - this stage only warms the dependency cache, and the build
-# that actually produces the shipped binaries (Dockerfile) runs `--locked`
-# against the real tree, rebuilding anything whose resolution differs.
+# `--locked` as in Dockerfile: cargo-chef masks member versions in the skeleton's manifests and lockfile alike.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry-${TARGETARCH} \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git-${TARGETARCH} \
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
-    cargo chef cook --profile ${RUST_PROFILE} --features "${RUST_FEATURES}" --recipe-path recipe.json
+    cargo chef cook --locked --profile ${RUST_PROFILE} --features "${RUST_FEATURES}" --recipe-path recipe.json
