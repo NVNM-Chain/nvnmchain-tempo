@@ -43,7 +43,7 @@ RUN set -eux; \
     # every setuid/setgid bit the base layer ships (su, mount, chsh, ...).
     # Defence in depth: it removes the usual local-escalation primitives from
     # the filesystem even if a process is somehow compromised.
-    find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} +; \
     groupadd --gid "${TEMPO_GID}" tempo; \
     useradd --uid "${TEMPO_UID}" --gid "${TEMPO_GID}" \
         --home-dir /data --no-create-home --shell /usr/sbin/nologin tempo
