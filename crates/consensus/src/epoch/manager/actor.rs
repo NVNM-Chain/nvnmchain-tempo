@@ -442,8 +442,12 @@ where
                 chain_spec.chain_id(),
                 chain_spec.genesis_hash(),
             );
-            let certificates = attributable::Certificates(marshal);
-            self.start_engine(epoch, floor, scheme, elector, certificates, networks)
+            let recorder = attributable::Recorder {
+                scheme: scheme.clone(),
+                votes: self.config.votes.clone(),
+                certificates: marshal,
+            };
+            self.start_engine(epoch, floor, scheme, elector, recorder, networks)
         } else {
             self.start_engine(epoch, floor, scheme, elector, marshal, networks)
         };

@@ -10,6 +10,7 @@ pub(crate) mod config;
 pub mod consensus;
 pub(crate) mod dkg;
 pub(crate) mod epoch;
+pub mod equivocation;
 pub(crate) mod executor;
 pub mod feed;
 pub mod finalization_verifier;

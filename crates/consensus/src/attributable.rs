@@ -2,20 +2,20 @@
 //!
 //! A threshold partial signature is no evidence against its signer: a quorum of them forges
 //! anyone's. So each vote also carries its signer's ed25519 signature, without which it does not
-//! count, and two of those over conflicting votes are proof anyone can check. Certificates stay
-//! the threshold scheme's, byte for byte.
+//! count; [`crate::equivocation`] is what two of those prove. Certificates stay the threshold
+//! scheme's, byte for byte.
 
 use std::collections::BTreeMap;
 
 use alloy_primitives::B256;
 use bytes::{Buf, BufMut};
 use commonware_actor::Feedback;
-use commonware_codec::{Error, FixedSize, Read, ReadExt as _, Write};
+use commonware_codec::{Encode, Error, FixedSize, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Reporter,
     simplex::{
         scheme::{Namespace, bls12381_threshold::vrf},
-        types::{Activity, Finalization, Notarization, Subject},
+        types::{Activity, Finalization, Finalize, Notarization, Notarize, Nullify, Subject},
     },
     types::Participant,
 };
@@ -29,6 +29,8 @@ use commonware_parallel::Strategy;
 use commonware_utils::{N3f1, iter::NonEmpty, ordered::Set};
 use rand_core::CryptoRng;
 
+use crate::equivocation::{Ballot, Signed, Votes, namespace};
+
 type Threshold = vrf::Scheme<PublicKey, MinSig>;
 
 /// The threshold scheme, with every vote also signed by its signer's ed25519 key.
@@ -36,9 +38,7 @@ type Threshold = vrf::Scheme<PublicKey, MinSig>;
 pub(crate) struct Scheme {
     threshold: Threshold,
     signer: PrivateKey,
-    /// Carries the chain id and genesis hash: the threshold scheme's namespace is the same on
-    /// every chain, and a key that signs on two chains, or on one that was restarted from a new
-    /// genesis, has not signed twice.
+    /// This chain's [`namespace`], which the signers' own signatures are made under.
     namespace: Namespace,
 }
 
@@ -56,17 +56,10 @@ impl Scheme {
             ),
             "our share must sit at our key's place among the participants",
         );
-        let namespace = [
-            crate::config::NAMESPACE,
-            b"_ATTRIBUTABLE_",
-            &chain_id.to_be_bytes(),
-            genesis.as_slice(),
-        ]
-        .concat();
         Self {
             threshold,
             signer,
-            namespace: Namespace::new(&namespace),
+            namespace: namespace(chain_id, genesis),
         }
     }
 
@@ -282,11 +275,41 @@ impl certificate::Scheme for Scheme {
     }
 }
 
-/// Hands a reporter of the threshold scheme the certificates an engine reports under [`Scheme`].
+/// Hands a reporter of the threshold scheme the certificates an engine reports under [`Scheme`],
+/// and keeps the votes it reports.
 #[derive(Clone)]
-pub(crate) struct Certificates<R>(pub(crate) R);
+pub(crate) struct Recorder<R, D: Digest> {
+    pub(crate) scheme: Scheme,
+    pub(crate) votes: Votes<D>,
+    pub(crate) certificates: R,
+}
 
-impl<R, D> Reporter for Certificates<R>
+impl<R, D: Digest> Recorder<R, D> {
+    fn keep(&self, ballot: Ballot<D>, attestation: &Attestation<Scheme>) {
+        if let Some(signature) = attestation.signature.get()
+            && let Some(signer) = self
+                .scheme
+                .threshold
+                .participants()
+                .get(attestation.signer.into())
+        {
+            let signed = Signed {
+                ballot,
+                signature: signature.identity.clone(),
+            };
+            self.votes.record(signer.clone(), signed);
+        }
+    }
+}
+
+/// The two votes of a conflict the engine reports. It exposes neither, but encodes one after the
+/// other.
+fn halves<A: Read<Cfg = ()>, B: Read<Cfg = ()>>(conflict: &impl Encode) -> Option<(A, B)> {
+    let mut encoded = conflict.encode();
+    Some((A::read(&mut encoded).ok()?, B::read(&mut encoded).ok()?))
+}
+
+impl<R, D> Reporter for Recorder<R, D>
 where
     R: Reporter<Activity = Activity<Threshold, D>>,
     D: Digest,
@@ -294,32 +317,60 @@ where
     type Activity = Activity<Scheme, D>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        // Marshal reads no other activity.
-        self.0.report(match activity {
+        let notarize =
+            |vote: Notarize<Scheme, D>| (Ballot::Notarize(vote.proposal), vote.attestation);
+        let nullify = |vote: Nullify<Scheme>| (Ballot::Nullify(vote.round), vote.attestation);
+        let finalize =
+            |vote: Finalize<Scheme, D>| (Ballot::Finalize(vote.proposal), vote.attestation);
+        let votes = match activity {
+            // Marshal reads no other activity.
             Activity::Notarization(Notarization {
                 proposal,
                 certificate,
-            }) => Activity::Notarization(Notarization {
-                proposal,
-                certificate,
-            }),
+            }) => {
+                return self
+                    .certificates
+                    .report(Activity::Notarization(Notarization {
+                        proposal,
+                        certificate,
+                    }));
+            }
             Activity::Finalization(Finalization {
                 proposal,
                 certificate,
-            }) => Activity::Finalization(Finalization {
-                proposal,
-                certificate,
-            }),
-            _ => return Feedback::Ok,
-        })
+            }) => {
+                return self
+                    .certificates
+                    .report(Activity::Finalization(Finalization {
+                        proposal,
+                        certificate,
+                    }));
+            }
+            Activity::Certification(_) | Activity::Nullification(_) => return Feedback::Ok,
+            Activity::Notarize(vote) => vec![notarize(vote)],
+            Activity::Nullify(vote) => vec![nullify(vote)],
+            Activity::Finalize(vote) => vec![finalize(vote)],
+            Activity::ConflictingNotarize(conflict) => halves(&conflict)
+                .map(|(first, second)| vec![notarize(first), notarize(second)])
+                .unwrap_or_default(),
+            Activity::ConflictingFinalize(conflict) => halves(&conflict)
+                .map(|(first, second)| vec![finalize(first), finalize(second)])
+                .unwrap_or_default(),
+            Activity::NullifyFinalize(conflict) => halves(&conflict)
+                .map(|(first, second)| vec![nullify(first), finalize(second)])
+                .unwrap_or_default(),
+        };
+        for (ballot, attestation) in votes {
+            self.keep(ballot, &attestation);
+        }
+        Feedback::Ok
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use commonware_codec::Encode as _;
+pub(crate) mod tests {
     use commonware_consensus::{
-        simplex::types::Proposal,
+        simplex::types::{ConflictingFinalize, ConflictingNotarize, NullifyFinalize, Proposal},
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
@@ -334,12 +385,12 @@ mod tests {
     use super::*;
     use crate::consensus::Digest;
 
-    const CHAIN_ID: u64 = 787_222;
-    const GENESIS: B256 = B256::repeat_byte(1);
+    pub(crate) const CHAIN_ID: u64 = 787_222;
+    pub(crate) const GENESIS: B256 = B256::repeat_byte(1);
 
     /// Four signers over one dealt output, each under the threshold scheme and under [`Scheme`].
     /// The same `seed` deals the same keys and shares.
-    fn signers(seed: u64, chain_id: u64, genesis: B256) -> Vec<(Threshold, Scheme)> {
+    pub(crate) fn signers(seed: u64, chain_id: u64, genesis: B256) -> Vec<(Threshold, Scheme)> {
         let mut rng = StdRng::seed_from_u64(seed);
         let keys: Vec<_> = (0..4).map(|_| PrivateKey::random(&mut rng)).collect();
         let players = ordered::Set::try_from_iter(keys.iter().map(|key| key.public_key())).unwrap();
@@ -460,6 +511,55 @@ mod tests {
                     .1
                     .verify_attestation(&mut rng, subject, &moved, &Sequential)
             );
+        }
+    }
+
+    /// Takes the certificates a [`Recorder`] under test hands on.
+    #[derive(Clone)]
+    struct Nowhere;
+
+    impl Reporter for Nowhere {
+        type Activity = Activity<Threshold, Digest>;
+
+        fn report(&mut self, _: Self::Activity) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    #[test]
+    fn a_conflict_the_engine_reports_is_kept_as_evidence() {
+        let signers = signers(5, CHAIN_ID, GENESIS);
+        let double = &signers[1].1;
+        let (first, round) = (proposal(), proposal().round);
+        let second = Proposal::new(round, View::new(1), Digest(B256::repeat_byte(2)));
+        let notarize = |proposal: &Proposal<Digest>| Notarize::sign(double, proposal.clone());
+        let finalize = |proposal: &Proposal<Digest>| Finalize::sign(double, proposal.clone());
+
+        for conflict in [
+            Activity::ConflictingNotarize(ConflictingNotarize::new(
+                notarize(&first).unwrap(),
+                notarize(&second).unwrap(),
+            )),
+            Activity::ConflictingFinalize(ConflictingFinalize::new(
+                finalize(&first).unwrap(),
+                finalize(&second).unwrap(),
+            )),
+            Activity::NullifyFinalize(NullifyFinalize::new(
+                Nullify::sign::<Digest>(double, round).unwrap(),
+                finalize(&first).unwrap(),
+            )),
+        ] {
+            let votes = Votes::new(namespace(CHAIN_ID, GENESIS));
+            let mut recorder = Recorder {
+                scheme: signers[0].1.clone(),
+                votes: votes.clone(),
+                certificates: Nowhere,
+            };
+            recorder.report(conflict);
+
+            let evidence = votes.evidence();
+            assert_eq!(evidence.len(), 1);
+            assert!(evidence[0].verify(&namespace(CHAIN_ID, GENESIS)));
         }
     }
 

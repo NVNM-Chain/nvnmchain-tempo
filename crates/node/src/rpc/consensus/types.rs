@@ -2,7 +2,7 @@
 
 use std::fmt::Display;
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use futures::Future;
 use reth_primitives_traits::SealedOrRecoveredBlock;
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,22 @@ where
     }
 }
 
+/// A consensus round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RoundId {
+    pub epoch: u64,
+    pub view: u64,
+}
+
+/// A vote under its signer's own signature, as a node received it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedVote {
+    /// The signer's ed25519 public key.
+    pub signer: B256,
+    /// The vote and the signature over it, encoded.
+    pub vote: Bytes,
+}
+
 /// Trait for accessing consensus feed data.
 pub trait ConsensusFeed: Send + Sync + 'static {
     /// Get a finalization by query (supports `Latest` or `Height`).
@@ -136,6 +152,21 @@ pub trait ConsensusFeed: Send + Sync + 'static {
 
     /// Subscribe to consensus events.
     fn subscribe(&self) -> impl Future<Output = Option<broadcast::Receiver<Event>>> + Send;
+
+    /// Encoded evidence this node holds of validators that signed conflicting votes.
+    fn equivocations(&self) -> Vec<Bytes> {
+        Vec::new()
+    }
+
+    /// Rounds whose votes disagree at this node, where another may hold a conflicting one.
+    fn disputed_rounds(&self) -> Vec<RoundId> {
+        Vec::new()
+    }
+
+    /// The signed votes this node holds for `round`.
+    fn votes(&self, _round: RoundId) -> Vec<SignedVote> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

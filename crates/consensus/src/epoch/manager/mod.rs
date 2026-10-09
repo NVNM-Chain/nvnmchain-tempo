@@ -16,7 +16,10 @@ use rand_core::{CryptoRng, Rng};
 use tempo_node::TempoFullNode;
 
 use crate::{
-    VerificationMode, consensus::application::Application, epoch::scheme_provider::SchemeProvider,
+    VerificationMode,
+    consensus::{Digest, application::Application},
+    epoch::scheme_provider::SchemeProvider,
+    equivocation::Votes,
 };
 
 pub(crate) struct Config<TContext, TBlocker>
@@ -36,6 +39,8 @@ where
     pub(crate) scheme_provider: SchemeProvider,
     /// Signs this node's votes once they are attributable.
     pub(crate) signer: PrivateKey,
+    /// The attributable votes this node sees.
+    pub(crate) votes: Votes<Digest>,
     pub(crate) time_to_collect_notarizations: Duration,
     pub(crate) time_to_retry_nullify_broadcast: Duration,
     pub(crate) partition_prefix: String,

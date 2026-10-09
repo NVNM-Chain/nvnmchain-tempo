@@ -162,6 +162,8 @@ pub enum ConsensusSubcommand {
     DeactivateValidator(DeactivateValidator),
     /// Encrypt an existing ed25519 signing key using a passphrase.
     EncryptSigningKey(EncryptSigningKey),
+    /// Find validators that signed conflicting votes, from what several nodes received.
+    Equivocations(Equivocations),
     /// Generates an ed25519 signing key pair to be used in consensus.
     #[command(alias = "generate-private-key")]
     GenerateSigningKey(GenerateSigningKey),
@@ -196,6 +198,7 @@ impl ConsensusSubcommand {
             Self::SetValidatorFeeRecipient(args) => args.run().await,
             Self::SetValidatorToken(args) => args.run().await,
             Self::EncryptSigningKey(args) => args.run(),
+            Self::Equivocations(args) => args.run().await,
             Self::GenerateSigningKey(args) => args.run(),
             Self::ShowVerificationKey(args) => args.run(),
             Self::Validator(args) => args.run().await,
@@ -1366,6 +1369,119 @@ struct InfoOutput {
     next_full_dkg_epoch: u64,
     /// List of validators participating in the DKG
     validators: Vec<ValidatorOutput>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Equivocations {
+    /// RPC URLs of the nodes whose votes to compare. A validator that sends its peers different
+    /// votes is found only when nodes that received each are among them.
+    #[arg(long = "rpc-url", required = true)]
+    rpc_urls: Vec<String>,
+}
+
+/// Evidence that `signer` signed conflicting votes in a round.
+#[derive(Debug, Serialize)]
+struct EquivocationOutput {
+    signer: B256,
+    epoch: u64,
+    view: u64,
+    /// The encoded evidence.
+    evidence: Bytes,
+}
+
+impl Equivocations {
+    async fn run(self) -> eyre::Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use tempo_consensus::{
+            consensus::Digest,
+            equivocation::{Evidence, Signed, namespace, pair},
+        };
+        use tempo_node::rpc::consensus::{RoundId, SignedVote};
+
+        let mut providers = Vec::new();
+        for url in &self.rpc_urls {
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(url)
+                .await
+                .wrap_err_with(|| format!("failed to connect to `{url}`"))?;
+            providers.push(provider);
+        }
+        let first = providers.first().ok_or_eyre("no RPC URL given")?;
+        let chain_id = first
+            .get_chain_id()
+            .await
+            .wrap_err("failed to get chain id")?;
+        let genesis = first
+            .get_block_by_number(0.into())
+            .hashes()
+            .await
+            .wrap_err("failed to get the genesis block")?
+            .ok_or_eyre("genesis block not found")?
+            .header
+            .hash;
+        let chain = namespace(chain_id, genesis);
+
+        // The nodes are not trusted: only evidence whose signatures hold is kept, one per signer
+        // and round.
+        let mut found = BTreeMap::new();
+        let mut keep = |evidence: Evidence<Digest>| {
+            if evidence.verify(&chain) {
+                found
+                    .entry((evidence.signer.clone(), evidence.first.ballot.round()))
+                    .or_insert(evidence);
+            }
+        };
+
+        let mut disputed = BTreeSet::new();
+        for (provider, url) in providers.iter().zip(&self.rpc_urls) {
+            let held: Vec<Bytes> = provider
+                .raw_request("consensus_getEquivocations".into(), ())
+                .await
+                .wrap_err_with(|| format!("failed to get equivocations from `{url}`"))?;
+            held.iter()
+                .filter_map(|evidence| Evidence::decode(evidence.as_ref()).ok())
+                .for_each(&mut keep);
+            let rounds: Vec<RoundId> = provider
+                .raw_request("consensus_getDisputedRounds".into(), ())
+                .await
+                .wrap_err_with(|| format!("failed to get disputed rounds from `{url}`"))?;
+            disputed.extend(rounds);
+        }
+
+        // In a disputed round another node may hold the vote that conflicts with one held here.
+        for round in disputed {
+            let mut votes = Vec::new();
+            for (provider, url) in providers.iter().zip(&self.rpc_urls) {
+                let held: Vec<SignedVote> = provider
+                    .raw_request("consensus_getVotes".into(), (round,))
+                    .await
+                    .wrap_err_with(|| format!("failed to get votes from `{url}`"))?;
+                votes.extend(held.iter().filter_map(|held| {
+                    Some((
+                        PublicKey::decode(held.signer.as_slice()).ok()?,
+                        Signed::<Digest>::decode(held.vote.as_ref()).ok()?,
+                    ))
+                }));
+            }
+            pair(&chain, votes).into_iter().for_each(&mut keep);
+        }
+
+        let output: Vec<_> = found
+            .into_values()
+            .map(|evidence| {
+                let round = evidence.first.ballot.round();
+                EquivocationOutput {
+                    signer: B256::from_slice(evidence.signer.as_ref()),
+                    epoch: round.epoch().get(),
+                    view: round.view().get(),
+                    evidence: evidence.encode().into(),
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        Ok(())
+    }
 }
 
 #[derive(Debug, clap::Args)]

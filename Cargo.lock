@@ -3211,6 +3211,7 @@ dependencies = [
  "pin-project",
  "rand 0.10.2",
  "rand_core 0.10.1",
+ "rand_distr 0.6.0",
  "rayon",
  "thiserror 2.0.18",
  "tracing",

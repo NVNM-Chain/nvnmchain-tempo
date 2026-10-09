@@ -87,6 +87,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-primitives = { workspace = true, features = ["arbitrary", "test-utils"] }
 tempo-validator-config.workspace = true

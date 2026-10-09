@@ -1,15 +1,27 @@
 //! Validators keep finalizing across the epoch whose votes first carry their signer's signature.
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    time::{Duration, UNIX_EPOCH},
+};
 
+use commonware_codec::DecodeExt as _;
 use commonware_consensus::types::{Epoch, Epocher as _, FixedEpocher};
+use commonware_cryptography::ed25519::PublicKey;
 use commonware_macros::test_traced;
 use commonware_runtime::{
     Runner as _,
     deterministic::{Config, Runner},
 };
 use commonware_utils::NZU64;
-use futures::future::join_all;
+use futures::{channel::oneshot, future::join_all};
+use jsonrpsee::http_client::HttpClientBuilder;
+use reth_ethereum::chainspec::EthChainSpec as _;
+use tempo_consensus::{
+    consensus::Digest,
+    equivocation::{Signed, namespace},
+};
+use tempo_node::rpc::consensus::{RoundId, TempoConsensusApiClient as _};
 
 use crate::{
     Setup, connect_execution_peers, connect_execution_to_peers,
@@ -103,4 +115,65 @@ fn a_validator_restarts_within_an_epoch_of_attributable_votes() {
             Some(1)
         );
     });
+}
+
+/// A node serves the votes it received under their signers' signatures, and among honest
+/// validators holds no evidence.
+#[tokio::test]
+#[test_traced]
+async fn a_node_serves_the_signed_votes_it_received() {
+    let _ = tempo_eyre::install();
+
+    let setup = Setup::new(crate::VERIFICATION_MODE)
+        .how_many_signers(4)
+        .epoch_length(100)
+        .attributable_votes_time(0);
+    let cfg = Config::default().with_seed(setup.seed);
+
+    let (node_tx, node_rx) = oneshot::channel();
+    let (done_tx, done_rx) = oneshot::channel::<()>();
+    let executor = std::thread::spawn(move || {
+        Runner::from(cfg).start(|mut context| async move {
+            let (mut validators, _execution_runtime) = setup_validators(&mut context, setup).await;
+            join_all(validators.iter_mut().map(|node| node.start(&context))).await;
+            connect_execution_peers(&validators).await;
+            wait_for_metrics(&context, |metrics| {
+                metrics.consensus_at_height(5) == validators.len()
+            })
+            .await;
+
+            let execution = validators[0].execution();
+            let rpc: SocketAddr = execution.rpc_server_handles.rpc.http_local_addr().unwrap();
+            let chain = execution.chain_spec();
+            node_tx
+                .send((rpc, chain.chain_id(), chain.genesis_hash()))
+                .unwrap();
+            let _ = done_rx.await;
+        });
+    });
+
+    let (rpc, chain_id, genesis) = node_rx.await.unwrap();
+    let client = HttpClientBuilder::default()
+        .build(format!("http://{rpc}"))
+        .unwrap();
+    let chain = namespace(chain_id, genesis);
+
+    // By height five, a quorum signed in some early view of the first epoch.
+    let mut most = 0;
+    for view in 1..=5 {
+        let votes = client.get_votes(RoundId { epoch: 0, view }).await.unwrap();
+        let mut signers = std::collections::BTreeSet::new();
+        for vote in votes {
+            let signer = PublicKey::decode(vote.signer.as_slice()).unwrap();
+            let signed = Signed::<Digest>::decode(vote.vote.as_ref()).unwrap();
+            assert!(signed.verify(&chain, &signer));
+            signers.insert(signer);
+        }
+        most = most.max(signers.len());
+    }
+    assert!(most >= 3, "votes of {most} signers");
+    assert!(client.get_equivocations().await.unwrap().is_empty());
+
+    drop(done_tx);
+    executor.join().unwrap();
 }
