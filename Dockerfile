@@ -54,7 +54,8 @@ RUN chown "${TEMPO_UID}:${TEMPO_GID}" /data
 # The node resolves a few paths (account store, extension registry) from $HOME
 # via `dirs_next`. Root's default of /root is unwritable once the image drops
 # to an unprivileged user, so point it at the data directory the image already
-# owns. Deployments that pass an explicit --datadir are unaffected.
+# owns. Deployments that pass an explicit --datadir are unaffected; without
+# one the chain moves from /root/.local/share/reth to /data/.local/share/reth.
 ENV HOME=/data
 
 LABEL org.opencontainers.image.vendor="NVNM Chain" \
