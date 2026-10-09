@@ -21,10 +21,7 @@ WORKDIR /app
 
 FROM chef AS planner
 
-# `COPY . .` lands in layers that CI exports to a registry buildcache
-# (ghcr.io/<owner>/tempo-buildcache). Anything the build context carries is
-# therefore published, which is why .dockerignore excludes credential-shaped
-# files rather than relying on the final image being multi-stage.
+# The whole build context lands in this stage's layer; .dockerignore keeps credential-shaped files out of it.
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 

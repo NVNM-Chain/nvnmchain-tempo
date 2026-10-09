@@ -25,6 +25,8 @@ default_*_*.profraw
 **/.env.*
 **/*.pem
 **/*.key
+**/*.age
+**/signing.share
 **/*.p12
 **/*.pfx
 **/*.jks
@@ -38,3 +40,4 @@ default_*_*.profraw
 **/.netrc
 **/.npmrc
 **/secrets/
+**/*secret*.y*ml
