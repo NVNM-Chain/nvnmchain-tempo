@@ -2,13 +2,8 @@
 FROM ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main@sha256:5c1914f4c324b0d6c987b734ba41841606e4f37213e0414ad2fa86dec79630d7
 ARG DEBIAN_FRONTEND=noninteractive
 
-# sccache becomes RUSTC_WRAPPER for every cross build, so its tarball is
-# version-pinned and sha256-verified inside the script. Bump SCCACHE_VERSION
-# and the matching digest together in sccache-prebuilt.sh.
-ARG SCCACHE_VERSION=v0.18.0
-ENV SCCACHE_VERSION=${SCCACHE_VERSION}
-
+# sccache becomes RUSTC_WRAPPER for every cross build; the script pins its version and sha256.
 COPY ./contrib/cross/sccache-prebuilt.sh /sccache.sh
-RUN /sccache.sh x86_64-unknown-linux-musl
+RUN /sccache.sh
 
 ENV RUSTC_WRAPPER="/usr/bin/sccache"
