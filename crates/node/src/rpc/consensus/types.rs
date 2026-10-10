@@ -130,7 +130,7 @@ pub struct RoundId {
     pub view: u64,
 }
 
-/// A vote under its signer's own signature, as a node received it.
+/// A vote under the signature of its signer's vote key, as a node received it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedVote {
     /// The signer's ed25519 public key.

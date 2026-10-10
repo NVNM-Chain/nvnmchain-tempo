@@ -76,6 +76,7 @@ fn generate_consensus_node_config(
         next_players: shares.keys().clone(),
         is_next_full_dkg: false,
         proposer_units: None,
+        vote_keys: None,
     };
 
     let verifier_keys = repeat_with(|| PrivateKey::random(&mut *rng))
@@ -157,6 +158,9 @@ pub struct Setup {
 
     /// The genesis' `attributableVotesTime`.
     pub attributable_votes_time: Option<u64>,
+
+    /// How many of the signers, the last by key, the registry holds no vote key for.
+    pub signers_without_vote_key: usize,
 }
 
 impl Setup {
@@ -178,12 +182,20 @@ impl Setup {
             with_gossip: false,
             proposer_weights: None,
             attributable_votes_time: None,
+            signers_without_vote_key: 0,
         }
     }
 
     pub fn attributable_votes_time(self, attributable_votes_time: u64) -> Self {
         Self {
             attributable_votes_time: Some(attributable_votes_time),
+            ..self
+        }
+    }
+
+    pub fn signers_without_vote_key(self, signers: usize) -> Self {
+        Self {
+            signers_without_vote_key: signers,
             ..self
         }
     }
@@ -281,6 +293,7 @@ pub async fn setup_validators(
         with_gossip,
         proposer_weights,
         attributable_votes_time,
+        signers_without_vote_key,
         ..
     }: Setup,
 ) -> (Vec<TestingNode<Context>>, ExecutionRuntime) {
@@ -319,6 +332,7 @@ pub async fn setup_validators(
         .with_validators(validators.clone())
         .with_proposer_weights(proposer_weights)
         .with_attributable_votes_time(attributable_votes_time)
+        .with_signers_without_vote_key(signers_without_vote_key)
         .launch()
         .unwrap();
 

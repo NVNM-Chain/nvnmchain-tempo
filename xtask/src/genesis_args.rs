@@ -64,7 +64,7 @@ use tempo_precompiles::{
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
-    validator_config_v2::ValidatorConfigV2,
+    validator_config_v2::{ValidatorConfigV2, VoteKey},
 };
 
 /// Generate genesis allocation file for testing
@@ -233,6 +233,12 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     fee_router_factory: Option<Address>,
 
+    /// From when, at T12 or later, consensus votes carry the signature of their signer's vote
+    /// key. Each genesis validator gets its key, derived from its signing key, in the registry
+    /// and in the first epoch's DKG outcome. Unset leaves votes as upstream has them.
+    #[arg(long)]
+    attributable_votes_time: Option<u64>,
+
     /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
     /// networks want.
     #[arg(long)]
@@ -255,7 +261,18 @@ impl ConsensusConfig {
             .unwrap(),
             is_next_full_dkg: false,
             proposer_units: None,
+            vote_keys: None,
         }
+    }
+
+    /// Each player's vote key, as the registry is seeded with them.
+    fn vote_keys(&self) -> Vec<Option<VoteKey>> {
+        let vote_key = |player: &PublicKey| {
+            let validator = self.validators.iter().find(|v| &v.public_key() == player)?;
+            let signing_key = validator.signing_key.clone().into_inner();
+            Some(tempo_validator_config::VoteKeypair::derive(&signing_key).public())
+        };
+        self.output.players().iter().map(vote_key).collect()
     }
 }
 
@@ -464,6 +481,7 @@ impl GenesisArgs {
             &validator_onchain_addresses,
             self.no_dkg_in_genesis,
             self.chain_id,
+            self.attributable_votes_time.is_some(),
         )?;
 
         println!("Initializing fee manager");
@@ -696,13 +714,22 @@ impl GenesisArgs {
                 .extra_fields
                 .insert_value("feeRouterFactory".to_string(), factory)?;
         }
+        if let Some(time) = self.attributable_votes_time {
+            chain_config
+                .extra_fields
+                .insert_value("attributableVotesTime".to_string(), time)?;
+        }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
             if self.no_dkg_in_genesis {
                 println!("no-initial-dkg-in-genesis passed; not writing to header extra_data");
             } else {
-                extra_data = consensus_config.to_genesis_dkg_outcome().encode().into();
+                let mut outcome = consensus_config.to_genesis_dkg_outcome();
+                if self.attributable_votes_time.is_some() {
+                    outcome.vote_keys = Some(consensus_config.vote_keys());
+                }
+                extra_data = outcome.encode().into();
             }
         }
 
@@ -1149,6 +1176,7 @@ fn initialize_validator_config_v2(
     onchain_validator_addresses: &[Address],
     no_dkg_in_genesis: bool,
     chain_id: u64,
+    with_vote_keys: bool,
 ) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -1215,6 +1243,11 @@ fn initialize_validator_config_v2(
                     },
                 )
                 .wrap_err("failed to add validator to V2")?;
+                if with_vote_keys {
+                    let vote = tempo_validator_config::VoteKeypair::derive(&private_key);
+                    v2.set_vote_key(validator_address, vote.registration(chain_id, i as u64))
+                        .wrap_err("failed to register the validator's vote key")?;
+                }
 
                 println!(
                     "added validator (v2)\

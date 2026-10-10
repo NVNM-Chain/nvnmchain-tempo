@@ -24,6 +24,7 @@ use eyre::{OptionExt as _, WrapErr as _, ensure};
 use rand_core::{CryptoRng, Rng};
 use reth_ethereum::chainspec::EthChainSpec as _;
 use tempo_node::TempoFullNode;
+use tempo_precompiles::validator_config_v2::VoteNamespace;
 use tracing::info;
 
 use crate::{
@@ -231,7 +232,7 @@ where
             priority_responses: false,
         };
 
-        let votes = crate::equivocation::Votes::new(crate::equivocation::namespace(
+        let votes = crate::equivocation::Votes::new(VoteNamespace::new(
             execution_node.chain_spec().chain_id(),
             execution_node.chain_spec().genesis_hash(),
         ));

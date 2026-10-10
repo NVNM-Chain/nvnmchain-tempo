@@ -1,7 +1,7 @@
 //! Honest engines beside a participant that shows one of them a different vote.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU32, NonZeroUsize},
     sync::Arc,
     time::Duration,
@@ -22,7 +22,8 @@ use commonware_consensus::{
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
-    Sha256, bls12381::primitives::variant::MinSig, certificate, ed25519::PublicKey, sha256::Digest,
+    Sha256, Signer as _, bls12381::primitives::variant::MinSig, certificate, ed25519::PublicKey,
+    sha256::Digest,
 };
 use commonware_math::algebra::Random as _;
 use commonware_p2p::{
@@ -35,11 +36,16 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZU16, NZUsize, probability};
 use futures::{StreamExt as _, channel::mpsc};
+use tempo_precompiles::validator_config_v2::VoteNamespace;
+use tempo_validator_config::VoteKeypair;
 
-use super::{Votes, namespace, pair};
-use crate::attributable::{
-    Recorder, Scheme,
-    tests::{CHAIN_ID, GENESIS, signers},
+use super::{Votes, pair};
+use crate::{
+    attributable::{
+        Recorder, Scheme,
+        tests::{CHAIN_ID, GENESIS, dealt, signers},
+    },
+    utils::public_key_to_b256,
 };
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -70,12 +76,20 @@ fn votes_split_between_nodes_convict_their_signer() {
             .with_timeout(Some(Duration::from_secs(120))),
     );
     runner.start(|context| async move {
-        let chain = namespace(CHAIN_ID, GENESIS);
-        let schemes: Vec<_> = signers(0, CHAIN_ID, GENESIS)
+        let chain = VoteNamespace::new(CHAIN_ID, GENESIS);
+        let schemes: Vec<_> = signers(&[], 0, CHAIN_ID, GENESIS)
             .into_iter()
             .map(|(_, scheme)| scheme)
             .collect();
         let players = certificate::Scheme::participants(&schemes[0]).clone();
+        // What whoever compares the nodes reads from the registry.
+        let keys: BTreeMap<_, _> = dealt(0)
+            .iter()
+            .map(|(key, _)| {
+                let vote_key = VoteKeypair::derive(key).public();
+                (public_key_to_b256(&key.public_key()), vote_key)
+            })
+            .collect();
 
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
@@ -219,10 +233,13 @@ fn votes_split_between_nodes_convict_their_signer() {
 
         let mut convicted = 0;
         for round in disputed {
-            let votes = nodes.iter().flat_map(|node| node.in_round(round));
+            let votes = nodes
+                .iter()
+                .flat_map(|node| node.in_round(round))
+                .map(|(signer, signed)| (signer, keys[&signer], signed));
             for evidence in pair(&chain, votes) {
-                assert_eq!(evidence.signer, double);
-                assert!(evidence.verify(&chain));
+                assert_eq!(evidence.signer, public_key_to_b256(&double));
+                assert!(evidence.verify(&chain, &keys[&evidence.signer]));
                 convicted += 1;
             }
         }

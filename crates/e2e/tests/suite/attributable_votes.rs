@@ -1,27 +1,28 @@
-//! Validators keep finalizing across the epoch whose votes first carry their signer's signature.
+//! Validators keep finalizing across the epoch whose votes first carry their vote keys'
+//! signatures.
 
 use std::{
     net::SocketAddr,
     time::{Duration, UNIX_EPOCH},
 };
 
+use alloy::providers::ProviderBuilder;
 use commonware_codec::DecodeExt as _;
 use commonware_consensus::types::{Epoch, Epocher as _, FixedEpocher};
-use commonware_cryptography::ed25519::PublicKey;
 use commonware_macros::test_traced;
 use commonware_runtime::{
-    Runner as _,
+    Clock as _, Runner as _,
     deterministic::{Config, Runner},
 };
 use commonware_utils::NZU64;
 use futures::{channel::oneshot, future::join_all};
 use jsonrpsee::http_client::HttpClientBuilder;
 use reth_ethereum::chainspec::EthChainSpec as _;
-use tempo_consensus::{
-    consensus::Digest,
-    equivocation::{Signed, namespace},
-};
 use tempo_node::rpc::consensus::{RoundId, TempoConsensusApiClient as _};
+use tempo_precompiles::{
+    VALIDATOR_CONFIG_V2_ADDRESS,
+    validator_config_v2::{IEquivocation, Signed, VoteKey, VoteNamespace},
+};
 
 use crate::{
     Setup, connect_execution_peers, connect_execution_to_peers,
@@ -74,6 +75,77 @@ fn validators_switch_to_attributable_votes_at_an_epoch_boundary() {
             metrics.consensus_at_height(target.get()) == validators.len()
         })
         .await;
+    });
+}
+
+/// The registry holds no vote key for one validator of four. Its votes do not count, so the other
+/// three, a quorum, finalize without it, across a boundary whose outcome leaves it out again, and
+/// it follows them.
+#[test_traced]
+fn validators_finalize_without_the_one_that_has_no_vote_key() {
+    let _ = tempo_eyre::install();
+    const EPOCH_LENGTH: u64 = 20;
+
+    let setup = Setup::new(crate::VERIFICATION_MODE)
+        .how_many_signers(4)
+        .epoch_length(EPOCH_LENGTH)
+        .attributable_votes_time(0)
+        .signers_without_vote_key(1);
+    let cfg = Config::default().with_seed(setup.seed);
+
+    Runner::from(cfg).start(|mut context| async move {
+        let (mut validators, _execution_runtime) = setup_validators(&mut context, setup).await;
+        join_all(validators.iter_mut().map(|node| node.start(&context))).await;
+        connect_execution_peers(&validators).await;
+
+        let target = FixedEpocher::new(NZU64!(EPOCH_LENGTH))
+            .first(Epoch::new(2))
+            .unwrap();
+        wait_for_metrics(&context, |metrics| {
+            metrics.consensus_at_height(target.get()) == validators.len()
+        })
+        .await;
+
+        let metrics = context.to_metrics();
+        for validator in &validators {
+            let attributable = metrics
+                .for_scope(validator)
+                .value::<u64>(ATTRIBUTABLE_VOTES);
+            assert_eq!(attributable, Some(1));
+        }
+    });
+}
+
+/// Two vote keys of four are no quorum: the votes stay attributable and nothing is certified.
+#[test_traced]
+fn too_few_vote_keys_stop_the_chain() {
+    let _ = tempo_eyre::install();
+
+    let setup = Setup::new(crate::VERIFICATION_MODE)
+        .how_many_signers(4)
+        .epoch_length(100)
+        .attributable_votes_time(0)
+        .signers_without_vote_key(2);
+    let cfg = Config::default().with_seed(setup.seed);
+
+    Runner::from(cfg).start(|mut context| async move {
+        let (mut validators, _execution_runtime) = setup_validators(&mut context, setup).await;
+        join_all(validators.iter_mut().map(|node| node.start(&context))).await;
+        connect_execution_peers(&validators).await;
+
+        wait_for_metrics(&context, |metrics| {
+            validators.iter().all(|validator| {
+                metrics
+                    .for_scope(validator)
+                    .value::<u64>(ATTRIBUTABLE_VOTES)
+                    == Some(1)
+            })
+        })
+        .await;
+
+        // Long enough for four keyed validators to finalize many times over.
+        context.sleep(Duration::from_secs(30)).await;
+        assert_eq!(context.to_metrics().consensus_at_height(1), 0);
     });
 }
 
@@ -156,18 +228,21 @@ async fn a_node_serves_the_signed_votes_it_received() {
     let client = HttpClientBuilder::default()
         .build(format!("http://{rpc}"))
         .unwrap();
-    let chain = namespace(chain_id, genesis);
+    let chain = VoteNamespace::new(chain_id, genesis);
+    let provider = ProviderBuilder::new().connect_http(format!("http://{rpc}").parse().unwrap());
+    let registry = IEquivocation::new(VALIDATOR_CONFIG_V2_ADDRESS, provider);
 
-    // By height five, a quorum signed in some early view of the first epoch.
+    // By height five, a quorum signed in some early view of the first epoch, each under the vote
+    // key the registry holds for it.
     let mut most = 0;
     for view in 1..=5 {
         let votes = client.get_votes(RoundId { epoch: 0, view }).await.unwrap();
         let mut signers = std::collections::BTreeSet::new();
         for vote in votes {
-            let signer = PublicKey::decode(vote.signer.as_slice()).unwrap();
-            let signed = Signed::<Digest>::decode(vote.vote.as_ref()).unwrap();
-            assert!(signed.verify(&chain, &signer));
-            signers.insert(signer);
+            let signed = Signed::decode(vote.vote.as_ref()).unwrap();
+            let key = registry.voteKey(vote.signer).call().await.unwrap();
+            assert!(signed.verify(&chain, &VoteKey::decode(key.as_ref()).unwrap()));
+            signers.insert(vote.signer);
         }
         most = most.max(signers.len());
     }

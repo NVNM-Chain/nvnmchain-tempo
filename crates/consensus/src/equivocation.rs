@@ -1,9 +1,9 @@
 //! Evidence that a validator signed conflicting votes.
 //!
-//! Once votes carry their signer's ed25519 signature, two of them over conflicting votes in one
-//! round convict the key that signed both, with nothing but those signatures and the chain's
-//! namespace. A signer that splits the pair between its peers shows each node only one, so a node
-//! keeps what it saw for whoever compares several nodes.
+//! Once votes carry the signature of their signer's vote key, two of them over conflicting votes
+//! in one round convict the validator whose key signed both, with nothing but those signatures,
+//! that key and the chain's namespace. A signer that splits the pair between its peers shows each
+//! node only one, so a node keeps what it saw for whoever compares several nodes.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,21 +11,12 @@ use std::{
 };
 
 use alloy_primitives::B256;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt as _, Write};
-use commonware_consensus::{
-    simplex::{
-        scheme::Namespace,
-        types::{Proposal, Subject},
-    },
-    types::Round,
-};
-use commonware_cryptography::{
-    Digest, Verifier as _,
-    certificate::Subject as _,
-    ed25519::{PublicKey, Signature},
-};
+use commonware_consensus::simplex::types::Subject;
+use commonware_cryptography::Digest;
 use parking_lot::Mutex;
+use tempo_precompiles::validator_config_v2::{
+    Ballot, Evidence, Proposal, Round, Signed, VoteKey, VoteNamespace,
+};
 use tracing::warn;
 
 /// How many rounds a node keeps the votes of.
@@ -41,241 +32,76 @@ const RETAINED_EVIDENCE: usize = 1_024;
 /// What a node keeps of one signer in one round: its three votes and one that conflicts.
 const BALLOTS_PER_SIGNER: usize = 4;
 
-/// What signers' own signatures are made under on the chain of `chain_id` and `genesis`. The
-/// threshold scheme's namespace is the same on every chain, and a key that signs on two chains,
-/// or on one restarted from a new genesis, has not signed twice.
-pub fn namespace(chain_id: u64, genesis: B256) -> Namespace {
-    Namespace::new(
-        &[
-            crate::config::NAMESPACE,
-            b"_ATTRIBUTABLE_",
-            &chain_id.to_be_bytes(),
-            genesis.as_slice(),
-        ]
-        .concat(),
-    )
-}
-
-/// What one signer says about one round.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Ballot<D: Digest> {
-    Notarize(Proposal<D>),
-    Nullify(Round),
-    Finalize(Proposal<D>),
-}
-
-impl<D: Digest> Ballot<D> {
-    pub fn round(&self) -> Round {
-        match self {
-            Self::Notarize(proposal) | Self::Finalize(proposal) => proposal.round,
-            Self::Nullify(round) => *round,
-        }
-    }
-
-    fn subject(&self) -> Subject<'_, D> {
-        match self {
-            Self::Notarize(proposal) => Subject::Notarize { proposal },
-            Self::Nullify(round) => Subject::Nullify { round: *round },
-            Self::Finalize(proposal) => Subject::Finalize { proposal },
-        }
-    }
-
-    /// The three pairs no honest signer casts in one round: two proposals notarized, two
-    /// finalized, or one finalized in a round it nullified.
-    pub fn conflicts_with(&self, other: &Self) -> bool {
-        self.round() == other.round()
-            && match (self, other) {
-                (Self::Notarize(a), Self::Notarize(b)) | (Self::Finalize(a), Self::Finalize(b)) => {
-                    a != b
-                }
-                (Self::Nullify(_), Self::Finalize(_)) | (Self::Finalize(_), Self::Nullify(_)) => {
-                    true
-                }
-                _ => false,
-            }
-    }
-}
-
-impl<D: Digest> Write for Ballot<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        match self {
-            Self::Notarize(proposal) => {
-                0u8.write(writer);
-                proposal.write(writer);
-            }
-            Self::Nullify(round) => {
-                1u8.write(writer);
-                round.write(writer);
-            }
-            Self::Finalize(proposal) => {
-                2u8.write(writer);
-                proposal.write(writer);
-            }
-        }
-    }
-}
-
-impl<D: Digest> EncodeSize for Ballot<D> {
-    fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::Notarize(proposal) | Self::Finalize(proposal) => proposal.encode_size(),
-            Self::Nullify(round) => round.encode_size(),
-        }
-    }
-}
-
-impl<D: Digest> Read for Ballot<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::Notarize(Proposal::read(reader)?)),
-            1 => Ok(Self::Nullify(Round::read(reader)?)),
-            2 => Ok(Self::Finalize(Proposal::read(reader)?)),
-            kind => Err(Error::InvalidEnum(kind)),
-        }
-    }
-}
-
-/// A ballot under its signer's own signature.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Signed<D: Digest> {
-    pub ballot: Ballot<D>,
-    pub signature: Signature,
-}
-
-impl<D: Digest> Signed<D> {
-    /// Whether `signer` signed the ballot on the chain `namespace` names.
-    pub fn verify(&self, namespace: &Namespace, signer: &PublicKey) -> bool {
-        let subject = self.ballot.subject();
-        signer.verify(
-            subject.namespace(namespace),
-            &subject.message(),
-            &self.signature,
-        )
-    }
-}
-
-impl<D: Digest> Write for Signed<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.ballot.write(writer);
-        self.signature.write(writer);
-    }
-}
-
-impl<D: Digest> EncodeSize for Signed<D> {
-    fn encode_size(&self) -> usize {
-        self.ballot.encode_size() + self.signature.encode_size()
-    }
-}
-
-impl<D: Digest> Read for Signed<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Self {
-            ballot: Ballot::read(reader)?,
-            signature: Signature::read(reader)?,
+/// The ballot a vote on `subject` casts, in the registry's terms. `None` unless its proposal
+/// names a block.
+pub(crate) fn ballot<D: Digest>(subject: Subject<'_, D>) -> Option<Ballot> {
+    let round = |round: commonware_consensus::types::Round| Round {
+        epoch: round.epoch().get(),
+        view: round.view().get(),
+    };
+    let proposal = |proposal: &commonware_consensus::simplex::types::Proposal<D>| {
+        Some(Proposal {
+            round: round(proposal.round),
+            parent: proposal.parent.get(),
+            payload: B256::try_from(proposal.payload.as_ref()).ok()?,
         })
-    }
+    };
+    Some(match subject {
+        Subject::Notarize { proposal: named } => Ballot::Notarize(proposal(named)?),
+        Subject::Nullify { round: nullified } => Ballot::Nullify(round(nullified)),
+        Subject::Finalize { proposal: named } => Ballot::Finalize(proposal(named)?),
+    })
 }
 
-/// Two ballots held against the key that signed both.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Evidence<D: Digest> {
-    pub signer: PublicKey,
-    pub first: Signed<D>,
-    pub second: Signed<D>,
-}
-
-impl<D: Digest> Evidence<D> {
-    /// Whether the ballots conflict and `signer` signed both on the chain `namespace` names.
-    pub fn verify(&self, namespace: &Namespace) -> bool {
-        self.first.ballot.conflicts_with(&self.second.ballot)
-            && self.first.verify(namespace, &self.signer)
-            && self.second.verify(namespace, &self.signer)
-    }
-}
-
-impl<D: Digest> Write for Evidence<D> {
-    fn write(&self, writer: &mut impl BufMut) {
-        self.signer.write(writer);
-        self.first.write(writer);
-        self.second.write(writer);
-    }
-}
-
-impl<D: Digest> EncodeSize for Evidence<D> {
-    fn encode_size(&self) -> usize {
-        self.signer.encode_size() + self.first.encode_size() + self.second.encode_size()
-    }
-}
-
-impl<D: Digest> Read for Evidence<D> {
-    type Cfg = ();
-
-    fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        Ok(Self {
-            signer: PublicKey::read(reader)?,
-            first: Signed::read(reader)?,
-            second: Signed::read(reader)?,
-        })
-    }
-}
-
-/// The evidence in `votes` gathered from several nodes: for each signer and round, the first two
-/// that conflict and that the signer did sign.
-pub fn pair<D: Digest>(
-    namespace: &Namespace,
-    votes: impl IntoIterator<Item = (PublicKey, Signed<D>)>,
-) -> Vec<Evidence<D>> {
+/// The evidence in `votes` gathered from several nodes, each with its signer's vote key: for each
+/// signer and round, the first two that conflict and that the key did sign.
+pub fn pair(
+    namespace: &VoteNamespace,
+    votes: impl IntoIterator<Item = (B256, VoteKey, Signed)>,
+) -> Vec<Evidence> {
     let mut held = Held::default();
     votes
         .into_iter()
-        .filter_map(|(signer, signed)| held.keep(namespace, signer, signed, usize::MAX))
+        .filter_map(|(signer, key, signed)| held.keep(namespace, signer, key, signed, usize::MAX))
         .collect()
 }
 
-/// A round's ballots by signer. A signer convicted in the round keeps `None`: nothing more it
-/// says there proves anything new.
-type Ballots<D> = BTreeMap<PublicKey, Option<Vec<Signed<D>>>>;
+/// A round's ballots by signer, under the vote key it first voted with there. A signer convicted
+/// in the round keeps `None`: nothing more it says there proves anything new.
+type Ballots = BTreeMap<B256, Option<(VoteKey, Vec<Signed>)>>;
 
-struct Held<D: Digest>(BTreeMap<Round, Ballots<D>>);
+#[derive(Default)]
+struct Held(BTreeMap<Round, Ballots>);
 
-impl<D: Digest> Default for Held<D> {
-    fn default() -> Self {
-        Self(BTreeMap::new())
-    }
-}
-
-impl<D: Digest> Held<D> {
+impl Held {
     /// Keeps `signed` unless `signer` already holds `limit` ballots in its round, and returns the
     /// evidence it completes. Signatures are checked only for ballots that conflict: the engine
     /// reports a vote before verifying it, and nearly none conflict.
     fn keep(
         &mut self,
-        namespace: &Namespace,
-        signer: PublicKey,
-        signed: Signed<D>,
+        namespace: &VoteNamespace,
+        signer: B256,
+        key: VoteKey,
+        signed: Signed,
         limit: usize,
-    ) -> Option<Evidence<D>> {
+    ) -> Option<Evidence> {
         let slot = self
             .0
             .entry(signed.ballot.round())
             .or_default()
-            .entry(signer.clone())
-            .or_insert_with(|| Some(Vec::new()));
-        let ballots = slot.as_mut()?;
+            .entry(signer)
+            .or_insert_with(|| Some((key, Vec::new())));
+        let (key, ballots) = slot.as_mut()?;
         if ballots.contains(&signed) {
             return None;
         }
-        let conflicts = |held: &Signed<D>| held.ballot.conflicts_with(&signed.ballot);
+        let conflicts = |held: &Signed| held.ballot.conflicts_with(&signed.ballot);
         if ballots.iter().any(conflicts) {
-            if !signed.verify(namespace, &signer) {
+            if !signed.verify(namespace, key) {
                 return None;
             }
-            ballots.retain(|held| !conflicts(held) || held.verify(namespace, &signer));
-            if let Some(first) = ballots.iter().find(|held| conflicts(held)).cloned() {
+            ballots.retain(|held| !conflicts(held) || held.verify(namespace, key));
+            if let Some(first) = ballots.iter().find(|held| conflicts(held)).copied() {
                 *slot = None;
                 return Some(Evidence {
                     signer,
@@ -293,12 +119,12 @@ impl<D: Digest> Held<D> {
 
 /// Whether a round's ballots disagree: two proposals voted for, or a nullify beside a finalize.
 /// Another node may then hold the vote that conflicts with one held here.
-fn is_disputed<D: Digest>(signers: &Ballots<D>) -> bool {
+fn is_disputed(signers: &Ballots) -> bool {
     let ballots = || {
         signers
             .values()
             .flatten()
-            .flatten()
+            .flat_map(|(_, ballots)| ballots)
             .map(|signed| &signed.ballot)
     };
     let mut proposals = ballots().filter_map(|ballot| match ballot {
@@ -315,21 +141,21 @@ fn is_disputed<D: Digest>(signers: &Ballots<D>) -> bool {
 /// The signed votes a node saw in its latest rounds, and the evidence they make on their own.
 /// All of it in memory: a restart drops it, so it is read off a node as it appears.
 #[derive(Clone)]
-pub struct Votes<D: Digest> {
-    namespace: Namespace,
-    inner: Arc<Mutex<Inner<D>>>,
+pub struct Votes {
+    namespace: Arc<VoteNamespace>,
+    inner: Arc<Mutex<Inner>>,
 }
 
-struct Inner<D: Digest> {
-    held: Held<D>,
+struct Inner {
+    held: Held,
     disputed: BTreeSet<Round>,
-    evidence: Vec<Evidence<D>>,
+    evidence: Vec<Evidence>,
 }
 
-impl<D: Digest> Votes<D> {
-    pub fn new(namespace: Namespace) -> Self {
+impl Votes {
+    pub fn new(namespace: VoteNamespace) -> Self {
         Self {
-            namespace,
+            namespace: Arc::new(namespace),
             inner: Arc::new(Mutex::new(Inner {
                 held: Held::default(),
                 disputed: BTreeSet::new(),
@@ -338,13 +164,13 @@ impl<D: Digest> Votes<D> {
         }
     }
 
-    /// Keeps a vote the engine reported, not yet verified.
-    pub(crate) fn record(&self, signer: PublicKey, signed: Signed<D>) {
+    /// Keeps a vote the engine reported, not yet verified, of `signer` whose vote key is `key`.
+    pub(crate) fn record(&self, signer: B256, key: VoteKey, signed: Signed) {
         let round = signed.ballot.round();
         let mut inner = self.inner.lock();
         let evidence = inner
             .held
-            .keep(&self.namespace, signer, signed, BALLOTS_PER_SIGNER);
+            .keep(&self.namespace, signer, key, signed, BALLOTS_PER_SIGNER);
         if let Some(evidence) = evidence
             && inner.evidence.len() < RETAINED_EVIDENCE
         {
@@ -372,21 +198,18 @@ impl<D: Digest> Votes<D> {
         }
     }
 
-    /// The votes held for `round` that their signers did sign.
-    pub fn in_round(&self, round: Round) -> Vec<(PublicKey, Signed<D>)> {
-        let inner = self.inner.lock();
-        inner
-            .held
-            .0
-            .get(&round)
-            .into_iter()
+    /// The votes held for `round` that their signers' vote keys did sign.
+    pub fn in_round(&self, round: Round) -> Vec<(B256, Signed)> {
+        // Checked outside the lock, which the engine's reports wait on.
+        let held = self.inner.lock().held.0.get(&round).cloned();
+        held.into_iter()
             .flatten()
-            .flat_map(|(signer, ballots)| {
+            .flat_map(|(signer, held)| held.map(|held| (signer, held)))
+            .flat_map(|(signer, (key, ballots))| {
                 ballots
-                    .iter()
-                    .flatten()
-                    .filter(|signed| signed.verify(&self.namespace, signer))
-                    .map(|signed| (signer.clone(), signed.clone()))
+                    .into_iter()
+                    .filter(move |signed| signed.verify(&self.namespace, &key))
+                    .map(move |signed| (signer, signed))
             })
             .collect()
     }
@@ -397,7 +220,7 @@ impl<D: Digest> Votes<D> {
     }
 
     /// Evidence this node's own votes make.
-    pub fn evidence(&self) -> Vec<Evidence<D>> {
+    pub fn evidence(&self) -> Vec<Evidence> {
         self.inner.lock().evidence.clone()
     }
 }
@@ -407,61 +230,71 @@ mod double_signer;
 
 #[cfg(test)]
 mod tests {
-    use commonware_codec::{DecodeExt as _, Encode as _};
-    use commonware_consensus::types::{Epoch, View};
-    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_consensus::{
+        simplex::types,
+        types::{Epoch, View},
+    };
+    use commonware_cryptography::{
+        Signer as _,
+        bls12381::primitives::{ops, variant::MinSig},
+        certificate::Subject as _,
+        ed25519::PrivateKey,
+    };
 
     use super::*;
-    use crate::consensus::Digest;
+    use crate::{consensus::Digest, utils::public_key_to_b256};
 
-    fn chain() -> Namespace {
-        namespace(787_222, B256::repeat_byte(1))
+    fn chain() -> VoteNamespace {
+        VoteNamespace::new(787_222, B256::repeat_byte(1))
     }
 
     fn round(view: u64) -> Round {
-        Round::new(Epoch::zero(), View::new(view))
+        Round { epoch: 0, view }
     }
 
-    fn proposal(view: u64, payload: u8) -> Proposal<Digest> {
-        Proposal::new(
-            round(view),
-            View::new(view - 1),
-            Digest(B256::repeat_byte(payload)),
-        )
+    fn proposal(view: u64, payload: u8) -> Proposal {
+        Proposal {
+            round: round(view),
+            parent: view - 1,
+            payload: B256::repeat_byte(payload),
+        }
     }
 
-    fn sign(namespace: &Namespace, key: &PrivateKey, ballot: Ballot<Digest>) -> Signed<Digest> {
-        let subject = ballot.subject();
-        let signature = key.sign(subject.namespace(namespace), &subject.message());
+    /// The validator `key` as the registry names it, and the vote key it would hold for it.
+    fn signer(key: &PrivateKey) -> (B256, VoteKey) {
+        let vote_key = tempo_validator_config::VoteKeypair::derive(key).public();
+        (public_key_to_b256(&key.public_key()), vote_key)
+    }
+
+    /// `ballot` under the signature of `key`'s vote key.
+    fn sign(namespace: &VoteNamespace, key: &PrivateKey, ballot: Ballot) -> Signed {
+        let vote_key = tempo_validator_config::VoteKeypair::derive(key).private();
+        let signature =
+            ops::sign_message::<MinSig>(&vote_key, namespace.of(&ballot), &ballot.body());
         Signed { ballot, signature }
     }
 
-    #[test]
-    fn only_the_three_faults_conflict() {
-        let (a, b) = (proposal(2, 1), proposal(2, 2));
-        let conflicting = [
-            (Ballot::Notarize(a.clone()), Ballot::Notarize(b.clone())),
-            (Ballot::Finalize(a.clone()), Ballot::Finalize(b)),
-            (Ballot::Nullify(round(2)), Ballot::Finalize(a.clone())),
-        ];
-        for (first, second) in conflicting {
-            assert!(first.conflicts_with(&second) && second.conflicts_with(&first));
-        }
+    /// `node` receives `ballot` from the validator `key`.
+    fn cast(node: &Votes, namespace: &VoteNamespace, key: &PrivateKey, ballot: Ballot) {
+        let (signer, vote_key) = signer(key);
+        node.record(signer, vote_key, sign(namespace, key, ballot));
+    }
 
-        let honest = [
-            // A signer may give up on a round it notarized, and finalizes what it notarized.
-            (Ballot::Notarize(a.clone()), Ballot::Nullify(round(2))),
-            (Ballot::Notarize(a.clone()), Ballot::Finalize(a.clone())),
-            (Ballot::Notarize(a.clone()), Ballot::Notarize(a.clone())),
-            // Another round is another matter.
-            (
-                Ballot::Notarize(a.clone()),
-                Ballot::Notarize(proposal(3, 2)),
-            ),
-            (Ballot::Nullify(round(3)), Ballot::Finalize(a)),
-        ];
-        for (first, second) in honest {
-            assert!(!first.conflicts_with(&second) && !second.conflicts_with(&first));
+    /// A vote key signs what the consensus library says a vote is, so two votes that differ there
+    /// differ here.
+    #[test]
+    fn a_ballots_body_is_the_librarys_vote() {
+        let named = types::Proposal::new(
+            commonware_consensus::types::Round::new(Epoch::new(7), View::new(9)),
+            View::new(8),
+            Digest(B256::repeat_byte(3)),
+        );
+        for subject in [
+            Subject::Notarize { proposal: &named },
+            Subject::Nullify { round: named.round },
+            Subject::Finalize { proposal: &named },
+        ] {
+            assert_eq!(ballot(subject).unwrap().body(), subject.message());
         }
     }
 
@@ -474,37 +307,27 @@ mod tests {
         // The double signer shows each node a different notarize. The honest signer voted with
         // the second node's half.
         let (first, second) = (Votes::new(chain.clone()), Votes::new(chain.clone()));
-        first.record(
-            double.public_key(),
-            sign(&chain, &double, Ballot::Notarize(a)),
-        );
-        second.record(
-            double.public_key(),
-            sign(&chain, &double, Ballot::Notarize(b.clone())),
-        );
+        cast(&first, &chain, &double, Ballot::Notarize(a));
+        cast(&second, &chain, &double, Ballot::Notarize(b));
         for node in [&first, &second] {
-            node.record(
-                honest.public_key(),
-                sign(&chain, &honest, Ballot::Notarize(b.clone())),
-            );
+            cast(node, &chain, &honest, Ballot::Notarize(b));
             assert!(node.evidence().is_empty());
         }
         // Only the first node sees two proposals, and that is what sends a watcher to the others.
         assert_eq!(first.disputed(), [round(2)]);
         assert!(second.disputed().is_empty());
 
+        // Whoever compares the nodes takes each signer's vote key from the registry.
+        let keys = BTreeMap::from([&double, &honest].map(signer));
         let votes = [&first, &second]
             .into_iter()
-            .flat_map(|node| node.in_round(round(2)));
+            .flat_map(|node| node.in_round(round(2)))
+            .map(|(signer, signed)| (signer, keys[&signer], signed));
         let evidence = pair(&chain, votes);
+        let (double, vote_key) = signer(&double);
         assert_eq!(evidence.len(), 1);
-        assert_eq!(evidence[0].signer, double.public_key());
-        assert!(evidence[0].verify(&chain));
-
-        let decoded = Evidence::<Digest>::decode(evidence[0].encode()).unwrap();
-        assert_eq!(decoded, evidence[0]);
-        // On another chain the same bytes prove nothing.
-        assert!(!decoded.verify(&namespace(787_223, B256::repeat_byte(1))));
+        assert_eq!(evidence[0].signer, double);
+        assert!(evidence[0].verify(&chain, &vote_key));
     }
 
     #[test]
@@ -512,19 +335,14 @@ mod tests {
         let chain = chain();
         let double = PrivateKey::from_seed(1);
         let node = Votes::new(chain.clone());
-        let nullify = sign(&chain, &double, Ballot::Nullify(round(2)));
-        let finalize = sign(&chain, &double, Ballot::Finalize(proposal(2, 1)));
-        node.record(double.public_key(), nullify);
-        node.record(double.public_key(), finalize);
+        cast(&node, &chain, &double, Ballot::Nullify(round(2)));
+        cast(&node, &chain, &double, Ballot::Finalize(proposal(2, 1)));
 
         let evidence = node.evidence();
         assert_eq!(evidence.len(), 1);
-        assert!(evidence[0].verify(&chain));
+        assert!(evidence[0].verify(&chain, &signer(&double).1));
         // What it said after is no second conviction.
-        node.record(
-            double.public_key(),
-            sign(&chain, &double, Ballot::Finalize(proposal(2, 2))),
-        );
+        cast(&node, &chain, &double, Ballot::Finalize(proposal(2, 2)));
         assert_eq!(node.evidence().len(), 1);
     }
 
@@ -533,22 +351,18 @@ mod tests {
         let chain = chain();
         let (honest, forger) = (PrivateKey::from_seed(1), PrivateKey::from_seed(2));
         let vote = sign(&chain, &honest, Ballot::Notarize(proposal(2, 1)));
-        // Signed by another key, and put under the honest signer's name.
+        // Signed by another's vote key, and put under the honest signer's name.
         let forged = sign(&chain, &forger, Ballot::Notarize(proposal(2, 2)));
+        let (honest, key) = signer(&honest);
 
-        for votes in [[vote.clone(), forged.clone()], [forged, vote.clone()]] {
+        for votes in [[vote, forged], [forged, vote]] {
             let node = Votes::new(chain.clone());
-            for signed in votes.clone() {
-                node.record(honest.public_key(), signed);
+            for signed in votes {
+                node.record(honest, key, signed);
             }
             assert!(node.evidence().is_empty());
-            assert_eq!(
-                node.in_round(round(2)),
-                [(honest.public_key(), vote.clone())]
-            );
-            let gathered = votes
-                .into_iter()
-                .map(|signed| (honest.public_key(), signed));
+            assert_eq!(node.in_round(round(2)), [(honest, vote)]);
+            let gathered = votes.into_iter().map(|signed| (honest, key, signed));
             assert!(pair(&chain, gathered).is_empty());
         }
     }
@@ -560,19 +374,17 @@ mod tests {
         let chain = chain();
         let (one, other) = (PrivateKey::from_seed(1), PrivateKey::from_seed(2));
         let node = Votes::new(chain.clone());
-        node.record(
-            one.public_key(),
-            sign(&chain, &one, Ballot::Notarize(proposal(2, 1))),
-        );
-        node.record(
-            other.public_key(),
-            sign(&chain, &other, Ballot::Notarize(proposal(2, 2))),
-        );
+        cast(&node, &chain, &one, Ballot::Notarize(proposal(2, 1)));
+        cast(&node, &chain, &other, Ballot::Notarize(proposal(2, 2)));
+        // Signed once: the store checks a signature only when votes conflict.
+        let nullify = sign(&chain, &one, Ballot::Nullify(round(3))).signature;
+        let (one, key) = signer(&one);
         for view in 3..3 + RETAINED_ROUNDS as u64 + 1 {
-            node.record(
-                one.public_key(),
-                sign(&chain, &one, Ballot::Nullify(round(view))),
-            );
+            let signed = Signed {
+                ballot: Ballot::Nullify(round(view)),
+                signature: nullify,
+            };
+            node.record(one, key, signed);
         }
 
         assert_eq!(node.disputed(), [round(2)]);
@@ -581,78 +393,5 @@ mod tests {
             node.in_round(round(3)).is_empty(),
             "the oldest undisputed round went"
         );
-    }
-
-    /// The registry checks evidence without the consensus library, from the bytes alone, so the
-    /// two must agree on them and on the namespace.
-    #[test]
-    fn the_registry_reads_evidence_as_the_node_writes_it() {
-        use alloy_primitives::Address;
-        use tempo_chainspec::hardfork::TempoHardfork;
-        use tempo_precompiles::{
-            storage::{StorageCtx, hashmap::HashMapStorageProvider},
-            validator_config_v2::{
-                IEquivocation, IValidatorConfigV2, VALIDATOR_NS_ADD, ValidatorConfigV2,
-            },
-        };
-
-        let (chain_id, genesis) = (787_222, B256::repeat_byte(1));
-        let chain = namespace(chain_id, genesis);
-        let key = PrivateKey::from_seed(1);
-        let (owner, validator) = (Address::repeat_byte(1), Address::repeat_byte(2));
-        let (a, b) = (proposal(2, 1), proposal(2, 2));
-
-        let mut storage = HashMapStorageProvider::new_with_spec(chain_id, TempoHardfork::T12);
-        storage.set_attributable_votes_time(Some(0));
-        storage.set_genesis_hash(genesis);
-        StorageCtx::enter(&mut storage, || {
-            let mut registry = ValidatorConfigV2::new();
-            registry.initialize(owner).unwrap();
-            let config = tempo_validator_config::ValidatorConfig {
-                chain_id,
-                validator_address: validator,
-                public_key: B256::from_slice(key.public_key().as_ref()),
-                ingress: "192.168.1.1:8000".parse().unwrap(),
-                egress: "192.168.1.1".parse().unwrap(),
-            };
-            let signature = key.sign(
-                VALIDATOR_NS_ADD,
-                config.add_validator_message_hash(validator).as_slice(),
-            );
-            registry
-                .add_validator(
-                    owner,
-                    IValidatorConfigV2::addValidatorCall {
-                        validatorAddress: validator,
-                        publicKey: config.public_key,
-                        ingress: config.ingress.to_string(),
-                        egress: config.egress.to_string(),
-                        feeRecipient: validator,
-                        signature: signature.encode().to_vec().into(),
-                    },
-                )
-                .unwrap();
-
-            for (first, second) in [
-                (Ballot::Notarize(a.clone()), Ballot::Notarize(b.clone())),
-                (Ballot::Finalize(a.clone()), Ballot::Finalize(b)),
-                (Ballot::Nullify(round(2)), Ballot::Finalize(a.clone())),
-                (Ballot::Finalize(a), Ballot::Nullify(round(2))),
-            ] {
-                let evidence = Evidence {
-                    signer: key.public_key(),
-                    first: sign(&chain, &key, first),
-                    second: sign(&chain, &key, second),
-                };
-                assert!(evidence.verify(&chain));
-                let found = registry
-                    .equivocator(IEquivocation::equivocatorCall {
-                        evidence: evidence.encode().to_vec().into(),
-                    })
-                    .unwrap();
-                assert_eq!(found.validator, validator);
-                assert_eq!((found.epoch, found.viewNumber), (0, 2));
-            }
-        });
     }
 }

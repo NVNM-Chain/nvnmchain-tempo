@@ -13,17 +13,18 @@ use commonware_cryptography::{
     bls12381::{dkg::feldman_desmedt::Output, primitives::variant::MinSig},
     ed25519::PublicKey,
 };
-use commonware_utils::ordered;
+use commonware_utils::{Faults as _, N3f1, ordered};
 use eyre::{Report, WrapErr as _};
 use reth_provider::{EvmStateProviderBox, StateProvider as _};
 use tempo_chainspec::TempoHardforks as _;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{ExecutedState, TempoFullNode};
-use tempo_precompiles::validator_config_v2::ValidatorConfigV2;
-use tracing::{Level, debug, info, instrument};
+use tempo_precompiles::validator_config_v2::{ValidatorConfigV2, VoteKey};
+use tracing::{Level, debug, info, instrument, warn};
 
 use crate::{
     consensus::block::Block,
+    utils::public_key_to_b256,
     validators::{
         NextPlayers, read_active_peers, read_elected_players, read_validator_config_with_state,
     },
@@ -62,6 +63,9 @@ impl TempoParentState {
         let proposer_units = next
             .weights
             .map(|weights| proposer_units(output.players(), &weights));
+        let vote_keys = self
+            .vote_keys(parent, output.players())
+            .wrap_err("could not read the vote keys of those who run the next epoch")?;
 
         let outcome = assemble_boundary_outcome(
             epoch_strategy,
@@ -70,6 +74,7 @@ impl TempoParentState {
             next.players,
             next_full_dkg_epoch,
             proposer_units,
+            vote_keys,
         );
         info!(
             outcome.is_next_full_dkg,
@@ -120,6 +125,59 @@ impl TempoParentState {
 
         debug!(?next_players, "determined next players");
         Ok(next_players)
+    }
+
+    /// Returns each of `players`' vote key as the registry holds it at `parent`, in their order,
+    /// once votes are attributable there. Before that the next epoch keeps the threshold scheme's
+    /// votes, and from T12 a warning tells when the players' keys are short of a quorum.
+    #[instrument(
+        skip_all,
+        fields(parent.height = %parent.height()),
+        err(level = Level::WARN),
+    )]
+    fn vote_keys(
+        &self,
+        parent: &Block,
+        players: &ordered::Set<PublicKey>,
+    ) -> eyre::Result<Option<Vec<Option<VoteKey>>>> {
+        let chain_spec = self.node.chain_spec();
+        let timestamp = parent.header().timestamp();
+        // No vote key is registered before T12.
+        let scheduled = chain_spec
+            .info
+            .attributable_votes_time()
+            .filter(|_| chain_spec.tempo_hardfork_at(timestamp).is_t12());
+        let Some(from) = scheduled else {
+            return Ok(None);
+        };
+        let keys: eyre::Result<Vec<_>> = self.read_validator_config(parent, |config| {
+            players
+                .iter()
+                .map(|player| {
+                    config
+                        .vote_key_of(public_key_to_b256(player))
+                        .map_err(Report::new)
+                })
+                .collect()
+        });
+        if timestamp >= from {
+            return keys.map(Some);
+        }
+        // Not in force yet, so a failed read costs only the warning.
+        if let Ok(keys) = keys {
+            let keyed = keys.iter().flatten().count();
+            let quorum = N3f1::quorum(players.len()) as usize;
+            if keyed < quorum {
+                warn!(
+                    keyed,
+                    quorum,
+                    attributable_votes_time = from,
+                    "too few of the next epoch's participants have a vote key for the chain to \
+                    go on once votes are attributable"
+                );
+            }
+        }
+        Ok(None)
     }
 
     /// Returns the epoch of the next full DKG ceremony, as the validator
@@ -182,6 +240,7 @@ fn assemble_boundary_outcome(
     next_players: ordered::Set<PublicKey>,
     next_full_dkg_epoch: u64,
     proposer_units: Option<Vec<u16>>,
+    vote_keys: Option<Vec<Option<VoteKey>>>,
 ) -> OnchainDkgOutcome {
     let next_epoch = epoch_strategy
         .containing(parent_height)
@@ -195,6 +254,7 @@ fn assemble_boundary_outcome(
         next_players,
         is_next_full_dkg: next_full_dkg_epoch == next_epoch.get(),
         proposer_units,
+        vote_keys,
     }
 }
 
@@ -232,6 +292,7 @@ mod tests {
                     next_players.clone(),
                     next_full_dkg_epoch,
                     None,
+                    None,
                 ),
                 OnchainDkgOutcome {
                     epoch: 2,
@@ -239,6 +300,7 @@ mod tests {
                     next_players: next_players.clone(),
                     is_next_full_dkg,
                     proposer_units: None,
+                    vote_keys: None,
                 },
                 "full DKG scheduled for epoch {next_full_dkg_epoch}",
             );

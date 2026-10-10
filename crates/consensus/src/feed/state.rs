@@ -1,15 +1,16 @@
 //! Shared state for the feed module.
 
-use crate::{alias::marshal, consensus::Digest, equivocation::Votes};
-use alloy_primitives::{B256, Bytes, hex};
+use crate::{alias::marshal, equivocation::Votes};
+use alloy_primitives::{Bytes, hex};
 use commonware_codec::Encode;
-use commonware_consensus::types::{Epoch, Height, Round, View};
+use commonware_consensus::types::Height;
 use parking_lot::RwLock;
 use std::sync::{Arc, OnceLock};
 use tempo_node::rpc::consensus::{
     CertifiedBlock, ConsensusFeed, ConsensusState, Event, Query, RoundId, SignedVote,
     types::Response,
 };
+use tempo_precompiles::validator_config_v2::Round;
 use tokio::sync::broadcast;
 use tracing::{Level, instrument};
 
@@ -30,7 +31,7 @@ pub(super) struct FeedState {
 pub struct FeedStateHandle {
     state: Arc<RwLock<FeedState>>,
     marshal: Arc<OnceLock<marshal::Mailbox>>,
-    votes: Arc<OnceLock<Votes<Digest>>>,
+    votes: Arc<OnceLock<Votes>>,
     events_tx: broadcast::Sender<Event>,
 }
 
@@ -57,7 +58,7 @@ impl FeedStateHandle {
     }
 
     /// Set the store of attributable votes to serve. Should only be called once.
-    pub(crate) fn set_votes(&self, votes: Votes<Digest>) {
+    pub(crate) fn set_votes(&self, votes: Votes) {
         let _ = self.votes.set(votes);
     }
 
@@ -153,21 +154,21 @@ impl ConsensusFeed for FeedStateHandle {
         let rounds = self.votes.get().map(Votes::disputed).unwrap_or_default();
         rounds
             .iter()
-            .map(|round| RoundId {
-                epoch: round.epoch().get(),
-                view: round.view().get(),
-            })
+            .map(|&Round { epoch, view }| RoundId { epoch, view })
             .collect()
     }
 
     fn votes(&self, round: RoundId) -> Vec<SignedVote> {
-        let round = Round::new(Epoch::new(round.epoch), View::new(round.view));
-        let votes = self.votes.get().map(|votes| votes.in_round(round));
+        let RoundId { epoch, view } = round;
+        let votes = self
+            .votes
+            .get()
+            .map(|votes| votes.in_round(Round { epoch, view }));
         votes
             .unwrap_or_default()
             .iter()
             .map(|(signer, signed)| SignedVote {
-                signer: B256::from_slice(signer.as_ref()),
+                signer: *signer,
                 vote: signed.encode().into(),
             })
             .collect()

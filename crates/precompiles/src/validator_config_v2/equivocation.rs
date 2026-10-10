@@ -1,91 +1,238 @@
-//! Evidence that a validator's consensus key signed conflicting votes in one round, as the node
-//! encodes it:
+//! Evidence that a validator signed conflicting votes in one round, as the node keeps and encodes
+//! it:
 //!
 //! ```text
-//! evidence = signer (32) | ballot | ballot
-//! ballot   = kind (1) | body | ed25519 signature (64)
+//! evidence = validator key (32) | ballot | ballot
+//! ballot   = kind (1) | body | BLS signature (48)
 //! body     = epoch | view                            for a nullify (1)
 //!          = epoch | view | parent | payload (32)    for a notarize (0) or a finalize (2)
 //! ```
 //!
-//! The integers are varints. A signature is over its ballot's body, under this chain's namespace
-//! for the kind. The votes conflict as the consensus crate has it: two proposals notarized, two
-//! finalized, or one finalized in a round the key nullified.
+//! The integers are varints. A signature is the validator's vote key's, over its ballot's body,
+//! under this chain's namespace for the kind.
 
-use super::{IEquivocation, ValidatorConfigV2, ValidatorConfigV2Error};
+use super::{
+    IEquivocation, ValidatorConfigV2, ValidatorConfigV2Error,
+    vote_key::{BLS_VERIFY_GAS, VoteKey, VoteSignature},
+};
 use crate::error::Result;
 use alloy::primitives::B256;
-use commonware_codec::{DecodeExt as _, ReadExt as _, varint::UInt};
-use commonware_cryptography::{
-    Verifier as _,
-    ed25519::{PublicKey, Signature},
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    DecodeExt as _, EncodeSize, Error, Read, ReadExt as _, Write, varint::UInt,
 };
+use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 
 const NOTARIZE: u8 = 0;
 const NULLIFY: u8 = 1;
 const FINALIZE: u8 = 2;
 
-/// Charged for each of the two signatures checked.
-const ED25519_VERIFY_GAS: u64 = 3_000;
-
-struct Ballot<'a> {
-    kind: u8,
-    epoch: u64,
-    view: u64,
-    /// What the signature is over.
-    body: &'a [u8],
-    signature: Signature,
+/// A round of consensus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Round {
+    pub epoch: u64,
+    pub view: u64,
 }
 
-impl<'a> Ballot<'a> {
-    fn read(reader: &mut &'a [u8]) -> Option<Self> {
-        let kind = u8::read(reader).ok()?;
-        let start = *reader;
-        let epoch = UInt::<u64>::read(reader).ok()?.into();
-        let view = UInt::<u64>::read(reader).ok()?.into();
-        match kind {
-            NULLIFY => {}
-            NOTARIZE | FINALIZE => {
-                UInt::<u64>::read(reader).ok()?;
-                *reader = reader.get(B256::len_bytes()..)?;
-            }
-            _ => return None,
+/// A proposal as the votes for it name it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Proposal {
+    pub round: Round,
+    pub parent: u64,
+    pub payload: B256,
+}
+
+/// What one signer says about one round.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ballot {
+    Notarize(Proposal),
+    Nullify(Round),
+    Finalize(Proposal),
+}
+
+impl Ballot {
+    pub fn round(&self) -> Round {
+        match self {
+            Self::Notarize(proposal) | Self::Finalize(proposal) => proposal.round,
+            Self::Nullify(round) => *round,
         }
-        let body = &start[..start.len() - reader.len()];
-        let signature = Signature::read(reader).ok()?;
-        Some(Self {
-            kind,
-            epoch,
-            view,
-            body,
-            signature,
-        })
     }
 
-    fn conflicts_with(&self, other: &Self) -> bool {
-        (self.epoch, self.view) == (other.epoch, other.view)
-            && match (self.kind, other.kind) {
-                (NOTARIZE, NOTARIZE) | (FINALIZE, FINALIZE) => self.body != other.body,
-                (NULLIFY, FINALIZE) | (FINALIZE, NULLIFY) => true,
+    fn kind(&self) -> u8 {
+        match self {
+            Self::Notarize(_) => NOTARIZE,
+            Self::Nullify(_) => NULLIFY,
+            Self::Finalize(_) => FINALIZE,
+        }
+    }
+
+    /// What a vote key signs for the ballot: its encoding past the kind.
+    pub fn body(&self) -> Vec<u8> {
+        let Round { epoch, view } = self.round();
+        let mut body = Vec::new();
+        UInt(epoch).write(&mut body);
+        UInt(view).write(&mut body);
+        if let Self::Notarize(proposal) | Self::Finalize(proposal) = self {
+            UInt(proposal.parent).write(&mut body);
+            body.extend(proposal.payload);
+        }
+        body
+    }
+
+    /// The three pairs no honest signer casts in one round: two proposals notarized, two
+    /// finalized, or one finalized in a round it nullified.
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        self.round() == other.round()
+            && match (self, other) {
+                (Self::Notarize(a), Self::Notarize(b)) | (Self::Finalize(a), Self::Finalize(b)) => {
+                    a != b
+                }
+                (Self::Nullify(_), Self::Finalize(_)) | (Self::Finalize(_), Self::Nullify(_)) => {
+                    true
+                }
                 _ => false,
             }
     }
 }
 
-/// The namespace the consensus crate signs a vote of `kind` under on this chain.
-fn namespace(kind: u8, chain_id: u64, genesis: B256) -> Vec<u8> {
-    let kind: &[u8] = match kind {
-        NOTARIZE => b"_NOTARIZE",
-        NULLIFY => b"_NULLIFY",
-        _ => b"_FINALIZE",
-    };
-    [
-        b"TEMPO_ATTRIBUTABLE_",
-        chain_id.to_be_bytes().as_slice(),
-        genesis.as_slice(),
-        kind,
-    ]
-    .concat()
+impl Write for Ballot {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.kind().write(writer);
+        writer.put_slice(&self.body());
+    }
+}
+
+impl EncodeSize for Ballot {
+    fn encode_size(&self) -> usize {
+        1 + self.body().len()
+    }
+}
+
+impl Read for Ballot {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> core::result::Result<Self, Error> {
+        let kind = u8::read(reader)?;
+        let round = Round {
+            epoch: UInt::<u64>::read(reader)?.into(),
+            view: UInt::<u64>::read(reader)?.into(),
+        };
+        if kind == NULLIFY {
+            return Ok(Self::Nullify(round));
+        }
+        let proposal = Proposal {
+            round,
+            parent: UInt::<u64>::read(reader)?.into(),
+            payload: <[u8; 32]>::read(reader)?.into(),
+        };
+        match kind {
+            NOTARIZE => Ok(Self::Notarize(proposal)),
+            FINALIZE => Ok(Self::Finalize(proposal)),
+            kind => Err(Error::InvalidEnum(kind)),
+        }
+    }
+}
+
+/// What a chain's vote keys sign each kind of vote under. The threshold scheme's namespace is the
+/// same on every chain, and a key that signs on two chains, or on one restarted from a new
+/// genesis, has not signed twice.
+#[derive(Clone, Debug)]
+pub struct VoteNamespace([Vec<u8>; 3]);
+
+impl VoteNamespace {
+    pub fn new(chain_id: u64, genesis: B256) -> Self {
+        let chain_id = chain_id.to_be_bytes();
+        let kinds = [b"_NOTARIZE".as_slice(), b"_NULLIFY", b"_FINALIZE"];
+        Self(kinds.map(|kind| [b"TEMPO_ATTRIBUTABLE_", &chain_id[..], &genesis[..], kind].concat()))
+    }
+
+    /// The one `ballot` is signed under.
+    pub fn of(&self, ballot: &Ballot) -> &[u8] {
+        &self.0[usize::from(ballot.kind())]
+    }
+}
+
+/// A ballot under its signer's vote key's signature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Signed {
+    pub ballot: Ballot,
+    pub signature: VoteSignature,
+}
+
+impl Signed {
+    /// Whether the vote key `key` signed the ballot on the chain of `namespace`.
+    pub fn verify(&self, namespace: &VoteNamespace, key: &VoteKey) -> bool {
+        let (namespace, body) = (namespace.of(&self.ballot), self.ballot.body());
+        ops::verify_message::<MinSig>(key, namespace, &body, &self.signature).is_ok()
+    }
+}
+
+impl Write for Signed {
+    fn write(&self, writer: &mut impl BufMut) {
+        self.ballot.write(writer);
+        self.signature.write(writer);
+    }
+}
+
+impl EncodeSize for Signed {
+    fn encode_size(&self) -> usize {
+        self.ballot.encode_size() + self.signature.encode_size()
+    }
+}
+
+impl Read for Signed {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> core::result::Result<Self, Error> {
+        Ok(Self {
+            ballot: Ballot::read(reader)?,
+            signature: VoteSignature::read(reader)?,
+        })
+    }
+}
+
+/// Two ballots held against the validator key `signer`, whose vote key signed both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Evidence {
+    pub signer: B256,
+    pub first: Signed,
+    pub second: Signed,
+}
+
+impl Evidence {
+    /// Whether the ballots conflict and `key`, the signer's vote key as the registry holds it,
+    /// signed both on the chain of `namespace`.
+    pub fn verify(&self, namespace: &VoteNamespace, key: &VoteKey) -> bool {
+        self.first.ballot.conflicts_with(&self.second.ballot)
+            && self.first.verify(namespace, key)
+            && self.second.verify(namespace, key)
+    }
+}
+
+impl Write for Evidence {
+    fn write(&self, writer: &mut impl BufMut) {
+        writer.put_slice(self.signer.as_slice());
+        self.first.write(writer);
+        self.second.write(writer);
+    }
+}
+
+impl EncodeSize for Evidence {
+    fn encode_size(&self) -> usize {
+        B256::len_bytes() + self.first.encode_size() + self.second.encode_size()
+    }
+}
+
+impl Read for Evidence {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &()) -> core::result::Result<Self, Error> {
+        Ok(Self {
+            signer: <[u8; 32]>::read(reader)?.into(),
+            first: Signed::read(reader)?,
+            second: Signed::read(reader)?,
+        })
+    }
 }
 
 impl ValidatorConfigV2 {
@@ -98,56 +245,51 @@ impl ValidatorConfigV2 {
                 .is_some_and(|from| self.storage.timestamp() >= alloy::primitives::U256::from(from))
     }
 
-    /// The validator whose key signed both votes in the evidence, and their round.
+    /// The validator whose vote key signed both votes in the evidence, and their round.
     ///
     /// # Errors
     /// - `InvalidSignature` — the evidence does not decode, its votes do not conflict, they are
-    ///   for an epoch yet to come, or the key did not sign both on this chain
-    /// - `ValidatorNotFound` — the registry does not hold the key, or did not yet in that epoch
+    ///   for an epoch yet to come, or the validator's vote key did not sign both on this chain
+    /// - `ValidatorNotFound` — the registry does not hold the key, did not yet in that epoch, or
+    ///   holds no vote key for it
     pub fn equivocator(
         &self,
         call: IEquivocation::equivocatorCall,
     ) -> Result<IEquivocation::equivocatorReturn> {
         let invalid = ValidatorConfigV2Error::invalid_signature;
-        let mut reader = call.evidence.as_ref();
-        let key = reader.split_off(..B256::len_bytes()).ok_or_else(invalid)?;
-        let signer = PublicKey::decode(key).map_err(|_| invalid())?;
-        let (Some(first), Some(second)) = (Ballot::read(&mut reader), Ballot::read(&mut reader))
-        else {
-            Err(invalid())?
-        };
-        if !reader.is_empty() || !first.conflicts_with(&second) {
-            Err(invalid())?
-        }
+        // Paid before any point is decoded.
+        self.storage.deduct_gas(2 * BLS_VERIFY_GAS)?;
+        let evidence = Evidence::decode(call.evidence.as_ref()).map_err(|_| invalid())?;
+        let (round, key) = (evidence.first.ballot.round(), evidence.signer);
 
-        let (chain_id, genesis) = (self.storage.chain_id(), self.storage.genesis_hash());
-        self.storage.deduct_gas(2 * ED25519_VERIFY_GAS)?;
-        for ballot in [&first, &second] {
-            let namespace = namespace(ballot.kind, chain_id, genesis);
-            if !signer.verify(&namespace, ballot.body, &ballot.signature) {
-                Err(invalid())?
-            }
+        // A validator's votes count only under the vote key registered for it.
+        let vote_key = self
+            .vote_key_of(key)?
+            .ok_or_else(ValidatorConfigV2Error::validator_not_found)?;
+        let namespace = VoteNamespace::new(self.storage.chain_id(), self.storage.genesis_hash());
+        if !evidence.verify(&namespace, &vote_key) {
+            Err(invalid())?
         }
 
         // The record of this key, live or left by a rotation, names the address its bond is
         // under. A key cannot have signed before that record held a seat. After it left one it
         // still answers: failed key ceremonies carry an old set on for any number of epochs, and
         // only the key itself can make the two signatures.
-        let record = self.validator_by_public_key(B256::from_slice(key))?;
+        let record = self.validator_by_public_key(key)?;
         let epoch_length = self
             .storage
             .with_block_env(|block_env| block_env.epoch_length.get());
         let epochs_ago = (self.storage.block_number() / epoch_length)
-            .checked_sub(first.epoch)
+            .checked_sub(round.epoch)
             .ok_or_else(invalid)?;
-        if first.epoch < record.addedAtHeight / epoch_length {
+        if round.epoch < record.addedAtHeight / epoch_length {
             Err(ValidatorConfigV2Error::validator_not_found())?
         }
 
         Ok(IEquivocation::equivocatorReturn {
             validator: record.validatorAddress,
-            epoch: first.epoch,
-            viewNumber: first.view,
+            epoch: round.epoch,
+            viewNumber: round.view,
             epochsAgo: epochs_ago,
         })
     }
@@ -156,30 +298,31 @@ impl ValidatorConfigV2 {
 #[cfg(test)]
 mod tests {
     use alloy::{
-        primitives::{Address, Bytes, Keccak256},
+        primitives::Address,
         sol_types::{SolCall as _, SolValue as _},
     };
-    use commonware_codec::{Encode as _, Write as _};
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::{IValidatorConfigV2, VALIDATOR_CONFIG_V2_ADDRESS};
+    use tempo_contracts::precompiles::IValidatorConfigV2;
 
-    use super::*;
+    use super::{
+        super::vote_key::tests::{
+            CHAIN_ID, ENROLLED, GENESIS, NOW, enrolled, enrolment, register, vote_key,
+        },
+        *,
+    };
     use crate::{
         Precompile as _,
         storage::{StorageCtx, hashmap::HashMapStorageProvider},
-        validator_config_v2::{VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE},
+        validator_config_v2::VALIDATOR_NS_ROTATE,
     };
 
-    const CHAIN_ID: u64 = 1;
-    const GENESIS: B256 = B256::repeat_byte(7);
-    /// The epoch is one block long in these tests, so a height is its epoch.
-    const ENROLLED: u64 = 200;
-    const NOW: u64 = 210;
+    /// A round in the epoch between the validator's enrolment and now.
     const EPOCH: u64 = 205;
 
     /// A ballot of `kind` for view 3 of `epoch`, for the proposal `payload` names, signed by
-    /// `key` for the chain of `chain_id` and `genesis`.
+    /// `key`'s vote key for `chain`, an id and a genesis hash.
     fn ballot(key: &PrivateKey, kind: u8, epoch: u64, payload: u8, chain: (u64, B256)) -> Vec<u8> {
         let mut body = Vec::new();
         UInt(epoch).write(&mut body);
@@ -188,7 +331,8 @@ mod tests {
             UInt(2u64).write(&mut body);
             body.extend([payload; 32]);
         }
-        let signature = key.sign(&namespace(kind, chain.0, chain.1), &body);
+        let namespace = &VoteNamespace::new(chain.0, chain.1).0[usize::from(kind)];
+        let signature = ops::sign_message::<MinSig>(&vote_key(key), namespace, &body);
         [&[kind], body.as_slice(), signature.encode().as_ref()].concat()
     }
 
@@ -209,66 +353,17 @@ mod tests {
         )
     }
 
-    /// `key`'s signature over what the registry asks of a validator at `address`.
-    fn enrolment(
-        key: &PrivateKey,
-        namespace: &[u8],
-        address: Address,
-        ip: &str,
-        recipient: Option<Address>,
-    ) -> Bytes {
-        let ingress = format!("{ip}:8000");
-        let mut hasher = Keccak256::new();
-        hasher.update(CHAIN_ID.to_be_bytes());
-        hasher.update(VALIDATOR_CONFIG_V2_ADDRESS.as_slice());
-        hasher.update(address.as_slice());
-        for part in [ingress.as_str(), ip] {
-            hasher.update([u8::try_from(part.len()).unwrap()]);
-            hasher.update(part.as_bytes());
-        }
-        if let Some(recipient) = recipient {
-            hasher.update(recipient.as_slice());
-        }
-        key.sign(namespace, hasher.finalize().as_slice())
-            .encode()
-            .to_vec()
-            .into()
-    }
-
-    /// A registry in which `key` was enrolled for `validator` at [`ENROLLED`], by [`NOW`], in a
-    /// chain whose votes are attributable.
+    /// A registry in which `key` was enrolled for `validator` at [`ENROLLED`] with its vote key,
+    /// by [`NOW`], in a chain whose votes are attributable.
     fn with_registry<T>(
         key: &PrivateKey,
         validator: Address,
         owner: Address,
         test: impl FnOnce(&mut ValidatorConfigV2) -> eyre::Result<T>,
     ) -> eyre::Result<T> {
-        let mut storage = HashMapStorageProvider::new_with_spec(CHAIN_ID, TempoHardfork::T12);
-        storage.set_attributable_votes_time(Some(0));
-        storage.set_genesis_hash(GENESIS);
-        StorageCtx::enter(&mut storage, || {
-            let mut vc = ValidatorConfigV2::new();
-            vc.initialize(owner)?;
-            vc.storage.set_block_number(ENROLLED);
-            vc.add_validator(
-                owner,
-                IValidatorConfigV2::addValidatorCall {
-                    validatorAddress: validator,
-                    publicKey: B256::from_slice(&key.public_key().encode()),
-                    ingress: "192.168.1.1:8000".to_string(),
-                    egress: "192.168.1.1".to_string(),
-                    feeRecipient: validator,
-                    signature: enrolment(
-                        key,
-                        VALIDATOR_NS_ADD,
-                        validator,
-                        "192.168.1.1",
-                        Some(validator),
-                    ),
-                },
-            )?;
-            vc.storage.set_block_number(NOW);
-            test(&mut vc)
+        enrolled(0, key, validator, owner, |vc| {
+            register(vc, validator, 0, key)?;
+            test(vc)
         })
     }
 
@@ -284,7 +379,12 @@ mod tests {
                 (vote(NULLIFY, 0), vote(FINALIZE, 1)),
                 (vote(FINALIZE, 1), vote(NULLIFY, 0)),
             ] {
-                let found = vc.equivocator(evidence(&key, &first, &second))?;
+                let call = evidence(&key, &first, &second);
+                // The codec writes what it read, which these tests spell out by hand.
+                let decoded = Evidence::decode(call.evidence.as_ref()).unwrap();
+                assert_eq!(decoded.encode().as_ref(), call.evidence.as_ref());
+
+                let found = vc.equivocator(call)?;
                 assert_eq!(found.validator, validator);
                 assert_eq!((found.epoch, found.viewNumber), (EPOCH, 3));
                 assert_eq!(found.epochsAgo, NOW - EPOCH);
@@ -344,7 +444,7 @@ mod tests {
                 );
                 assert_eq!(vc.equivocator(pair), invalid);
             }
-            // One vote of the pair signed by another key.
+            // One vote of the pair signed by another's vote key.
             let pair = evidence(
                 &key,
                 &ballot(&key, NOTARIZE, EPOCH, 1, here),
@@ -404,7 +504,10 @@ mod tests {
                     validator
                 );
             }
-            // Its successor answers from the rotation on.
+            // Its successor answers from the rotation on, once it has a vote key of its own.
+            let unregistered = vc.equivocator(double_notarize(&successor, NOW));
+            assert_eq!(unregistered, not_found);
+            register(vc, validator, 0, &successor)?;
             assert_eq!(
                 vc.equivocator(double_notarize(&successor, NOW - 1)),
                 not_found

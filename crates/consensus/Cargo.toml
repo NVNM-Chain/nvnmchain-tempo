@@ -26,6 +26,7 @@ tempo-primitives = { workspace = true, features = ["reth"] }
 tempo-payload-types.workspace = true
 tempo-precompiles.workspace = true
 tempo-telemetry-util.workspace = true
+tempo-validator-config.workspace = true
 
 alloy-consensus.workspace = true
 alloy-evm.workspace = true
@@ -90,7 +91,6 @@ url.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks"] }
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-primitives = { workspace = true, features = ["arbitrary", "test-utils"] }
-tempo-validator-config.workspace = true
 
 # Constructing `TempoBuiltPayload` values in the executor test harness.
 reth-ethereum-engine-primitives.workspace = true

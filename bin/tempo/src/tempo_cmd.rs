@@ -1425,11 +1425,10 @@ impl Equivocations {
     async fn run(self) -> eyre::Result<()> {
         use std::collections::{BTreeMap, BTreeSet};
 
-        use tempo_consensus::{
-            consensus::Digest,
-            equivocation::{Evidence, Signed, namespace, pair},
-        };
+        use tempo_consensus::equivocation::pair;
+        use tempo_contracts::precompiles::IEquivocation;
         use tempo_node::rpc::consensus::{RoundId, SignedVote};
+        use tempo_precompiles::validator_config_v2::{Evidence, Signed, VoteKey, VoteNamespace};
 
         let mut providers = Vec::new();
         for url in &self.rpc_urls {
@@ -1452,28 +1451,19 @@ impl Equivocations {
             .ok_or_eyre("genesis block not found")?
             .header
             .hash;
-        let chain = namespace(chain_id, genesis);
+        let chain = VoteNamespace::new(chain_id, genesis);
 
-        // The nodes are not trusted: only evidence whose signatures hold is kept, one per signer
-        // and round.
-        let mut found = BTreeMap::new();
-        let mut keep = |evidence: Evidence<Digest>| {
-            if evidence.verify(&chain) {
-                found
-                    .entry((evidence.signer.clone(), evidence.first.ballot.round()))
-                    .or_insert(evidence);
-            }
-        };
-
+        let mut evidence: Vec<Evidence> = Vec::new();
         let mut disputed = BTreeSet::new();
         for (provider, url) in providers.iter().zip(&self.rpc_urls) {
             let held: Vec<Bytes> = provider
                 .raw_request("consensus_getEquivocations".into(), ())
                 .await
                 .wrap_err_with(|| format!("failed to get equivocations from `{url}`"))?;
-            held.iter()
-                .filter_map(|evidence| Evidence::decode(evidence.as_ref()).ok())
-                .for_each(&mut keep);
+            evidence.extend(
+                held.iter()
+                    .filter_map(|held| Evidence::decode(held.as_ref()).ok()),
+            );
             let rounds: Vec<RoundId> = provider
                 .raw_request("consensus_getDisputedRounds".into(), ())
                 .await
@@ -1482,21 +1472,54 @@ impl Equivocations {
         }
 
         // In a disputed round another node may hold the vote that conflicts with one held here.
+        let mut votes = Vec::new();
         for round in disputed {
-            let mut votes = Vec::new();
             for (provider, url) in providers.iter().zip(&self.rpc_urls) {
                 let held: Vec<SignedVote> = provider
                     .raw_request("consensus_getVotes".into(), (round,))
                     .await
                     .wrap_err_with(|| format!("failed to get votes from `{url}`"))?;
                 votes.extend(held.iter().filter_map(|held| {
-                    Some((
-                        PublicKey::decode(held.signer.as_slice()).ok()?,
-                        Signed::<Digest>::decode(held.vote.as_ref()).ok()?,
-                    ))
+                    Some((held.signer, Signed::decode(held.vote.as_ref()).ok()?))
                 }));
             }
-            pair(&chain, votes).into_iter().for_each(&mut keep);
+        }
+
+        // The nodes are not trusted: a vote counts only under the vote key the registry holds
+        // for its signer, and only evidence that key signed is kept, one per signer and round.
+        let registry = IEquivocation::new(VALIDATOR_CONFIG_V2_ADDRESS, first);
+        let signers: BTreeSet<_> = evidence
+            .iter()
+            .map(|evidence| evidence.signer)
+            .chain(votes.iter().map(|(signer, _)| *signer))
+            .collect();
+        let mut keys = BTreeMap::new();
+        for signer in signers {
+            let key = registry
+                .voteKey(signer)
+                .call()
+                .await
+                .wrap_err("failed to read a vote key from the registry")?;
+            if let Ok(key) = VoteKey::decode(key.as_ref()) {
+                keys.insert(signer, key);
+            }
+        }
+
+        let votes = votes
+            .into_iter()
+            .filter_map(|(signer, signed)| Some((signer, *keys.get(&signer)?, signed)));
+        let mut found = BTreeMap::new();
+        for evidence in evidence
+            .into_iter()
+            .filter(|evidence| {
+                let key = keys.get(&evidence.signer);
+                key.is_some_and(|key| evidence.verify(&chain, key))
+            })
+            .chain(pair(&chain, votes))
+        {
+            found
+                .entry((evidence.signer, evidence.first.ballot.round()))
+                .or_insert(evidence);
         }
 
         let output: Vec<_> = found
@@ -1504,9 +1527,9 @@ impl Equivocations {
             .map(|evidence| {
                 let round = evidence.first.ballot.round();
                 EquivocationOutput {
-                    signer: B256::from_slice(evidence.signer.as_ref()),
-                    epoch: round.epoch().get(),
-                    view: round.view().get(),
+                    signer: evidence.signer,
+                    epoch: round.epoch,
+                    view: round.view,
                     evidence: evidence.encode().into(),
                 }
             })

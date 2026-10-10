@@ -21,8 +21,8 @@ crate::sol! {
         /// The vote key registered for the validator key `publicKey`; empty if none.
         function voteKey(bytes32 publicKey) external view returns (bytes memory key);
 
-        /// The validator whose consensus key signed both votes in `evidence`, their round, and
-        /// how many epochs ago it was.
+        /// The validator whose vote key signed both votes in `evidence`, their round, and how
+        /// many epochs ago it was.
         ///
         /// Reverts with the registry's `InvalidSignature` if the votes do not conflict or the
         /// validator's vote key did not sign both on this chain, and with its `ValidatorNotFound`

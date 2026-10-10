@@ -7,6 +7,8 @@ pub mod dispatch;
 mod equivocation;
 mod vote_key;
 
+pub use equivocation::{Ballot, Evidence, Proposal, Round, Signed, VoteNamespace};
+
 pub use tempo_contracts::precompiles::{IEquivocation, IValidatorConfigV2, ValidatorConfigV2Error};
 use tempo_contracts::precompiles::{VALIDATOR_CONFIG_V2_ADDRESS, ValidatorConfigV2Event};
 use tempo_precompiles_macros::{Storable, contract};

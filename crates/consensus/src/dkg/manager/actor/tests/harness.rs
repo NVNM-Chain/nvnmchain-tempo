@@ -792,6 +792,7 @@ pub(super) fn outcome_header(height: Height, state: &State) -> TempoHeader {
         next_players: state.players().clone(),
         is_next_full_dkg: state.is_full_dkg,
         proposer_units: None,
+        vote_keys: None,
     };
 
     let mut header = header(height);

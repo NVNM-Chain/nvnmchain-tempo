@@ -713,6 +713,7 @@ mod tests {
             next_players: ordered::Set::try_from_iter(next_players)?,
             is_next_full_dkg: false,
             proposer_units: None,
+            vote_keys: None,
         })
     }
 

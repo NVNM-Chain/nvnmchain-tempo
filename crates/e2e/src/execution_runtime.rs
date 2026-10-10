@@ -61,6 +61,7 @@ use tempo_precompiles::{
         IValidatorConfigV2, VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE, ValidatorConfigV2,
     },
 };
+use tempo_validator_config::VoteKeypair;
 use tokio::sync::oneshot;
 
 use crate::{ConsensusNodeConfig, TestingNode};
@@ -79,6 +80,7 @@ pub struct Builder {
     validators: Option<ordered::Map<PublicKey, ConsensusNodeConfig>>,
     proposer_weights: Option<Vec<u64>>,
     attributable_votes_time: Option<u64>,
+    signers_without_vote_key: usize,
 }
 
 impl Builder {
@@ -90,12 +92,21 @@ impl Builder {
             validators: None,
             proposer_weights: None,
             attributable_votes_time: None,
+            signers_without_vote_key: 0,
         }
     }
 
     pub fn with_attributable_votes_time(self, attributable_votes_time: Option<u64>) -> Self {
         Self {
             attributable_votes_time,
+            ..self
+        }
+    }
+
+    /// Leaves the last `signers` of the signers, by key, without a vote key.
+    pub fn with_signers_without_vote_key(self, signers: usize) -> Self {
+        Self {
+            signers_without_vote_key: signers,
             ..self
         }
     }
@@ -142,12 +153,30 @@ impl Builder {
             validators,
             proposer_weights,
             attributable_votes_time,
+            signers_without_vote_key,
         } = self;
 
         let epoch_length = epoch_length.ok_or_eyre("must specify epoch length")?;
-        let initial_dkg_outcome =
+        let mut initial_dkg_outcome =
             initial_dkg_outcome.ok_or_eyre("must specify initial DKG outcome")?;
         let validators = validators.ok_or_eyre("must specify validators")?;
+        // Where votes are to be attributable, the signers have their vote keys from genesis, in
+        // the registry and in the outcome the first epoch reads them from: all but the last
+        // `signers_without_vote_key` by key.
+        let players = initial_dkg_outcome.players().clone();
+        let keyed = move |player: &PublicKey| {
+            let place = players.position(player);
+            attributable_votes_time.is_some()
+                && place.is_some_and(|place| place < players.len() - signers_without_vote_key)
+        };
+        if attributable_votes_time.is_some() {
+            let vote_key = |player| {
+                let validator = validators.get_value(player)?;
+                keyed(player).then(|| VoteKeypair::derive(&validator.private_key).public())
+            };
+            let keys = initial_dkg_outcome.players().iter().map(vote_key);
+            initial_dkg_outcome.vote_keys = Some(keys.collect());
+        }
 
         assert_eq!(
             initial_dkg_outcome.next_players(),
@@ -227,6 +256,7 @@ impl Builder {
                         .wrap_err("failed to initialize validator config v2")
                         .unwrap();
 
+                    let mut enrolled = 0;
                     for (public_key, validator) in validators {
                         if let ConsensusNodeConfig {
                             address,
@@ -259,6 +289,14 @@ impl Builder {
                                     },
                                 )
                                 .unwrap();
+                            if keyed(&public_key) {
+                                let registration = VoteKeypair::derive(&private_key)
+                                    .registration(genesis.config.chain_id, enrolled);
+                                validator_config_v2
+                                    .set_vote_key(address, registration)
+                                    .unwrap();
+                            }
+                            enrolled += 1;
                         }
                     }
                 },

@@ -279,6 +279,16 @@ impl TempoChainSpec {
         self.default_follow_url
     }
 
+    /// Whether consensus votes are attributable in a block stamped `timestamp`: at T12 or later,
+    /// from the genesis' `attributableVotesTime`.
+    pub fn votes_are_attributable_at(&self, timestamp: u64) -> bool {
+        self.tempo_hardfork_at(timestamp).is_t12()
+            && self
+                .info
+                .attributable_votes_time()
+                .is_some_and(|from| timestamp >= from)
+    }
+
     /// Returns the shared gas limit for the given timestamp and block gas limit.
     ///
     /// Prefer [`TempoConsensusSpec::shared_gas_limit_at`] when working with a generic Tempo

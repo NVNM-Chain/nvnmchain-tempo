@@ -47,7 +47,7 @@ use commonware_consensus::{
     },
     types::{Epoch, EpochDelta, Epocher as _, Height},
 };
-use commonware_cryptography::ed25519::PublicKey;
+use commonware_cryptography::{certificate, ed25519::PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     Blocker, Receiver, Sender,
@@ -66,6 +66,7 @@ use reth_ethereum::chainspec::EthChainSpec;
 use tempo_chainspec::TempoHardforks as _;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_primitives::TempoHeader;
+use tempo_validator_config::VoteKeypair;
 use tracing::{Level, Span, debug, error, error_span, info, instrument, warn, warn_span};
 
 use crate::{
@@ -129,7 +130,7 @@ where
         );
         let attributable_votes = context.gauge(
             "attributable_votes",
-            "whether votes in the most recently started epoch carry their signer's own signature",
+            "whether votes in the most recently started epoch carry the signature of their signer's vote key",
         );
         let how_often_signer = context.counter(
             "how_often_signer",
@@ -338,7 +339,8 @@ where
 
         self.config.scheme_provider.register(epoch, scheme.clone());
 
-        let (floor, boundary_timestamp, proposer_units) = match epoch.previous().map(|prev| {
+        // The block the epoch starts from: its preceding boundary, or the genesis.
+        let (floor, boundary) = match epoch.previous().map(|prev| {
             self.config
                 .epoch_strategy
                 .last(prev)
@@ -359,33 +361,30 @@ where
                         )
                     })?;
 
-                let header = self.get_header(boundary_height).await?;
-                // The outcome this epoch's players come from, and with them their odds of
-                // proposing, so every node draws leaders alike however it entered the epoch.
-                let outcome = OnchainDkgOutcome::read(&mut header.extra_data().as_ref()).map_err(
-                    |error| {
-                        eyre!("boundary block `{boundary_height}` holds no DKG outcome: {error}")
-                    },
-                )?;
-                let proposer_units = outcome.proposer_units.as_ref().map(|units| {
-                    outcome
-                        .players()
-                        .iter()
-                        .cloned()
-                        .zip(units.iter().copied())
-                        .collect()
-                });
-                (digest, header.timestamp(), proposer_units)
+                (digest, self.get_header(boundary_height).await?)
             }
             None => {
                 let chain_spec = self.config.execution_node.chain_spec();
                 (
                     Digest(chain_spec.genesis_hash()),
-                    chain_spec.genesis_header().timestamp(),
-                    None,
+                    chain_spec.genesis_header().clone(),
                 )
             }
         };
+        let boundary_timestamp = boundary.timestamp();
+        // The outcome this epoch's players come from, and with them their odds of proposing and
+        // their vote keys, so every node draws leaders and counts votes alike however it entered
+        // the epoch.
+        let outcome = OnchainDkgOutcome::read(&mut boundary.extra_data().as_ref())
+            .map_err(|error| eyre!("epoch `{epoch}` starts from no DKG outcome: {error}"))?;
+        let proposer_units = outcome.proposer_units.as_ref().map(|units| {
+            outcome
+                .players()
+                .iter()
+                .cloned()
+                .zip(units.iter().copied())
+                .collect()
+        });
 
         // Each epoch constructs one elector. Use its preceding finalized boundary so nodes
         // choose the same version even when entering or restarting at different times.
@@ -411,15 +410,22 @@ where
         // Chosen as the elector is, by the epoch's preceding boundary: a node expecting the other
         // format takes these votes for garbage.
         let chain_spec = self.config.execution_node.chain_spec();
-        let attributable = chain_spec.tempo_hardfork_at(boundary_timestamp).is_t12()
-            && chain_spec
-                .info
-                .attributable_votes_time()
-                .is_some_and(|from| boundary_timestamp >= from);
+        let attributable = match outcome.vote_keys.as_deref() {
+            Some(keys) if chain_spec.votes_are_attributable_at(boundary_timestamp) => {
+                Some(attributable::Scheme::new(
+                    scheme.clone(),
+                    keys,
+                    VoteKeypair::derive(&self.config.signer).private(),
+                    chain_spec.chain_id(),
+                    chain_spec.genesis_hash(),
+                ))
+            }
+            _ => None,
+        };
         self.metrics
             .attributable_votes
             .metric()
-            .set(i64::from(attributable));
+            .set(i64::from(attributable.is_some()));
 
         let networks = (
             vote_mux.register(epoch.get()).await.unwrap(),
@@ -429,19 +435,13 @@ where
 
         info!(
             mode = %self.config.verification_mode,
-            attributable,
+            attributable = attributable.is_some(),
             "starting simplex engine"
         );
 
         let elector = WeightedRandom::new(elector, proposer_units);
         let marshal = self.config.marshal.clone();
-        let engine = if attributable {
-            let scheme = attributable::Scheme::new(
-                scheme,
-                self.config.signer.clone(),
-                chain_spec.chain_id(),
-                chain_spec.genesis_hash(),
-            );
+        let engine = if let Some(scheme) = attributable {
             let recorder = attributable::Recorder {
                 scheme: scheme.clone(),
                 votes: self.config.votes.clone(),
@@ -508,6 +508,13 @@ where
         WeightedRandom<PublicKey>: elector::Config<S>,
         F: Reporter<Activity = Activity<S, Digest>>,
     {
+        // A journal holds votes in its scheme's format, so each format keeps its own: an epoch
+        // restarted under the other one would not read the votes it had journaled.
+        let format = if <S as certificate::Scheme>::is_attributable() {
+            "_attributable"
+        } else {
+            ""
+        };
         simplex::Engine::new(
             self.context.child("simplex").with_attribute("epoch", epoch),
             simplex::Config {
@@ -519,7 +526,7 @@ where
 
                 reporter,
                 partition: format!(
-                    "{partition_prefix}_consensus_epoch_{epoch}",
+                    "{partition_prefix}_consensus_epoch_{epoch}{format}",
                     partition_prefix = self.config.partition_prefix
                 ),
 
