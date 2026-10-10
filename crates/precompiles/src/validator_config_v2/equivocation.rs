@@ -237,7 +237,7 @@ impl Read for Evidence {
 
 impl ValidatorConfigV2 {
     /// Whether consensus votes carry their signer's signature by this block.
-    pub(super) fn votes_are_attributable(&self) -> bool {
+    pub fn votes_are_attributable(&self) -> bool {
         self.storage.spec().is_t12()
             && self
                 .storage

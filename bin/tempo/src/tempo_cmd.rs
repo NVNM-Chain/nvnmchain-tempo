@@ -177,7 +177,7 @@ pub enum ConsensusSubcommand {
     /// Set the validator fee token.
     SetValidatorToken(SetValidatorToken),
     /// Register a validator's vote key, derived from its signing key (once, from the validator's
-    /// own address; until then its votes do not count once votes are attributable)
+    /// own address; without it no seat once votes are attributable)
     SetVoteKey(SetVoteKey),
     /// Transfer validator ownership (refused for a validator that has a vote key)
     TransferValidatorOwnership(TransferValidatorOwnership),

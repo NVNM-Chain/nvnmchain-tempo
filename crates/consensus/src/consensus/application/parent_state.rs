@@ -26,7 +26,7 @@ use crate::{
     consensus::block::Block,
     utils::public_key_to_b256,
     validators::{
-        NextPlayers, read_active_peers, read_elected_players, read_validator_config_with_state,
+        NextPlayers, read_elected_players, read_seatable_players, read_validator_config_with_state,
     },
     weighted_elector,
 };
@@ -85,7 +85,8 @@ impl TempoParentState {
     }
 
     /// Returns the validators that are active in the validator config at
-    /// `parent`. They are the players of the ceremony in the next epoch.
+    /// `parent`, and from attributable votes on have a vote key there. They
+    /// are the players of the ceremony in the next epoch.
     ///
     /// Where the genesis names a staking election, that contract picks them
     /// among the active validators; `current_players` stay if it cannot. From
@@ -116,9 +117,8 @@ impl TempoParentState {
             .wrap_err("failed determining the elected players")?,
             None => NextPlayers {
                 players: self
-                    .read_validator_config(parent, read_active_peers)
-                    .wrap_err("failed reading peers from validator config v2")?
-                    .into_keys(),
+                    .read_validator_config(parent, read_seatable_players)
+                    .wrap_err("failed reading peers from validator config v2")?,
                 weights: None,
             },
         };

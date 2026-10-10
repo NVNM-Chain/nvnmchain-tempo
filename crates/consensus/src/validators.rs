@@ -124,6 +124,40 @@ pub(crate) fn read_active_peers(
     Ok(ordered::Map::try_from_iter(all).expect("hashmaps don't contain duplicates"))
 }
 
+/// Those of `validators` that may be seated. Once votes are attributable, only those with a vote
+/// key, as no other's vote counts. All of them if those are fewer than the smallest committee: an
+/// epoch short of vote keys then stops with its committee whole, where a few would run it alone.
+fn seatable<T>(
+    config: &ValidatorConfigV2,
+    validators: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> &PublicKey,
+) -> eyre::Result<Vec<T>> {
+    if !config.votes_are_attributable() {
+        return Ok(validators.into_iter().collect());
+    }
+    let mut seats = Vec::new();
+    for validator in validators {
+        let vote_key = config.vote_key_of(public_key_to_b256(key(&validator)))?;
+        seats.push((validator, vote_key.is_some()));
+    }
+    let keyed = seats.iter().filter(|(_, keyed)| *keyed).count();
+    let all = keyed < MIN_ELECTED_COMMITTEE.min(seats.len());
+    Ok(seats
+        .into_iter()
+        .filter_map(|(validator, keyed)| (all || keyed).then_some(validator))
+        .collect())
+}
+
+/// The next epoch's players where the genesis names no staking election: the active validators
+/// that may be seated.
+pub(crate) fn read_seatable_players(
+    config: &ValidatorConfigV2,
+) -> eyre::Result<ordered::Set<PublicKey>> {
+    let active = read_active_peers(config)?.into_keys();
+    let seated = seatable(config, active, |key| key)?;
+    Ok(ordered::Set::from_iter_dedup(seated))
+}
+
 /// Reads the validator state at the given block hash.
 ///
 /// Note that `block_hash` must be a block hash of a canonical block.
@@ -201,14 +235,19 @@ pub(crate) struct NextPlayers {
     pub(crate) weights: Option<BTreeMap<PublicKey, U256>>,
 }
 
-/// The smallest committee the election, or its fallback, may seat (3f+1, f=1).
+/// The smallest committee the election, its fallback or the vote keys may seat (3f+1, f=1).
 const MIN_ELECTED_COMMITTEE: usize = 4;
+
+/// The largest committee the election seats, the staking contract's `MAX_SEATS`, and so the most
+/// of the registry its last fallback takes: the outcome of a larger one may not fit a header.
+const MAX_ELECTED_COMMITTEE: usize = 21;
 
 /// The next epoch's players where the genesis names a staking election, read from `state`, the
 /// post-state of the block with `header`. Once the election is active: the elected committee,
 /// else the `current_players` still registered, else the whole registry; before that, the
-/// registry. If `weighted`, a seated election's weights come with them. Each choice is a function
-/// of state, so every node makes it; an `Err` is node-local.
+/// registry. From T12 (`weighted`) a seated election's weights come with them, and the registry is
+/// cut to `MAX_ELECTED_COMMITTEE`. Each choice is a function of state, so every node makes it; an
+/// `Err` is node-local.
 #[instrument(skip_all, fields(%staking_election), err(Display))]
 pub(crate) fn read_elected_players(
     node: impl ExecutionNode,
@@ -251,8 +290,13 @@ pub(crate) fn read_elected_players(
         );
         players
     } else {
+        let most = if weighted {
+            MAX_ELECTED_COMMITTEE
+        } else {
+            usize::MAX
+        };
         let mut keys = HashSet::new();
-        for validator in &registry {
+        for validator in registry.iter().take(most) {
             if !keys.insert(validator.public_key().clone()) {
                 warn!(duplicate = %validator.public_key(), "found duplicate public keys");
             }
@@ -305,8 +349,8 @@ fn read_config_on_evm<T>(
     )
 }
 
-/// The active validator set in contract order, skipping entries that do not decode. Duplicate
-/// keys are kept: the election falls back on them.
+/// The active validators that may be seated, in contract order, skipping entries that do not
+/// decode. Duplicate keys are kept: the election falls back on them.
 fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
     read_config_on_evm(evm, |config| {
         let mut registry = Vec::new();
@@ -324,7 +368,7 @@ fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
                 registry.push(decoded);
             }
         }
-        Ok(registry)
+        seatable(config, registry, DecodedValidatorV2::public_key)
     })
 }
 
@@ -548,15 +592,20 @@ mod tests {
     use alloy_primitives::{Bytes, U256};
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use reth_ethereum::evm::revm::context::result::HaltReason;
+    use reth_ethereum::{chainspec::EthChainSpec as _, evm::revm::context::result::HaltReason};
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use tempo_chainspec::{
+        hardfork::TempoHardfork,
+        spec::{DEV, TempoChainSpec},
+    };
     use tempo_node::evm::TempoEvmConfig;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
         storage::hashmap::HashMapStorageProvider,
         tip20::tip20_slots,
-        validator_config_v2::{VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE},
+        validator_config_v2::{IEquivocation, VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE},
     };
+    use tempo_validator_config::VoteKeypair;
 
     use super::*;
     use crate::utils::public_key_to_b256;
@@ -566,6 +615,7 @@ mod tests {
     /// A node whose one block, at timestamp 1, has `provider` as its post-state.
     struct TestExecutionNode {
         provider: MockEthProvider,
+        evm_config: TempoEvmConfig,
     }
 
     impl TestExecutionNode {
@@ -602,7 +652,7 @@ mod tests {
             db: State<StateProviderDatabase<EvmStateProviderBox>>,
             header: &TempoHeader,
         ) -> eyre::Result<ConfigEvm> {
-            TempoEvmConfig::moderato()
+            self.evm_config
                 .evm_for_block(db, header)
                 .map_err(eyre::Report::new)
         }
@@ -718,7 +768,10 @@ mod tests {
                 ExtendedAccount::new(0, U256::ZERO).with_bytecode(code),
             );
         }
-        TestExecutionNode { provider }
+        TestExecutionNode {
+            provider,
+            evm_config: TempoEvmConfig::moderato(),
+        }
     }
 
     /// A node whose registry holds the validators of `seeds`, in that order, the entries at
@@ -892,6 +945,79 @@ mod tests {
     /// Picks the registry entries at `addresses`, as the election does.
     fn at(addresses: &[Address]) -> impl Fn(&DecodedValidatorV2) -> bool + '_ {
         move |validator| addresses.contains(&validator.address)
+    }
+
+    /// The vote key of the validator of `seed`, as it registers it in the registry of a seeded
+    /// node.
+    fn vote_key_registration(seed: u8) -> IEquivocation::setVoteKeyCall {
+        VoteKeypair::derive(&key(seed)).registration(1, u64::from(seed) - 1)
+    }
+
+    #[test]
+    fn only_validators_with_a_vote_key_are_seated() {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T12);
+        let mut players = |attributable_from, keyed: &[u8]| {
+            storage.set_attributable_votes_time(attributable_from);
+            StorageCtx::enter(&mut storage, || -> eyre::Result<_> {
+                let mut config = ValidatorConfigV2::new();
+                if !config.is_initialized()? {
+                    config.initialize(OWNER)?;
+                    for seed in 1..=5 {
+                        config.add_validator(OWNER, add_validator_call(seed, address(seed)))?;
+                    }
+                }
+                for &seed in keyed {
+                    config.set_vote_key(address(seed), vote_key_registration(seed))?;
+                }
+                read_seatable_players(&config)
+            })
+            .unwrap()
+        };
+
+        let all = keys(&[1, 2, 3, 4, 5]);
+        assert_eq!(players(None, &[]), all);
+        assert_eq!(players(Some(0), &[]), all);
+        // Two with a key are no committee: all five stay, and their epoch stops for want of keys.
+        assert_eq!(players(Some(0), &[1, 3]), all);
+        assert_eq!(players(Some(0), &[2, 4]), keys(&[1, 2, 3, 4]));
+        assert_eq!(players(None, &[]), all);
+    }
+
+    /// The election picks among the same validators: here it cannot answer, and its fallback
+    /// seats the registry.
+    #[test]
+    fn an_election_leaves_out_validators_without_a_vote_key() {
+        let mut node = seeded(
+            |config| {
+                for seed in 1..=6 {
+                    config.add_validator(OWNER, add_validator_call(seed, address(seed)))?;
+                }
+                for seed in [1, 2, 4, 5, 6] {
+                    config.set_vote_key(address(seed), vote_key_registration(seed))?;
+                }
+                Ok(())
+            },
+            None,
+        );
+        assert_eq!(next_players(&node, None, &[]), keys(&[1, 2, 3, 4, 5, 6]));
+
+        let mut genesis = DEV.genesis().clone();
+        let fields = &mut genesis.config.extra_fields;
+        fields
+            .insert_value("attributableVotesTime".to_string(), 0)
+            .unwrap();
+        node.evm_config = TempoEvmConfig::new(TempoChainSpec::from_genesis(genesis).into());
+        assert_eq!(next_players(&node, None, &[]), keys(&[1, 2, 4, 5, 6]));
+    }
+
+    #[test]
+    fn a_fallback_to_the_registry_seats_no_more_than_an_election() {
+        let node = election_among(1..=25, &[], None);
+        let all: Vec<u8> = (1..=25).collect();
+        assert_eq!(next_players(&node, None, &[]), keys(&all));
+        // From T12, the first of them in the registry's order.
+        let cut = read_next_players(&node, None, true, &[]).players;
+        assert_eq!(cut, keys(&all[..MAX_ELECTED_COMMITTEE]));
     }
 
     #[test]

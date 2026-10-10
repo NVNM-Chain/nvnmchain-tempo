@@ -78,16 +78,15 @@ fn validators_switch_to_attributable_votes_at_an_epoch_boundary() {
     });
 }
 
-/// The registry holds no vote key for one validator of four. Its votes do not count, so the other
-/// three, a quorum, finalize without it, across a boundary whose outcome leaves it out again, and
-/// it follows them.
+/// The registry holds no vote key for one validator of five. Its votes do not count, so the other
+/// four, a quorum, finalize without it. A ceremony then seats only them, and it follows.
 #[test_traced]
 fn validators_finalize_without_the_one_that_has_no_vote_key() {
     let _ = tempo_eyre::install();
     const EPOCH_LENGTH: u64 = 20;
 
     let setup = Setup::new(crate::VERIFICATION_MODE)
-        .how_many_signers(4)
+        .how_many_signers(5)
         .epoch_length(EPOCH_LENGTH)
         .attributable_votes_time(0)
         .signers_without_vote_key(1);
@@ -98,21 +97,16 @@ fn validators_finalize_without_the_one_that_has_no_vote_key() {
         join_all(validators.iter_mut().map(|node| node.start(&context))).await;
         connect_execution_peers(&validators).await;
 
-        let target = FixedEpocher::new(NZU64!(EPOCH_LENGTH))
-            .first(Epoch::new(2))
-            .unwrap();
+        // The genesis seats all five for epoch one's ceremony too. The four run the epoch after a
+        // ceremony for them succeeds: with one dealer mute, it needs a block from each other one.
         wait_for_metrics(&context, |metrics| {
-            metrics.consensus_at_height(target.get()) == validators.len()
+            validators.iter().all(|validator| {
+                let metrics = metrics.for_scope(validator);
+                metrics.value::<u64>(ATTRIBUTABLE_VOTES) == Some(1)
+                    && metrics.has_consensus_participants(4)
+            })
         })
         .await;
-
-        let metrics = context.to_metrics();
-        for validator in &validators {
-            let attributable = metrics
-                .for_scope(validator)
-                .value::<u64>(ATTRIBUTABLE_VOTES);
-            assert_eq!(attributable, Some(1));
-        }
     });
 }
 

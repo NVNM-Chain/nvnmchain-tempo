@@ -10,8 +10,7 @@ crate::sol! {
 
         /// Registers, once, the BLS key the validator at `idx` signs its consensus votes with: a
         /// compressed G2 point and its proof of possession for this validator on this chain. Only
-        /// the validator's own address may send it. Until an epoch starts with the key, the
-        /// validator's votes do not count.
+        /// the validator's own address may send it. Without the key the validator takes no seat.
         ///
         /// Reverts with the registry's `PublicKeyAlreadyExists` if the validator has a vote key or
         /// the key is another's, `InvalidPublicKey` if `key` is not one, and `InvalidSignature`
