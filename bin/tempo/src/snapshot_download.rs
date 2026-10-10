@@ -4,11 +4,11 @@ use std::{
     time::Instant,
 };
 
-use clap::{ArgMatches, FromArgMatches, Parser};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser};
 use eyre::{Context as _, OptionExt, ensure};
 use futures::TryStreamExt;
 use reth_cli_commands::download::{
-    DownloadCommand, DownloadPlanArchive,
+    DownloadCommand, DownloadDefaults, DownloadPlanArchive,
     manifest::{OutputFileChecksum, SnapshotManifest},
 };
 use reth_cli_runner::CliRunner;
@@ -49,12 +49,40 @@ pub(crate) struct Args {
     consensus_datadir: Option<PathBuf>,
 }
 
-pub(crate) fn run_with_runner(matches: &ArgMatches, runner: CliRunner) -> eyre::Result<()> {
-    let args = Args::from_arg_matches(matches).wrap_err("failed to parse args")?;
+/// Pointer file the snapshot host publishes for its newest snapshot.
+const LATEST_SNAPSHOT_FILE: &str = "latest.json";
 
+/// The `latest.json` pointer served by the snapshot host.
+#[derive(Debug, serde::Deserialize)]
+struct LatestSnapshot {
+    block: u64,
+    manifest_url: String,
+}
+
+pub(crate) fn run_with_runner(matches: &ArgMatches, runner: CliRunner) -> eyre::Result<()> {
     let force = matches.get_one::<bool>("force").copied().unwrap_or(false);
 
     runner.block_on(async move {
+        // NVNM's snapshot host has no `/api/snapshots` discovery API. When no source is named,
+        // read the host's `latest.json` pointer and feed its manifest URL to Reth.
+        let injected = if matches.get_one::<String>("url").is_none()
+            && matches.get_one::<String>("manifest_url").is_none()
+            && matches.get_one::<PathBuf>("manifest_path").is_none()
+            && !matches.get_flag("list")
+        {
+            Some(inject_manifest_url(discover_latest_manifest_url().await?)?)
+        } else {
+            None
+        };
+        let matches = match &injected {
+            Some(matches) => matches
+                .subcommand_matches("download")
+                .ok_or_eyre("`download` subcommand missing after re-parsing args")?,
+            None => matches,
+        };
+
+        let args = Args::from_arg_matches(matches).wrap_err("failed to parse args")?;
+
         if args.inner.prints_plan_json() {
             let (mut plan, prepared) = args
                 .inner
@@ -101,6 +129,38 @@ pub(crate) fn run_with_runner(matches: &ArgMatches, runner: CliRunner) -> eyre::
 
         Ok(())
     })
+}
+
+/// Fetches `<snapshot source>/latest.json` to find the newest manifest URL.
+async fn discover_latest_manifest_url() -> eyre::Result<String> {
+    let source = DownloadDefaults::get_global()
+        .default_base_url
+        .trim_end_matches('/')
+        .to_string();
+    let url = format!("{source}/{LATEST_SNAPSHOT_FILE}");
+
+    let latest: LatestSnapshot = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .wrap_err_with(|| format!("Failed to fetch latest snapshot pointer from {url}"))?
+        .json()
+        .await
+        .wrap_err("invalid latest snapshot pointer")?;
+
+    info!(block = latest.block, manifest_url = %latest.manifest_url, "Discovered latest snapshot manifest");
+    Ok(latest.manifest_url)
+}
+
+/// Re-parses the command line with `--manifest-url` injected, since Reth keeps the field private.
+fn inject_manifest_url(manifest_url: String) -> eyre::Result<ArgMatches> {
+    let mut argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    argv.push(format!("--manifest-url={manifest_url}").into());
+    crate::TempoCli::command()
+        .mut_subcommand("download", |_| Args::command())
+        .try_get_matches_from(argv)
+        .wrap_err("failed to re-parse args with discovered snapshot manifest URL")
 }
 
 struct LoadedConsensusManifest {
