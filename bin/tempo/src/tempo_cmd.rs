@@ -42,7 +42,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_precompiles::validator_config_v2::{VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE};
-use tempo_validator_config::ValidatorConfig;
+use tempo_validator_config::{ValidatorConfig, VoteKeypair};
 
 use crate::{init_state, p2p_proxy::P2pProxyArgs, regenesis, shadow_replay};
 
@@ -162,18 +162,24 @@ pub enum ConsensusSubcommand {
     DeactivateValidator(DeactivateValidator),
     /// Encrypt an existing ed25519 signing key using a passphrase.
     EncryptSigningKey(EncryptSigningKey),
+    /// Find validators that signed conflicting votes, from what several nodes received.
+    Equivocations(Equivocations),
     /// Generates an ed25519 signing key pair to be used in consensus.
     #[command(alias = "generate-private-key")]
     GenerateSigningKey(GenerateSigningKey),
-    /// Rotate a validator to a new identity.
+    /// Rotate a validator to a new identity (then set its vote key; destroy the old signing key)
     RotateValidator(RotateValidator),
     /// Set the validator Ip Address
     SetValidatorIpAddress(SetValidatorIpAddress),
-    /// Set the validator fee recipient
+    /// Set the validator fee recipient (from T12 the registry owner only, where the genesis names
+    /// a fee router factory)
     SetValidatorFeeRecipient(SetValidatorFeeRecipient),
     /// Set the validator fee token.
     SetValidatorToken(SetValidatorToken),
-    /// Transfer validator ownership
+    /// Register a validator's vote key, derived from its signing key (once, from the validator's
+    /// own address; without it no seat once votes are attributable)
+    SetVoteKey(SetVoteKey),
+    /// Transfer validator ownership (refused for a validator that has a vote key)
     TransferValidatorOwnership(TransferValidatorOwnership),
     /// Look up a validator by etheruem address, e25519 public key, or index.
     Validator(ValidatorInfo),
@@ -194,7 +200,9 @@ impl ConsensusSubcommand {
             Self::SetValidatorIpAddress(args) => args.run().await,
             Self::SetValidatorFeeRecipient(args) => args.run().await,
             Self::SetValidatorToken(args) => args.run().await,
+            Self::SetVoteKey(args) => args.run().await,
             Self::EncryptSigningKey(args) => args.run(),
+            Self::Equivocations(args) => args.run().await,
             Self::GenerateSigningKey(args) => args.run(),
             Self::ShowVerificationKey(args) => args.run(),
             Self::Validator(args) => args.run().await,
@@ -790,6 +798,34 @@ impl SetValidatorIpAddress {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct SetVoteKey {
+    #[command(flatten)]
+    signing_key: SigningKeyArgs,
+
+    #[command(flatten)]
+    submit: ValidatorTransactionArgs,
+}
+
+impl SetVoteKey {
+    async fn run(self) -> eyre::Result<()> {
+        let provider = self.submit.provider().await?;
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .wrap_err("failed to get chain id")?;
+
+        let signing_key = self.signing_key.read()?.into_inner();
+        let public_key = B256::from_slice(signing_key.public_key().as_ref());
+        let validator =
+            read_validator_from_contract(&provider, ValidatorId::PublicKey(public_key)).await?;
+
+        let call = VoteKeypair::derive(&signing_key).registration(chain_id, validator.index);
+        self.submit.call(&call).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, clap::Args)]
 pub struct DeactivateValidator {
     /// Validator ethereum address, ed25519 public key, or index
     #[arg()]
@@ -1365,6 +1401,142 @@ struct InfoOutput {
     next_full_dkg_epoch: u64,
     /// List of validators participating in the DKG
     validators: Vec<ValidatorOutput>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct Equivocations {
+    /// RPC URLs of the nodes whose votes to compare. A validator that sends its peers different
+    /// votes is found only when nodes that received each are among them.
+    #[arg(long = "rpc-url", required = true)]
+    rpc_urls: Vec<String>,
+}
+
+/// Evidence that `signer` signed conflicting votes in a round.
+#[derive(Debug, Serialize)]
+struct EquivocationOutput {
+    signer: B256,
+    epoch: u64,
+    view: u64,
+    /// The encoded evidence.
+    evidence: Bytes,
+}
+
+impl Equivocations {
+    async fn run(self) -> eyre::Result<()> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use tempo_consensus::equivocation::pair;
+        use tempo_contracts::precompiles::IEquivocation;
+        use tempo_node::rpc::consensus::{RoundId, SignedVote};
+        use tempo_precompiles::validator_config_v2::{Evidence, Signed, VoteKey, VoteNamespace};
+
+        let mut providers = Vec::new();
+        for url in &self.rpc_urls {
+            let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(url)
+                .await
+                .wrap_err_with(|| format!("failed to connect to `{url}`"))?;
+            providers.push(provider);
+        }
+        let first = providers.first().ok_or_eyre("no RPC URL given")?;
+        let chain_id = first
+            .get_chain_id()
+            .await
+            .wrap_err("failed to get chain id")?;
+        let genesis = first
+            .get_block_by_number(0.into())
+            .hashes()
+            .await
+            .wrap_err("failed to get the genesis block")?
+            .ok_or_eyre("genesis block not found")?
+            .header
+            .hash;
+        let chain = VoteNamespace::new(chain_id, genesis);
+
+        let mut evidence: Vec<Evidence> = Vec::new();
+        let mut disputed = BTreeSet::new();
+        for (provider, url) in providers.iter().zip(&self.rpc_urls) {
+            let held: Vec<Bytes> = provider
+                .raw_request("consensus_getEquivocations".into(), ())
+                .await
+                .wrap_err_with(|| format!("failed to get equivocations from `{url}`"))?;
+            evidence.extend(
+                held.iter()
+                    .filter_map(|held| Evidence::decode(held.as_ref()).ok()),
+            );
+            let rounds: Vec<RoundId> = provider
+                .raw_request("consensus_getDisputedRounds".into(), ())
+                .await
+                .wrap_err_with(|| format!("failed to get disputed rounds from `{url}`"))?;
+            disputed.extend(rounds);
+        }
+
+        // In a disputed round another node may hold the vote that conflicts with one held here.
+        let mut votes = Vec::new();
+        for round in disputed {
+            for (provider, url) in providers.iter().zip(&self.rpc_urls) {
+                let held: Vec<SignedVote> = provider
+                    .raw_request("consensus_getVotes".into(), (round,))
+                    .await
+                    .wrap_err_with(|| format!("failed to get votes from `{url}`"))?;
+                votes.extend(held.iter().filter_map(|held| {
+                    Some((held.signer, Signed::decode(held.vote.as_ref()).ok()?))
+                }));
+            }
+        }
+
+        // The nodes are not trusted: a vote counts only under the vote key the registry holds
+        // for its signer, and only evidence that key signed is kept, one per signer and round.
+        let registry = IEquivocation::new(VALIDATOR_CONFIG_V2_ADDRESS, first);
+        let signers: BTreeSet<_> = evidence
+            .iter()
+            .map(|evidence| evidence.signer)
+            .chain(votes.iter().map(|(signer, _)| *signer))
+            .collect();
+        let mut keys = BTreeMap::new();
+        for signer in signers {
+            let key = registry
+                .voteKey(signer)
+                .call()
+                .await
+                .wrap_err("failed to read a vote key from the registry")?;
+            if let Ok(key) = VoteKey::decode(key.as_ref()) {
+                keys.insert(signer, key);
+            }
+        }
+
+        let votes = votes
+            .into_iter()
+            .filter_map(|(signer, signed)| Some((signer, *keys.get(&signer)?, signed)));
+        let mut found = BTreeMap::new();
+        for evidence in evidence
+            .into_iter()
+            .filter(|evidence| {
+                let key = keys.get(&evidence.signer);
+                key.is_some_and(|key| evidence.verify(&chain, key))
+            })
+            .chain(pair(&chain, votes))
+        {
+            found
+                .entry((evidence.signer, evidence.first.ballot.round()))
+                .or_insert(evidence);
+        }
+
+        let output: Vec<_> = found
+            .into_values()
+            .map(|evidence| {
+                let round = evidence.first.ballot.round();
+                EquivocationOutput {
+                    signer: evidence.signer,
+                    epoch: round.epoch,
+                    view: round.view,
+                    evidence: evidence.encode().into(),
+                }
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        Ok(())
+    }
 }
 
 #[derive(Debug, clap::Args)]

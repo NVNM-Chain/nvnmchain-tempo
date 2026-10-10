@@ -426,11 +426,13 @@ impl Inner {
                 our.next_players = ?our_outcome.next_players(),
                 our.sharing = ?our_outcome.sharing(),
                 our.is_next_full_dkg = ?our_outcome.is_next_full_dkg,
+                our.proposer_units = ?our_outcome.proposer_units,
                 proposed.epoch = %proposed_outcome.epoch,
                 proposed.players = ?proposed_outcome.players(),
                 proposed.next_players = ?proposed_outcome.next_players(),
                 proposed.sharing = ?proposed_outcome.sharing(),
                 proposed.is_next_full_dkg = ?proposed_outcome.is_next_full_dkg,
+                proposed.proposer_units = ?proposed_outcome.proposer_units,
                 "our public dkg outcome does not match what's stored \
                 in the block",
             );

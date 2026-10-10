@@ -1,14 +1,16 @@
 //! Shared state for the feed module.
 
-use crate::alias::marshal;
-use alloy_primitives::hex;
+use crate::{alias::marshal, equivocation::Votes};
+use alloy_primitives::{Bytes, hex};
 use commonware_codec::Encode;
 use commonware_consensus::types::Height;
 use parking_lot::RwLock;
 use std::sync::{Arc, OnceLock};
 use tempo_node::rpc::consensus::{
-    CertifiedBlock, ConsensusFeed, ConsensusState, Event, Query, types::Response,
+    CertifiedBlock, ConsensusFeed, ConsensusState, Event, Query, RoundId, SignedVote,
+    types::Response,
 };
+use tempo_precompiles::validator_config_v2::Round;
 use tokio::sync::broadcast;
 use tracing::{Level, instrument};
 
@@ -29,6 +31,7 @@ pub(super) struct FeedState {
 pub struct FeedStateHandle {
     state: Arc<RwLock<FeedState>>,
     marshal: Arc<OnceLock<marshal::Mailbox>>,
+    votes: Arc<OnceLock<Votes>>,
     events_tx: broadcast::Sender<Event>,
 }
 
@@ -44,6 +47,7 @@ impl FeedStateHandle {
                 latest_finalized: None,
             })),
             marshal: Arc::new(OnceLock::new()),
+            votes: Arc::new(OnceLock::new()),
             events_tx,
         }
     }
@@ -51,6 +55,11 @@ impl FeedStateHandle {
     /// Set the marshal mailbox for historical finalization lookups. Should only be called once.
     pub(crate) fn set_marshal(&self, marshal: marshal::Mailbox) {
         let _ = self.marshal.set(marshal);
+    }
+
+    /// Set the store of attributable votes to serve. Should only be called once.
+    pub(crate) fn set_votes(&self, votes: Votes) {
+        let _ = self.votes.set(votes);
     }
 
     /// Update the latest finalized block and broadcast it to RPC subscribers.
@@ -131,5 +140,37 @@ impl ConsensusFeed for FeedStateHandle {
 
     async fn subscribe(&self) -> Option<broadcast::Receiver<Event>> {
         Some(self.events_tx.subscribe())
+    }
+
+    fn equivocations(&self) -> Vec<Bytes> {
+        let evidence = self.votes.get().map(Votes::evidence).unwrap_or_default();
+        evidence
+            .iter()
+            .map(|evidence| evidence.encode().into())
+            .collect()
+    }
+
+    fn disputed_rounds(&self) -> Vec<RoundId> {
+        let rounds = self.votes.get().map(Votes::disputed).unwrap_or_default();
+        rounds
+            .iter()
+            .map(|&Round { epoch, view }| RoundId { epoch, view })
+            .collect()
+    }
+
+    fn votes(&self, round: RoundId) -> Vec<SignedVote> {
+        let RoundId { epoch, view } = round;
+        let votes = self
+            .votes
+            .get()
+            .map(|votes| votes.in_round(Round { epoch, view }));
+        votes
+            .unwrap_or_default()
+            .iter()
+            .map(|(signer, signed)| SignedVote {
+                signer: *signer,
+                vote: signed.encode().into(),
+            })
+            .collect()
     }
 }

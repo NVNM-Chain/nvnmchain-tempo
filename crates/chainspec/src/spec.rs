@@ -35,6 +35,21 @@ pub struct TempoGenesisInfo {
     /// The epoch length used by consensus.
     #[serde(skip_serializing_if = "Option::is_none")]
     epoch_length: Option<NonZeroU64>,
+    /// Contract whose `computeCommittee` selects each epoch's validators. Unset stays PoA.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election: Option<Address>,
+    /// When the election activates, in the style of the hardfork times. Unset means genesis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    staking_election_time: Option<u64>,
+    /// From when, at T12 or later, each consensus vote also carries its signer's ed25519
+    /// signature, in the style of the hardfork times. Unset leaves votes as upstream has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attributable_votes_time: Option<u64>,
+    /// The fee router factory; from T12 a validator's fee recipient may only be the router it
+    /// holds for it (`routerOf`), set by the registry owner, and its blocks must pay it. Unset
+    /// leaves recipients as upstream has them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fee_router_factory: Option<Address>,
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
@@ -95,17 +110,41 @@ pub struct TempoGenesisInfo {
 }
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Self {
-        genesis
-            .config
-            .extra_fields
-            .deserialize_as::<Self>()
-            .unwrap_or_default()
+    /// Extract Tempo genesis info from genesis extra_fields. Malformed is an error, not a default:
+    /// these fields are consensus-critical and outside the genesis hash.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        genesis.config.extra_fields.deserialize_as()
+    }
+
+    /// Keys in extra_fields that no field here reads, so Tempo ignores them: the ones its
+    /// derived `Deserialize` skips.
+    #[cfg(feature = "std")]
+    fn unrecognized_keys(genesis: &Genesis) -> Vec<alloc::string::String> {
+        let mut ignored = Vec::new();
+        let fields = serde_json::to_value(&genesis.config.extra_fields).unwrap_or_default();
+        let _: Result<Self, _> =
+            serde_ignored::deserialize(fields, |path| ignored.push(alloc::format!("{path}")));
+        ignored
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
         self.epoch_length
+    }
+
+    pub fn staking_election(&self) -> Option<Address> {
+        self.staking_election
+    }
+
+    pub fn staking_election_time(&self) -> Option<u64> {
+        self.staking_election_time
+    }
+
+    pub fn fee_router_factory(&self) -> Option<Address> {
+        self.fee_router_factory
+    }
+
+    pub fn attributable_votes_time(&self) -> Option<u64> {
+        self.attributable_votes_time
     }
 
     pub fn general_gas_limit(&self) -> Option<u64> {
@@ -151,7 +190,9 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
+        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)
+            .map_err(|e| eyre::eyre!("malformed Tempo genesis extra_fields: {e}"))?
+            .into(),
     })
 }
 
@@ -228,12 +269,24 @@ pub struct TempoChainSpec {
     pub network_identity: Option<NetworkIdentity>,
     /// Default RPC URL for following this chain.
     pub default_follow_url: Option<&'static str>,
+    /// Genesis config keys Tempo ignores, for the node to warn about once logging is up.
+    pub unknown_config_keys: alloc::vec::Vec<alloc::string::String>,
 }
 
 impl TempoChainSpec {
     /// Returns the default RPC URL for following this chain.
     pub fn default_follow_url(&self) -> Option<&'static str> {
         self.default_follow_url
+    }
+
+    /// Whether consensus votes are attributable in a block stamped `timestamp`: at T12 or later,
+    /// from the genesis' `attributableVotesTime`.
+    pub fn votes_are_attributable_at(&self, timestamp: u64) -> bool {
+        self.tempo_hardfork_at(timestamp).is_t12()
+            && self
+                .info
+                .attributable_votes_time()
+                .is_some_and(|from| timestamp >= from)
     }
 
     /// Returns the shared gas limit for the given timestamp and block gas limit.
@@ -257,10 +310,19 @@ impl TempoChainSpec {
         TempoConsensusSpec::general_gas_limit_at(self, timestamp, gas_limit, shared_gas_limit)
     }
 
-    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    /// Converts the given [`Genesis`] into a [`TempoChainSpec`], panicking on malformed Tempo
+    /// extra_fields; [`Self::try_from_genesis`] returns the error instead.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis);
+        Self::try_from_genesis(genesis).expect("malformed Tempo genesis extra_fields")
+    }
+
+    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
+        let info = TempoGenesisInfo::extract_from(&genesis)?;
+        #[cfg(feature = "std")]
+        let unknown_config_keys = TempoGenesisInfo::unrecognized_keys(&genesis);
+        #[cfg(not(feature = "std"))]
+        let unknown_config_keys = alloc::vec::Vec::new();
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -285,12 +347,13 @@ impl TempoChainSpec {
         let network_identity =
             NetworkIdentity::from_extra_data(inner.genesis_header().inner.extra_data.as_ref()).ok();
 
-        Self {
+        Ok(Self {
             inner,
             info,
             network_identity,
             default_follow_url: None,
-        }
+            unknown_config_keys,
+        })
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -336,6 +399,7 @@ impl From<ChainSpec> for TempoChainSpec {
             info: TempoGenesisInfo::default(),
             network_identity,
             default_follow_url: None,
+            unknown_config_keys: Default::default(),
         }
     }
 }
@@ -650,6 +714,73 @@ mod tests {
 
         let chainspec = super::TempoChainSpec::from_genesis(genesis);
         assert!(chainspec.network_identity.is_none());
+    }
+
+    #[test]
+    fn absent_extra_fields_are_the_default() {
+        let info = super::TempoGenesisInfo::extract_from(&genesis_with(serde_json::json!({})));
+        assert_eq!(info.unwrap(), super::TempoGenesisInfo::default());
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn a_malformed_extra_field_is_a_chain_argument_error() {
+        for epoch_length in [serde_json::json!("302400"), serde_json::json!(0)] {
+            let genesis = genesis_with(serde_json::json!({ "epochLength": epoch_length }));
+            let err = super::chain_value_parser(&serde_json::to_string(&genesis).unwrap())
+                .expect_err("a malformed epochLength must not parse");
+            assert!(
+                err.to_string()
+                    .contains("malformed Tempo genesis extra_fields")
+            );
+        }
+    }
+
+    #[test]
+    fn the_fee_router_factory_is_read() {
+        let factory = alloy_primitives::Address::repeat_byte(0xF0);
+        let genesis = genesis_with(serde_json::json!({ "feeRouterFactory": factory }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
+        assert_eq!(info.fee_router_factory(), Some(factory));
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_attributable_votes_time_is_read() {
+        let genesis = genesis_with(serde_json::json!({ "attributableVotesTime": 7 }));
+        let info = super::TempoGenesisInfo::extract_from(&genesis).unwrap();
+        assert_eq!(info.attributable_votes_time(), Some(7));
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_misspelled_key_is_named_whatever_it_holds() {
+        let genesis = genesis_with(serde_json::json!({
+            "epochLength": 20,
+            "epochLenght": 20,
+            "t12Time": null,
+            "t12Tme": null,
+        }));
+        assert_eq!(
+            super::TempoGenesisInfo::unrecognized_keys(&genesis),
+            ["epochLenght", "t12Tme"]
+        );
+    }
+
+    /// A genesis carrying `extra` alongside the fields every genesis needs.
+    fn genesis_with(extra: serde_json::Value) -> alloy_genesis::Genesis {
+        let mut config = serde_json::json!({ "chainId": 1234 });
+        config
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} })).unwrap()
     }
 
     #[test]

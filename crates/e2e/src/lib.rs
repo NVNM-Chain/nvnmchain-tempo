@@ -75,6 +75,8 @@ fn generate_consensus_node_config(
         output: initial_dkg_outcome,
         next_players: shares.keys().clone(),
         is_next_full_dkg: false,
+        proposer_units: None,
+        vote_keys: None,
     };
 
     let verifier_keys = repeat_with(|| PrivateKey::random(&mut *rng))
@@ -150,6 +152,15 @@ pub struct Setup {
     /// Whether validators announce `tempo/1` and publish finalization
     /// certificates over it.
     pub with_gossip: bool,
+
+    /// Election weights of the signers by key order, from genesis.
+    pub proposer_weights: Option<Vec<u64>>,
+
+    /// The genesis' `attributableVotesTime`.
+    pub attributable_votes_time: Option<u64>,
+
+    /// How many of the signers, the last by key, the registry holds no vote key for.
+    pub signers_without_vote_key: usize,
 }
 
 impl Setup {
@@ -169,6 +180,23 @@ impl Setup {
             proposal_return_budget: Duration::from_millis(300),
             fee_recipient: Address::ZERO,
             with_gossip: false,
+            proposer_weights: None,
+            attributable_votes_time: None,
+            signers_without_vote_key: 0,
+        }
+    }
+
+    pub fn attributable_votes_time(self, attributable_votes_time: u64) -> Self {
+        Self {
+            attributable_votes_time: Some(attributable_votes_time),
+            ..self
+        }
+    }
+
+    pub fn signers_without_vote_key(self, signers: usize) -> Self {
+        Self {
+            signers_without_vote_key: signers,
+            ..self
         }
     }
 
@@ -230,6 +258,13 @@ impl Setup {
             ..self
         }
     }
+
+    pub fn proposer_weights(self, proposer_weights: Vec<u64>) -> Self {
+        Self {
+            proposer_weights: Some(proposer_weights),
+            ..self
+        }
+    }
 }
 
 impl Default for Setup {
@@ -256,6 +291,9 @@ pub async fn setup_validators(
         proposal_return_budget,
         fee_recipient,
         with_gossip,
+        proposer_weights,
+        attributable_votes_time,
+        signers_without_vote_key,
         ..
     }: Setup,
 ) -> (Vec<TestingNode<Context>>, ExecutionRuntime) {
@@ -292,6 +330,9 @@ pub async fn setup_validators(
         .with_initial_dkg_outcome(onchain_dkg_outcome)
         .with_t12_time(t12_time)
         .with_validators(validators.clone())
+        .with_proposer_weights(proposer_weights)
+        .with_attributable_votes_time(attributable_votes_time)
+        .with_signers_without_vote_key(signers_without_vote_key)
         .launch()
         .unwrap();
 

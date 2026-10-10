@@ -39,11 +39,15 @@
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use alloy_consensus::BlockHeader as _;
+use commonware_codec::ReadExt as _;
 use commonware_consensus::{
-    simplex::{self, config::Floor, elector, scheme::bls12381_threshold::vrf::Scheme},
+    Reporter,
+    simplex::{
+        self, config::Floor, elector, scheme::bls12381_threshold::vrf::Scheme, types::Activity,
+    },
     types::{Epoch, EpochDelta, Epocher as _, Height},
 };
-use commonware_cryptography::ed25519::PublicKey;
+use commonware_cryptography::{certificate, ed25519::PublicKey};
 use commonware_macros::select;
 use commonware_p2p::{
     Blocker, Receiver, Sender,
@@ -60,13 +64,17 @@ use futures::{StreamExt as _, channel::mpsc};
 use rand_core::{CryptoRng, Rng};
 use reth_ethereum::chainspec::EthChainSpec;
 use tempo_chainspec::TempoHardforks as _;
+use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_primitives::TempoHeader;
+use tempo_validator_config::VoteKeypair;
 use tracing::{Level, Span, debug, error, error_span, info, instrument, warn, warn_span};
 
 use crate::{
+    attributable,
     consensus::Digest,
     epoch::manager::ingress::{EpochTransition, Exit},
     storage::FinalizedBlocksProvider as _,
+    weighted_elector::WeightedRandom,
 };
 
 use super::ingress::{Content, Message};
@@ -120,6 +128,10 @@ where
             "elector_version",
             "the elector version in the most recently started epoch (0 = V0, 1 = V1)",
         );
+        let attributable_votes = context.gauge(
+            "attributable_votes",
+            "whether votes in the most recently started epoch carry the signature of their signer's vote key",
+        );
         let how_often_signer = context.counter(
             "how_often_signer",
             "how often a node is a signer; a node is a signer if it has a share",
@@ -138,6 +150,7 @@ where
                 latest_epoch,
                 latest_participants,
                 elector_version,
+                attributable_votes,
                 how_often_signer,
                 how_often_verifier,
             },
@@ -326,7 +339,8 @@ where
 
         self.config.scheme_provider.register(epoch, scheme.clone());
 
-        let (floor, boundary_timestamp) = match epoch.previous().map(|prev| {
+        // The block the epoch starts from: its preceding boundary, or the genesis.
+        let (floor, boundary) = match epoch.previous().map(|prev| {
             self.config
                 .epoch_strategy
                 .last(prev)
@@ -347,17 +361,30 @@ where
                         )
                     })?;
 
-                let header = self.get_header(boundary_height).await?;
-                (Floor::Genesis(digest), header.timestamp())
+                (digest, self.get_header(boundary_height).await?)
             }
             None => {
                 let chain_spec = self.config.execution_node.chain_spec();
                 (
-                    Floor::Genesis(Digest(chain_spec.genesis_hash())),
-                    chain_spec.genesis_header().timestamp(),
+                    Digest(chain_spec.genesis_hash()),
+                    chain_spec.genesis_header().clone(),
                 )
             }
         };
+        let boundary_timestamp = boundary.timestamp();
+        // The outcome this epoch's players come from, and with them their odds of proposing and
+        // their vote keys, so every node draws leaders and counts votes alike however it entered
+        // the epoch.
+        let outcome = OnchainDkgOutcome::read(&mut boundary.extra_data().as_ref())
+            .map_err(|error| eyre!("epoch `{epoch}` starts from no DKG outcome: {error}"))?;
+        let proposer_units = outcome.proposer_units.as_ref().map(|units| {
+            outcome
+                .players()
+                .iter()
+                .cloned()
+                .zip(units.iter().copied())
+                .collect()
+        });
 
         // Each epoch constructs one elector. Use its preceding finalized boundary so nodes
         // choose the same version even when entering or restarting at different times.
@@ -380,51 +407,50 @@ where
             elector::RandomVersion::V1 => 1,
         });
 
-        let engine_ctx = self.context.child("simplex").with_attribute("epoch", epoch);
-        let vote = vote_mux.register(epoch.get()).await.unwrap();
-        let certificate = certificates_mux.register(epoch.get()).await.unwrap();
-        let resolver = resolver_mux.register(epoch.get()).await.unwrap();
+        // Chosen as the elector is, by the epoch's preceding boundary: a node expecting the other
+        // format takes these votes for garbage.
+        let chain_spec = self.config.execution_node.chain_spec();
+        let attributable = match outcome.vote_keys.as_deref() {
+            Some(keys) if chain_spec.votes_are_attributable_at(boundary_timestamp) => {
+                Some(attributable::Scheme::new(
+                    scheme.clone(),
+                    keys,
+                    VoteKeypair::derive(&self.config.signer).private(),
+                    chain_spec.chain_id(),
+                    chain_spec.genesis_hash(),
+                ))
+            }
+            _ => None,
+        };
+        self.metrics
+            .attributable_votes
+            .metric()
+            .set(i64::from(attributable.is_some()));
 
-        info!(mode = %self.config.verification_mode, "starting simplex engine");
+        let networks = (
+            vote_mux.register(epoch.get()).await.unwrap(),
+            certificates_mux.register(epoch.get()).await.unwrap(),
+            resolver_mux.register(epoch.get()).await.unwrap(),
+        );
 
-        let engine = simplex::Engine::new(
-            engine_ctx,
-            simplex::Config {
-                epoch,
-                floor,
-                scheme,
-                elector: elector::Random::<commonware_cryptography::Sha256>::new(elector),
-                strategy: Sequential,
+        info!(
+            mode = %self.config.verification_mode,
+            attributable = attributable.is_some(),
+            "starting simplex engine"
+        );
 
-                reporter: self.config.marshal.clone(),
-                partition: format!(
-                    "{partition_prefix}_consensus_epoch_{epoch}",
-                    partition_prefix = self.config.partition_prefix
-                ),
-
-                replay_buffer: REPLAY_BUFFER,
-                write_buffer: WRITE_BUFFER,
-
-                blocker: self.config.blocker.clone(),
-                automaton: self.config.application.clone(),
-                relay: self.config.application.clone(),
-                page_cache: self.config.page_cache.clone(),
-                leader_timeout: self.config.time_to_propose,
-                certification_timeout: self.config.time_to_collect_notarizations,
-                timeout_retry: self.config.time_to_retry_nullify_broadcast,
-                fetch_timeout: self.config.time_for_peer_response,
-                view_retention: self.config.views_to_track,
-                skip: simplex::config::SkipPolicy::Enabled {
-                    timeout: self.config.inactive_time_before_leader_skip,
-                    budget: simplex::config::SkipBudget::Participants,
-                },
-
-                mailbox_size: self.config.mailbox_size,
-                forward: commonware_consensus::simplex::config::ForwardPolicy::Disabled,
-                track_historical_votes: true,
-            },
-        )
-        .start(vote, certificate, resolver);
+        let elector = WeightedRandom::new(elector, proposer_units);
+        let marshal = self.config.marshal.clone();
+        let engine = if let Some(scheme) = attributable {
+            let recorder = attributable::Recorder {
+                scheme: scheme.clone(),
+                votes: self.config.votes.clone(),
+                certificates: marshal,
+            };
+            self.start_engine(epoch, floor, scheme, elector, recorder, networks)
+        } else {
+            self.start_engine(epoch, floor, scheme, elector, marshal, networks)
+        };
 
         assert!(
             self.active_epochs.insert(epoch, engine).is_none(),
@@ -451,6 +477,82 @@ where
             .inc_by(u64::from(!is_signer));
 
         Ok(())
+    }
+
+    /// Starts the engine backing `epoch` on top of the block `floor`. The two vote formats are
+    /// two schemes, and so two engine types.
+    fn start_engine<S, F>(
+        &self,
+        epoch: Epoch,
+        floor: Digest,
+        scheme: S,
+        elector: WeightedRandom<PublicKey>,
+        reporter: F,
+        (vote, certificate, resolver): (
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+            (
+                impl Sender<PublicKey = PublicKey>,
+                impl Receiver<PublicKey = PublicKey>,
+            ),
+        ),
+    ) -> Handle<()>
+    where
+        S: simplex::scheme::Scheme<Digest, PublicKey = PublicKey>,
+        WeightedRandom<PublicKey>: elector::Config<S>,
+        F: Reporter<Activity = Activity<S, Digest>>,
+    {
+        // A journal holds votes in its scheme's format, so each format keeps its own: an epoch
+        // restarted under the other one would not read the votes it had journaled.
+        let format = if <S as certificate::Scheme>::is_attributable() {
+            "_attributable"
+        } else {
+            ""
+        };
+        simplex::Engine::new(
+            self.context.child("simplex").with_attribute("epoch", epoch),
+            simplex::Config {
+                epoch,
+                floor: Floor::Genesis(floor),
+                scheme,
+                elector,
+                strategy: Sequential,
+
+                reporter,
+                partition: format!(
+                    "{partition_prefix}_consensus_epoch_{epoch}{format}",
+                    partition_prefix = self.config.partition_prefix
+                ),
+
+                replay_buffer: REPLAY_BUFFER,
+                write_buffer: WRITE_BUFFER,
+
+                blocker: self.config.blocker.clone(),
+                automaton: self.config.application.clone(),
+                relay: self.config.application.clone(),
+                page_cache: self.config.page_cache.clone(),
+                leader_timeout: self.config.time_to_propose,
+                certification_timeout: self.config.time_to_collect_notarizations,
+                timeout_retry: self.config.time_to_retry_nullify_broadcast,
+                fetch_timeout: self.config.time_for_peer_response,
+                view_retention: self.config.views_to_track,
+                skip: simplex::config::SkipPolicy::Enabled {
+                    timeout: self.config.inactive_time_before_leader_skip,
+                    budget: simplex::config::SkipBudget::Participants,
+                },
+
+                mailbox_size: self.config.mailbox_size,
+                forward: commonware_consensus::simplex::config::ForwardPolicy::Disabled,
+                track_historical_votes: true,
+            },
+        )
+        .start(vote, certificate, resolver)
     }
 
     #[instrument(parent = &cause, skip_all, fields(epoch))]
@@ -532,6 +634,7 @@ struct Metrics {
     latest_epoch: Gauge,
     latest_participants: Gauge,
     elector_version: Gauge,
+    attributable_votes: Gauge,
     how_often_signer: Counter,
     how_often_verifier: Counter,
 }

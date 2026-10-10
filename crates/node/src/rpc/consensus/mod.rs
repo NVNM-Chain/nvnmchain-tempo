@@ -5,19 +5,23 @@
 //! - `consensus_getFinalization(query)` - Get finalization by height from marshal archive
 //! - `consensus_getLatest()` - Get the current consensus state snapshot
 //! - `consensus_subscribe()` - Subscribe to consensus events stream
+//! - `consensus_getEquivocations()` - Evidence this node holds of conflicting votes
+//! - `consensus_getDisputedRounds()` - Rounds whose votes disagree at this node
+//! - `consensus_getVotes(round)` - The signed votes this node holds for a round
 
 pub mod types;
 
 #[cfg(test)]
 mod tests;
 
+use alloy_primitives::Bytes;
 use jsonrpsee::{
     core::RpcResult,
     proc_macros::rpc,
     types::{ErrorObject, error::INTERNAL_ERROR_CODE},
 };
 
-pub use types::{CertifiedBlock, ConsensusFeed, ConsensusState, Event, Query};
+pub use types::{CertifiedBlock, ConsensusFeed, ConsensusState, Event, Query, RoundId, SignedVote};
 
 /// Custom error codes for the consensus RPC.
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -74,6 +78,22 @@ pub trait TempoConsensusApi {
     /// Subscribe to finalized block events.
     #[subscription(name = "subscribe" => "event", unsubscribe = "unsubscribe", item = Event)]
     async fn subscribe_events(&self) -> jsonrpsee::core::SubscriptionResult;
+
+    /// Get the evidence this node holds of validators that signed conflicting votes, encoded.
+    ///
+    /// Empty unless votes carry their signer's signature (`attributableVotesTime`).
+    #[method(name = "getEquivocations")]
+    async fn get_equivocations(&self) -> RpcResult<Vec<Bytes>>;
+
+    /// Get the rounds whose votes disagree at this node.
+    ///
+    /// A validator may have sent another node a vote that conflicts with one held here.
+    #[method(name = "getDisputedRounds")]
+    async fn get_disputed_rounds(&self) -> RpcResult<Vec<RoundId>>;
+
+    /// Get the signed votes this node holds for a round.
+    #[method(name = "getVotes")]
+    async fn get_votes(&self, round: RoundId) -> RpcResult<Vec<SignedVote>>;
 }
 
 /// Tempo consensus RPC implementation.
@@ -97,6 +117,18 @@ impl<I: ConsensusFeed> TempoConsensusApiServer for TempoConsensusRpc<I> {
 
     async fn get_latest(&self) -> RpcResult<ConsensusState> {
         Ok(self.consensus_feed.get_latest().await)
+    }
+
+    async fn get_equivocations(&self) -> RpcResult<Vec<Bytes>> {
+        Ok(self.consensus_feed.equivocations())
+    }
+
+    async fn get_disputed_rounds(&self) -> RpcResult<Vec<RoundId>> {
+        Ok(self.consensus_feed.disputed_rounds())
+    }
+
+    async fn get_votes(&self, round: RoundId) -> RpcResult<Vec<SignedVote>> {
+        Ok(self.consensus_feed.votes(round))
     }
 
     async fn subscribe_events(

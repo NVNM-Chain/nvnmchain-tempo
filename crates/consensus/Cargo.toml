@@ -26,8 +26,11 @@ tempo-primitives = { workspace = true, features = ["reth"] }
 tempo-payload-types.workspace = true
 tempo-precompiles.workspace = true
 tempo-telemetry-util.workspace = true
+tempo-validator-config.workspace = true
 
 alloy-consensus.workspace = true
+alloy-evm.workspace = true
+alloy-sol-types.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
 alloy-rpc-client = { workspace = true, features = ["ws-base"] }
@@ -85,6 +88,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+commonware-consensus = { workspace = true, features = ["mocks"] }
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-primitives = { workspace = true, features = ["arbitrary", "test-utils"] }
 

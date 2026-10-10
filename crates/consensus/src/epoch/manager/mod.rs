@@ -4,7 +4,7 @@ pub(super) mod ingress;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub(crate) use actor::Actor;
-use commonware_cryptography::ed25519::PublicKey;
+use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
 pub(crate) use ingress::Mailbox;
 
 use commonware_consensus::types::{FixedEpocher, ViewDelta};
@@ -17,6 +17,7 @@ use tempo_node::TempoFullNode;
 
 use crate::{
     VerificationMode, consensus::application::Application, epoch::scheme_provider::SchemeProvider,
+    equivocation::Votes,
 };
 
 pub(crate) struct Config<TContext, TBlocker>
@@ -34,6 +35,10 @@ where
     pub(crate) mailbox_size: NonZeroUsize,
     pub(crate) marshal: crate::alias::marshal::Mailbox,
     pub(crate) scheme_provider: SchemeProvider,
+    /// Its vote key signs this node's votes once they are attributable.
+    pub(crate) signer: PrivateKey,
+    /// The attributable votes this node sees.
+    pub(crate) votes: Votes,
     pub(crate) time_to_collect_notarizations: Duration,
     pub(crate) time_to_retry_nullify_broadcast: Duration,
     pub(crate) partition_prefix: String,

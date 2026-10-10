@@ -72,11 +72,10 @@ use std::{
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_evm::{
-    StorageActionReplayError, TempoEvmConfig, TempoNextBlockEnvAttributes, TempoStateAccess,
-    TempoTxResult, evm::TempoEvm,
+    StorageActionReplayError, TempoEvmConfig, TempoNextBlockEnvAttributes, TempoTxResult,
+    evm::TempoEvm, registry_fee_recipient,
 };
 use tempo_payload_types::{TempoBuiltPayload, TempoPayloadAttributes, ValidationLatencyWorkload};
-use tempo_precompiles::{storage::StorageActions, validator_config_v2::ValidatorConfigV2};
 use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxEnvelope};
 use tempo_transaction_pool::{
     StateAwareBestTransactions, TempoTransactionPool, best::BestTransaction,
@@ -1206,9 +1205,9 @@ enum BalMessage {
     BumpIndex,
 }
 
-/// Overrides the block's fee recipient (beneficiary) with the value from the
-/// V2 validator config contract, if the contract is active and returns a
-/// non-zero address for the given `public_key`.
+/// Overrides the block's fee recipient (beneficiary) with the proposer's recipient in the V2
+/// validator config contract, if the contract is active; a zero one is skipped unless block
+/// execution binds the beneficiary.
 fn maybe_override_fee_recipient<DB: Database>(
     executor: &mut impl BlockExecutor<Evm = TempoEvm<DB>>,
     attributes: &TempoPayloadAttributes,
@@ -1221,39 +1220,15 @@ fn maybe_override_fee_recipient<DB: Database>(
         return;
     }
 
-    // We are using the database as a read-only storage context to avoid modifying the journal state.
-    // Reading slots here might be dangerous because they would end up being warmed and might affect gas accounting.
-    match ctx.journaled_state.database.with_read_only_storage_ctx(
-        ctx.cfg.spec,
-        StorageActions::disabled(),
-        || -> Result<Option<Address>, PayloadBuilderError> {
-            let parent_number = ctx.block.number.saturating_to::<u64>() - 1;
-
-            let config = ValidatorConfigV2::default();
-            if !config
-                .is_initialized()
-                .map_err(PayloadBuilderError::other)?
-            {
-                return Ok(None);
-            }
-            let init_height = config
-                .get_initialized_at_height()
-                .map_err(PayloadBuilderError::other)?;
-            if init_height > parent_number {
-                return Ok(None);
-            }
-            let on_chain = config
-                .validator_by_public_key(*public_key)
-                .map(|v| v.feeRecipient)
-                .map_err(PayloadBuilderError::other)?;
-            Ok((!on_chain.is_zero()).then_some(on_chain))
-        },
-    ) {
-        Ok(Some(fee_recipient)) => {
+    // From T12, where the genesis names a fee router factory, block execution checks the
+    // beneficiary against this same lookup.
+    let bound = ctx.cfg.spec.is_t12() && ctx.block.fee_router_factory.is_some();
+    match registry_fee_recipient(ctx, *public_key) {
+        Ok(Some(fee_recipient)) if bound || !fee_recipient.is_zero() => {
             debug!(%fee_recipient, "resolved fee recipient from contract");
-            executor.evm_mut().ctx_mut().block.beneficiary = fee_recipient;
+            ctx.block.beneficiary = fee_recipient;
         }
-        Ok(None) => {}
+        Ok(_) => {}
         Err(err) => {
             warn!(%err, "failed resolving fee recipient from contract; using fallback");
         }

@@ -22,7 +22,9 @@ use commonware_runtime::{
 use commonware_utils::NZUsize;
 use eyre::{OptionExt as _, WrapErr as _, ensure};
 use rand_core::{CryptoRng, Rng};
+use reth_ethereum::chainspec::EthChainSpec as _;
 use tempo_node::TempoFullNode;
+use tempo_precompiles::validator_config_v2::VoteNamespace;
 use tracing::info;
 
 use crate::{
@@ -230,6 +232,11 @@ where
             priority_responses: false,
         };
 
+        let votes = crate::equivocation::Votes::new(VoteNamespace::new(
+            execution_node.chain_spec().chain_id(),
+            execution_node.chain_spec().genesis_hash(),
+        ));
+        self.feed_state.set_votes(votes.clone());
         let (feed, feed_mailbox) = crate::feed::init(
             context.child("feed"),
             marshal_mailbox.clone(),
@@ -311,6 +318,8 @@ where
             mailbox_size: self.mailbox_size,
             marshal: marshal_mailbox,
             scheme_provider,
+            signer: self.signer.clone(),
+            votes,
             time_to_collect_notarizations: self.time_to_collect_notarizations,
             time_to_retry_nullify_broadcast: self.time_to_retry_nullify_broadcast,
             partition_prefix: format!("{}_epoch_manager", self.partition_prefix),

@@ -38,6 +38,8 @@ fn boundary_outcome(
         output,
         next_players: next_players.clone(),
         is_next_full_dkg: false,
+        proposer_units: None,
+        vote_keys: None,
     }
 }
 

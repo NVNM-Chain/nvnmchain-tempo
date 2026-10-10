@@ -14,7 +14,7 @@ use alloy::{
 };
 use alloy_evm::{EvmFactory as _, revm::context::JournalTr};
 use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::{Address, B256, Keccak256, U256};
+use alloy_primitives::{Address, B256, Bytes, Keccak256, U256, keccak256};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Signer,
@@ -61,6 +61,7 @@ use tempo_precompiles::{
         IValidatorConfigV2, VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE, ValidatorConfigV2,
     },
 };
+use tempo_validator_config::VoteKeypair;
 use tokio::sync::oneshot;
 
 use crate::{ConsensusNodeConfig, TestingNode};
@@ -77,6 +78,9 @@ pub struct Builder {
     epoch_length: Option<u64>,
     initial_dkg_outcome: Option<OnchainDkgOutcome>,
     validators: Option<ordered::Map<PublicKey, ConsensusNodeConfig>>,
+    proposer_weights: Option<Vec<u64>>,
+    attributable_votes_time: Option<u64>,
+    signers_without_vote_key: usize,
 }
 
 impl Builder {
@@ -86,6 +90,24 @@ impl Builder {
             epoch_length: None,
             initial_dkg_outcome: None,
             validators: None,
+            proposer_weights: None,
+            attributable_votes_time: None,
+            signers_without_vote_key: 0,
+        }
+    }
+
+    pub fn with_attributable_votes_time(self, attributable_votes_time: Option<u64>) -> Self {
+        Self {
+            attributable_votes_time,
+            ..self
+        }
+    }
+
+    /// Leaves the last `signers` of the signers, by key, without a vote key.
+    pub fn with_signers_without_vote_key(self, signers: usize) -> Self {
+        Self {
+            signers_without_vote_key: signers,
+            ..self
         }
     }
 
@@ -114,18 +136,47 @@ impl Builder {
         }
     }
 
+    /// Names an election at [`ELECTION_ADDRESS`] that seats every validator it is offered and
+    /// weighs the `i`th it is asked about at `weights[i]`.
+    pub fn with_proposer_weights(self, proposer_weights: Option<Vec<u64>>) -> Self {
+        Self {
+            proposer_weights,
+            ..self
+        }
+    }
+
     pub fn launch(self) -> eyre::Result<ExecutionRuntime> {
         let Self {
             t12_time,
             epoch_length,
             initial_dkg_outcome,
             validators,
+            proposer_weights,
+            attributable_votes_time,
+            signers_without_vote_key,
         } = self;
 
         let epoch_length = epoch_length.ok_or_eyre("must specify epoch length")?;
-        let initial_dkg_outcome =
+        let mut initial_dkg_outcome =
             initial_dkg_outcome.ok_or_eyre("must specify initial DKG outcome")?;
         let validators = validators.ok_or_eyre("must specify validators")?;
+        // Where votes are to be attributable, the signers have their vote keys from genesis, in
+        // the registry and in the outcome the first epoch reads them from: all but the last
+        // `signers_without_vote_key` by key.
+        let players = initial_dkg_outcome.players().clone();
+        let keyed = move |player: &PublicKey| {
+            let place = players.position(player);
+            attributable_votes_time.is_some()
+                && place.is_some_and(|place| place < players.len() - signers_without_vote_key)
+        };
+        if attributable_votes_time.is_some() {
+            let vote_key = |player| {
+                let validator = validators.get_value(player)?;
+                keyed(player).then(|| VoteKeypair::derive(&validator.private_key).public())
+            };
+            let keys = initial_dkg_outcome.players().iter().map(vote_key);
+            initial_dkg_outcome.vote_keys = Some(keys.collect());
+        }
 
         assert_eq!(
             initial_dkg_outcome.next_players(),
@@ -163,6 +214,29 @@ impl Builder {
 
         genesis.extra_data = initial_dkg_outcome.encode().into();
 
+        if let Some(time) = attributable_votes_time {
+            genesis
+                .config
+                .extra_fields
+                .insert_value("attributableVotesTime".to_string(), time)
+                .unwrap();
+        }
+
+        if let Some(weights) = proposer_weights {
+            genesis
+                .config
+                .extra_fields
+                .insert_value("stakingElection".to_string(), ELECTION_ADDRESS)
+                .unwrap();
+            genesis.alloc.insert(
+                ELECTION_ADDRESS,
+                GenesisAccount {
+                    code: Some(election_code(&weights)),
+                    ..Default::default()
+                },
+            );
+        }
+
         // Just remove whatever is already written into chainspec.
         genesis.alloc.remove(&VALIDATOR_CONFIG_V2_ADDRESS);
 
@@ -182,6 +256,7 @@ impl Builder {
                         .wrap_err("failed to initialize validator config v2")
                         .unwrap();
 
+                    let mut enrolled = 0;
                     for (public_key, validator) in validators {
                         if let ConsensusNodeConfig {
                             address,
@@ -214,6 +289,14 @@ impl Builder {
                                     },
                                 )
                                 .unwrap();
+                            if keyed(&public_key) {
+                                let registration = VoteKeypair::derive(&private_key)
+                                    .registration(genesis.config.chain_id, enrolled);
+                                validator_config_v2
+                                    .set_vote_key(address, registration)
+                                    .unwrap();
+                            }
+                            enrolled += 1;
                         }
                     }
                 },
@@ -248,6 +331,36 @@ impl Builder {
             TempoChainSpec::from_genesis(genesis),
         ))
     }
+}
+
+/// Where [`Builder::with_proposer_weights`] puts its election.
+pub const ELECTION_ADDRESS: Address = Address::new([0xE1; 20]);
+
+/// Runtime code answering `electionWeight` with `weights`, whoever is asked about, and every
+/// other call with its own arguments: `computeCommittee(address[])` seats all it is offered.
+fn election_code(weights: &[u64]) -> Bytes {
+    let mut blob = U256::from(32).to_be_bytes_vec();
+    blob.extend(U256::from(weights.len()).to_be_bytes::<32>());
+    for &weight in weights {
+        blob.extend(U256::from(weight).to_be_bytes::<32>());
+    }
+    let len = u16::try_from(blob.len()).unwrap().to_be_bytes();
+    let selector = keccak256("electionWeight(address[])");
+
+    let mut code = vec![0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c, 0x63]; // CALLDATALOAD(0) >> 224, PUSH4
+    code.extend_from_slice(&selector[..4]);
+    code.extend([
+        0x14, 0x60, 28, 0x57, // EQ, JUMPI to the weights
+        0x60, 0x04, 0x36, 0x03, 0x80, // size = CALLDATASIZE - 4, twice
+        0x60, 0x04, 0x60, 0x00, 0x37, // CALLDATACOPY(0, 4, size)
+        0x60, 0x00, 0xf3, // RETURN(0, size)
+        0x5b, // JUMPDEST
+        0x61, len[0], len[1], 0x60, 43, 0x60, 0x00, 0x39, // CODECOPY(0, 43, len)
+        0x61, len[0], len[1], 0x60, 0x00, 0xf3, // RETURN(0, len)
+    ]);
+    assert_eq!(code.len(), 43, "the weights start at byte 43");
+    code.extend(blob);
+    code.into()
 }
 
 /// Configuration for launching an execution node.

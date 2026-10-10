@@ -394,6 +394,21 @@ impl HashMapStorageProvider {
         self.block_env.number = U256::from(block_number);
     }
 
+    /// Overrides the fee router factory the genesis names.
+    pub fn set_fee_router_factory(&mut self, factory: Option<Address>) {
+        self.block_env.fee_router_factory = factory;
+    }
+
+    /// Overrides the genesis' `attributableVotesTime`.
+    pub fn set_attributable_votes_time(&mut self, time: Option<u64>) {
+        self.block_env.attributable_votes_time = time;
+    }
+
+    /// Overrides the hash of the chain's genesis block.
+    pub fn set_genesis_hash(&mut self, genesis: B256) {
+        self.block_env.genesis_hash = genesis;
+    }
+
     /// Overrides the active hardfork spec.
     pub fn set_spec(&mut self, spec: TempoHardfork) {
         self.spec = spec;
