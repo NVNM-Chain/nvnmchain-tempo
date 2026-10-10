@@ -20,11 +20,15 @@ impl Precompile for ValidatorConfigV2 {
             return Ok(self.storage.success_output(Default::default()));
         }
 
-        // Evidence is checked only where votes can make it. Elsewhere the registry is upstream's,
-        // to which the selector is unknown.
-        if selector_from_calldata(calldata) == Some(IEquivocation::equivocatorCall::SELECTOR)
-            && !self.votes_are_attributable()
-        {
+        // Elsewhere the registry is upstream's, to which these selectors are unknown.
+        let known = match selector_from_calldata(calldata) {
+            Some(IEquivocation::equivocatorCall::SELECTOR) => self.votes_are_attributable(),
+            Some(
+                IEquivocation::setVoteKeyCall::SELECTOR | IEquivocation::voteKeyCall::SELECTOR,
+            ) => self.takes_vote_keys(),
+            _ => true,
+        };
+        if !known {
             return unknown_selector_result(calldata);
         }
 
@@ -59,7 +63,9 @@ impl Precompile for ValidatorConfigV2 {
                 }
 
                 IEquivocation::IEquivocationCalls {
-                    equivocator(call) => view(call, |c| self.equivocator(c))
+                    equivocator(call) => view(call, |c| self.equivocator(c)),
+                    voteKey(call) => view(call, |c| self.vote_key(c)),
+                    setVoteKey(call) => mutate(call, msg_sender, |sender, c| self.set_vote_key(sender, c))
                 }
             }
         )

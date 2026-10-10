@@ -5,10 +5,12 @@
 
 pub mod dispatch;
 mod equivocation;
+mod vote_key;
 
 pub use tempo_contracts::precompiles::{IEquivocation, IValidatorConfigV2, ValidatorConfigV2Error};
 use tempo_contracts::precompiles::{VALIDATOR_CONFIG_V2_ADDRESS, ValidatorConfigV2Event};
 use tempo_precompiles_macros::{Storable, contract};
+pub use vote_key::{VoteKey, VoteSignature, vote_key_proof_namespace};
 
 use crate::{
     error::{Result, TempoPrecompileError},
@@ -857,17 +859,17 @@ impl ValidatorConfigV2 {
         ))
     }
 
-    /// Transfers a validator entry to a new address (owner or the validator itself), until
-    /// consensus votes are attributable: a bond stands, here and on Ethereum, under the address
-    /// an entry carries, and evidence reaches it through that address, so from then on the
-    /// address is final. A validator that must change it deactivates and enrols anew.
+    /// Transfers a validator entry to a new address (owner or the validator itself), unless its
+    /// key has a vote key: a bond stands, here and on Ethereum, under the address an entry
+    /// carries, and evidence reaches it through that address. A validator that must change it
+    /// then deactivates and enrols anew.
     ///
     /// Updates the validator's address in the lookup maps: deletes the old `address_to_index`
     /// entry and creates a new one pointing to the same slot.
     ///
     /// # Errors
     /// - `ValidatorNotFound` / `ValidatorAlreadyDeleted` — `idx` is invalid
-    /// - `NotInitialized` / `Unauthorized` — auth failure, or votes are attributable
+    /// - `NotInitialized` / `Unauthorized` — auth failure, or the entry has a vote key
     /// - `InvalidValidatorAddress` — `newAddress` is zero
     /// - `AddressAlreadyHasValidator` — `newAddress` belongs to an active validator
     pub fn transfer_validator_ownership(
@@ -877,7 +879,8 @@ impl ValidatorConfigV2 {
     ) -> Result<()> {
         let mut v = self.get_active_validator(call.idx)?;
         let config = self.config.read()?.require_init()?;
-        if self.votes_are_attributable() {
+        // No storage is read for it where no vote key can exist: there the call is upstream's.
+        if self.takes_vote_keys() && self.has_vote_key(v.public_key)? {
             Err(ValidatorConfigV2Error::unauthorized())?
         }
         config.require_owner_or_validator(sender, v.validator_address)?;
@@ -3046,55 +3049,6 @@ mod tests {
 
             Ok(())
         })
-    }
-
-    #[test]
-    fn test_transfer_validator_ownership_is_refused_once_votes_are_attributable() -> eyre::Result<()>
-    {
-        let owner = Address::random();
-        let validator = Address::random();
-        let transfer = |new_address| IValidatorConfigV2::transferValidatorOwnershipCall {
-            idx: 0,
-            newAddress: new_address,
-        };
-        // Before the time, and at it without T12, the validator still moves its own entry.
-        for (spec, timestamp, moves) in [
-            (TempoHardfork::T12, 99, true),
-            (TempoHardfork::T11, 100, true),
-            (TempoHardfork::T12, 100, false),
-        ] {
-            let mut storage = HashMapStorageProvider::new_with_spec(1, spec);
-            storage.set_attributable_votes_time(Some(100));
-            storage.set_timestamp(U256::from(timestamp));
-            StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                let mut vc = ValidatorConfigV2::new();
-                vc.initialize(owner)?;
-                vc.storage.set_block_number(200);
-                vc.add_validator(
-                    owner,
-                    make_valid_add_call(validator, "192.168.1.1:8000", "192.168.1.1", validator),
-                )?;
-
-                let moved = vc.transfer_validator_ownership(validator, transfer(Address::random()));
-                if moves {
-                    moved?;
-                    return Ok(());
-                }
-                // Nobody moves it then, the owner included: the address is where the bond is.
-                let unauthorized = Err(ValidatorConfigV2Error::unauthorized().into());
-                assert_eq!(moved, unauthorized);
-                assert_eq!(
-                    vc.transfer_validator_ownership(owner, transfer(Address::random())),
-                    unauthorized
-                );
-                assert_eq!(
-                    vc.validator_by_address(validator)?.validatorAddress,
-                    validator
-                );
-                Ok(())
-            })?;
-        }
-        Ok(())
     }
 
     #[test]

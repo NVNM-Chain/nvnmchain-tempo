@@ -1,6 +1,6 @@
 [package]
 name = "tempo-validator-config"
-description = "Ed25519 signature construction and verification for ValidatorConfigV2 add/rotate operations"
+description = "Ed25519 signatures for ValidatorConfigV2 add/rotate operations, and the vote key derived from a signing key"
 
 version.workspace = true
 edition.workspace = true
@@ -19,7 +19,7 @@ workspace = true
 [dependencies]
 alloy-primitives.workspace = true
 commonware-codec.workspace = true
-commonware-cryptography.workspace = true
+commonware-cryptography = { workspace = true, features = ["bls12381"] }
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 thiserror.workspace = true

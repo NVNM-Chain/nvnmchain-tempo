@@ -42,7 +42,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_precompiles::validator_config_v2::{VALIDATOR_NS_ADD, VALIDATOR_NS_ROTATE};
-use tempo_validator_config::ValidatorConfig;
+use tempo_validator_config::{ValidatorConfig, VoteKeypair};
 
 use crate::{init_state, p2p_proxy::P2pProxyArgs, regenesis, shadow_replay};
 
@@ -167,7 +167,7 @@ pub enum ConsensusSubcommand {
     /// Generates an ed25519 signing key pair to be used in consensus.
     #[command(alias = "generate-private-key")]
     GenerateSigningKey(GenerateSigningKey),
-    /// Rotate a validator to a new identity.
+    /// Rotate a validator to a new identity (then set its vote key; destroy the old signing key)
     RotateValidator(RotateValidator),
     /// Set the validator Ip Address
     SetValidatorIpAddress(SetValidatorIpAddress),
@@ -176,8 +176,10 @@ pub enum ConsensusSubcommand {
     SetValidatorFeeRecipient(SetValidatorFeeRecipient),
     /// Set the validator fee token.
     SetValidatorToken(SetValidatorToken),
-    /// Transfer validator ownership (refused once consensus votes carry their signer's
-    /// signature: the address is then where the bond is)
+    /// Register a validator's vote key, derived from its signing key (once, from the validator's
+    /// own address; until then its votes do not count once votes are attributable)
+    SetVoteKey(SetVoteKey),
+    /// Transfer validator ownership (refused for a validator that has a vote key)
     TransferValidatorOwnership(TransferValidatorOwnership),
     /// Look up a validator by etheruem address, e25519 public key, or index.
     Validator(ValidatorInfo),
@@ -198,6 +200,7 @@ impl ConsensusSubcommand {
             Self::SetValidatorIpAddress(args) => args.run().await,
             Self::SetValidatorFeeRecipient(args) => args.run().await,
             Self::SetValidatorToken(args) => args.run().await,
+            Self::SetVoteKey(args) => args.run().await,
             Self::EncryptSigningKey(args) => args.run(),
             Self::Equivocations(args) => args.run().await,
             Self::GenerateSigningKey(args) => args.run(),
@@ -789,6 +792,34 @@ impl SetValidatorIpAddress {
             egress: self.egress.map_or(validator.egress, |v| v.to_string()),
         };
 
+        self.submit.call(&call).await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SetVoteKey {
+    #[command(flatten)]
+    signing_key: SigningKeyArgs,
+
+    #[command(flatten)]
+    submit: ValidatorTransactionArgs,
+}
+
+impl SetVoteKey {
+    async fn run(self) -> eyre::Result<()> {
+        let provider = self.submit.provider().await?;
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .wrap_err("failed to get chain id")?;
+
+        let signing_key = self.signing_key.read()?.into_inner();
+        let public_key = B256::from_slice(signing_key.public_key().as_ref());
+        let validator =
+            read_validator_from_contract(&provider, ValidatorId::PublicKey(public_key)).await?;
+
+        let call = VoteKeypair::derive(&signing_key).registration(chain_id, validator.index);
         self.submit.call(&call).await?;
         Ok(())
     }
