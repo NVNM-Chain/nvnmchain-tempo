@@ -1405,8 +1405,8 @@ struct InfoOutput {
 
 #[derive(Debug, clap::Args)]
 pub struct Equivocations {
-    /// RPC URLs of the nodes whose votes to compare. A validator that sends its peers different
-    /// votes is found only when nodes that received each are among them.
+    /// RPC URLs of the nodes whose votes to compare. A validator that sends its peers votes for
+    /// different proposals is found only when nodes that received each are among them.
     #[arg(long = "rpc-url", required = true)]
     rpc_urls: Vec<String>,
 }
@@ -1438,7 +1438,7 @@ impl Equivocations {
                 .wrap_err_with(|| format!("failed to connect to `{url}`"))?;
             providers.push(provider);
         }
-        let first = providers.first().ok_or_eyre("no RPC URL given")?;
+        let first = &providers[0];
         let chain_id = first
             .get_chain_id()
             .await
@@ -1487,6 +1487,7 @@ impl Equivocations {
 
         // The nodes are not trusted: a vote counts only under the vote key the registry holds
         // for its signer, and only evidence that key signed is kept, one per signer and round.
+        // What a node holds as evidence goes in first, as the two votes it is made of.
         let registry = IEquivocation::new(VALIDATOR_CONFIG_V2_ADDRESS, first);
         let signers: BTreeSet<_> = evidence
             .iter()
@@ -1501,29 +1502,20 @@ impl Equivocations {
                 .await
                 .wrap_err("failed to read a vote key from the registry")?;
             if let Ok(key) = VoteKey::decode(key.as_ref()) {
-                keys.insert(signer, key);
+                keys.insert(signer, Arc::new(key));
             }
         }
 
-        let votes = votes
+        let votes = evidence
             .into_iter()
-            .filter_map(|(signer, signed)| Some((signer, *keys.get(&signer)?, signed)));
-        let mut found = BTreeMap::new();
-        for evidence in evidence
-            .into_iter()
-            .filter(|evidence| {
-                let key = keys.get(&evidence.signer);
-                key.is_some_and(|key| evidence.verify(&chain, key))
-            })
-            .chain(pair(&chain, votes))
-        {
-            found
-                .entry((evidence.signer, evidence.first.ballot.round()))
-                .or_insert(evidence);
-        }
+            .flat_map(|held| [(held.signer, held.first), (held.signer, held.second)])
+            .chain(votes)
+            .filter_map(|(signer, signed)| Some((signer, keys.get(&signer)?.clone(), signed)));
+        let mut found = pair(&chain, votes);
+        found.sort_by_key(|evidence| (evidence.signer, evidence.first.ballot.round()));
 
         let output: Vec<_> = found
-            .into_values()
+            .into_iter()
             .map(|evidence| {
                 let round = evidence.first.ballot.round();
                 EquivocationOutput {

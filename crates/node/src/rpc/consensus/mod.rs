@@ -85,13 +85,13 @@ pub trait TempoConsensusApi {
     #[method(name = "getEquivocations")]
     async fn get_equivocations(&self) -> RpcResult<Vec<Bytes>>;
 
-    /// Get the rounds whose votes disagree at this node.
+    /// Get the rounds whose votes at this node name two proposals.
     ///
     /// A validator may have sent another node a vote that conflicts with one held here.
     #[method(name = "getDisputedRounds")]
     async fn get_disputed_rounds(&self) -> RpcResult<Vec<RoundId>>;
 
-    /// Get the signed votes this node holds for a round.
+    /// Get the signed votes this node holds for a round, as received: unverified.
     #[method(name = "getVotes")]
     async fn get_votes(&self, round: RoundId) -> RpcResult<Vec<SignedVote>>;
 }

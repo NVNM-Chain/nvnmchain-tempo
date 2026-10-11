@@ -6,7 +6,7 @@
 //! node only one, so a node keeps what it saw for whoever compares several nodes.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::Arc,
 };
 
@@ -26,11 +26,8 @@ const RETAINED_ROUNDS: usize = 4_096;
 /// nodes': a split pair is evidence only once both halves meet.
 const RETAINED_DISPUTED: usize = 1_024;
 
-/// How many pieces of evidence a node keeps.
+/// How many pieces of evidence a node keeps, the latest.
 const RETAINED_EVIDENCE: usize = 1_024;
-
-/// What a node keeps of one signer in one round: its three votes and one that conflicts.
-const BALLOTS_PER_SIGNER: usize = 4;
 
 /// The ballot a vote on `subject` casts, in the registry's terms. `None` unless its proposal
 /// names a block.
@@ -57,33 +54,33 @@ pub(crate) fn ballot<D: Digest>(subject: Subject<'_, D>) -> Option<Ballot> {
 /// signer and round, the first two that conflict and that the key did sign.
 pub fn pair(
     namespace: &VoteNamespace,
-    votes: impl IntoIterator<Item = (B256, VoteKey, Signed)>,
+    votes: impl IntoIterator<Item = (B256, Arc<VoteKey>, Signed)>,
 ) -> Vec<Evidence> {
     let mut held = Held::default();
     votes
         .into_iter()
-        .filter_map(|(signer, key, signed)| held.keep(namespace, signer, key, signed, usize::MAX))
+        .filter_map(|(signer, key, signed)| held.keep(namespace, signer, key, signed))
         .collect()
 }
 
-/// A round's ballots by signer, under the vote key it first voted with there. A signer convicted
-/// in the round keeps `None`: nothing more it says there proves anything new.
-type Ballots = BTreeMap<B256, Option<(VoteKey, Vec<Signed>)>>;
+/// A round's ballots by signer, under the vote key it first voted with there: at most two, as
+/// a third conflicts with one of them. A signer convicted in the round keeps `None`: nothing
+/// more it says there proves anything new.
+type Ballots = BTreeMap<B256, Option<(Arc<VoteKey>, Vec<Signed>)>>;
 
 #[derive(Default)]
 struct Held(BTreeMap<Round, Ballots>);
 
 impl Held {
-    /// Keeps `signed` unless `signer` already holds `limit` ballots in its round, and returns the
-    /// evidence it completes. Signatures are checked only for ballots that conflict: the engine
-    /// reports a vote before verifying it, and nearly none conflict.
+    /// Keeps `signed` and returns the evidence it completes. Signatures are checked only for a
+    /// ballot that conflicts with a held one, or repeats it under another signature: the engine
+    /// reports a vote before verifying it, and nearly none do either.
     fn keep(
         &mut self,
         namespace: &VoteNamespace,
         signer: B256,
-        key: VoteKey,
+        key: Arc<VoteKey>,
         signed: Signed,
-        limit: usize,
     ) -> Option<Evidence> {
         let slot = self
             .0
@@ -93,6 +90,14 @@ impl Held {
             .or_insert_with(|| Some((key, Vec::new())));
         let (key, ballots) = slot.as_mut()?;
         if ballots.contains(&signed) {
+            return None;
+        }
+        // The same ballot under another signature is the key's at most once. Kept as the one that
+        // is, a copy an untrusted node serves cannot bury the vote.
+        if let Some(held) = ballots.iter_mut().find(|held| held.ballot == signed.ballot) {
+            if signed.verify(namespace, key) {
+                *held = signed;
+            }
             return None;
         }
         let conflicts = |held: &Signed| held.ballot.conflicts_with(&signed.ballot);
@@ -110,32 +115,26 @@ impl Held {
                 });
             }
         }
-        if ballots.len() < limit {
-            ballots.push(signed);
-        }
+        ballots.push(signed);
         None
     }
 }
 
-/// Whether a round's ballots disagree: two proposals voted for, or a nullify beside a finalize.
-/// Another node may then hold the vote that conflicts with one held here.
+/// Whether a round's ballots name two proposals: another node may then hold the vote that
+/// conflicts with one held here. A nullify beside another signer's finalize is only a timeout,
+/// so a signer that splits those two between nodes is not pointed at.
 fn is_disputed(signers: &Ballots) -> bool {
-    let ballots = || {
-        signers
-            .values()
-            .flatten()
-            .flat_map(|(_, ballots)| ballots)
-            .map(|signed| &signed.ballot)
-    };
-    let mut proposals = ballots().filter_map(|ballot| match ballot {
-        Ballot::Notarize(proposal) | Ballot::Finalize(proposal) => Some(proposal),
-        Ballot::Nullify(_) => None,
-    });
+    let mut proposals = signers
+        .values()
+        .flatten()
+        .flat_map(|(_, ballots)| ballots)
+        .filter_map(|signed| match signed.ballot {
+            Ballot::Notarize(proposal) | Ballot::Finalize(proposal) => Some(proposal),
+            Ballot::Nullify(_) => None,
+        });
     proposals
         .next()
         .is_some_and(|first| proposals.any(|other| other != first))
-        || (ballots().any(|ballot| matches!(ballot, Ballot::Nullify(_)))
-            && ballots().any(|ballot| matches!(ballot, Ballot::Finalize(_))))
 }
 
 /// The signed votes a node saw in its latest rounds, and the evidence they make on their own.
@@ -149,7 +148,7 @@ pub struct Votes {
 struct Inner {
     held: Held,
     disputed: BTreeSet<Round>,
-    evidence: Vec<Evidence>,
+    evidence: VecDeque<Evidence>,
 }
 
 impl Votes {
@@ -159,23 +158,22 @@ impl Votes {
             inner: Arc::new(Mutex::new(Inner {
                 held: Held::default(),
                 disputed: BTreeSet::new(),
-                evidence: Vec::new(),
+                evidence: VecDeque::new(),
             })),
         }
     }
 
     /// Keeps a vote the engine reported, not yet verified, of `signer` whose vote key is `key`.
-    pub(crate) fn record(&self, signer: B256, key: VoteKey, signed: Signed) {
+    pub(crate) fn record(&self, signer: B256, key: Arc<VoteKey>, signed: Signed) {
         let round = signed.ballot.round();
         let mut inner = self.inner.lock();
-        let evidence = inner
-            .held
-            .keep(&self.namespace, signer, key, signed, BALLOTS_PER_SIGNER);
-        if let Some(evidence) = evidence
-            && inner.evidence.len() < RETAINED_EVIDENCE
-        {
+        let evidence = inner.held.keep(&self.namespace, signer, key, signed);
+        if let Some(evidence) = evidence {
             warn!(signer = %evidence.signer, ?round, "a validator signed conflicting votes");
-            inner.evidence.push(evidence);
+            if inner.evidence.len() == RETAINED_EVIDENCE {
+                inner.evidence.pop_front();
+            }
+            inner.evidence.push_back(evidence);
         }
         if inner.held.0.get(&round).is_some_and(is_disputed) {
             inner.disputed.insert(round);
@@ -198,30 +196,25 @@ impl Votes {
         }
     }
 
-    /// The votes held for `round` that their signers' vote keys did sign.
+    /// The votes held for `round`, unchecked: whoever pairs them checks the signatures, and so
+    /// does the registry.
     pub fn in_round(&self, round: Round) -> Vec<(B256, Signed)> {
-        // Checked outside the lock, which the engine's reports wait on.
-        let held = self.inner.lock().held.0.get(&round).cloned();
-        held.into_iter()
-            .flatten()
-            .flat_map(|(signer, held)| held.map(|held| (signer, held)))
-            .flat_map(|(signer, (key, ballots))| {
-                ballots
-                    .into_iter()
-                    .filter(move |signed| signed.verify(&self.namespace, &key))
-                    .map(move |signed| (signer, signed))
-            })
+        let inner = self.inner.lock();
+        (inner.held.0.get(&round).into_iter().flatten())
+            .filter_map(|(signer, held)| Some((*signer, &held.as_ref()?.1)))
+            .flat_map(|(signer, ballots)| ballots.iter().map(move |signed| (signer, *signed)))
             .collect()
     }
 
-    /// Rounds whose votes disagree, so that another node may hold the other half of a pair.
+    /// Rounds whose votes name two proposals, so that another node may hold the other half of a
+    /// pair.
     pub fn disputed(&self) -> Vec<Round> {
         self.inner.lock().disputed.iter().copied().collect()
     }
 
-    /// Evidence this node's own votes make.
+    /// Evidence this node's own votes make, the latest.
     pub fn evidence(&self) -> Vec<Evidence> {
-        self.inner.lock().evidence.clone()
+        self.inner.lock().evidence.iter().copied().collect()
     }
 }
 
@@ -277,7 +270,7 @@ mod tests {
     /// `node` receives `ballot` from the validator `key`.
     fn cast(node: &Votes, namespace: &VoteNamespace, key: &PrivateKey, ballot: Ballot) {
         let (signer, vote_key) = signer(key);
-        node.record(signer, vote_key, sign(namespace, key, ballot));
+        node.record(signer, Arc::new(vote_key), sign(namespace, key, ballot));
     }
 
     /// A vote key signs what the consensus library says a vote is, so two votes that differ there
@@ -322,7 +315,7 @@ mod tests {
         let votes = [&first, &second]
             .into_iter()
             .flat_map(|node| node.in_round(round(2)))
-            .map(|(signer, signed)| (signer, keys[&signer], signed));
+            .map(|(signer, signed)| (signer, Arc::new(keys[&signer]), signed));
         let evidence = pair(&chain, votes);
         let (double, vote_key) = signer(&double);
         assert_eq!(evidence.len(), 1);
@@ -354,17 +347,69 @@ mod tests {
         // Signed by another's vote key, and put under the honest signer's name.
         let forged = sign(&chain, &forger, Ballot::Notarize(proposal(2, 2)));
         let (honest, key) = signer(&honest);
+        let key = Arc::new(key);
 
         for votes in [[vote, forged], [forged, vote]] {
             let node = Votes::new(chain.clone());
             for signed in votes {
-                node.record(honest, key, signed);
+                node.record(honest, key.clone(), signed);
             }
             assert!(node.evidence().is_empty());
+            // The forgery went when the key's own vote conflicted with it: nothing is checked
+            // for serving.
             assert_eq!(node.in_round(round(2)), [(honest, vote)]);
-            let gathered = votes.into_iter().map(|signed| (honest, key, signed));
+            let gathered = votes
+                .into_iter()
+                .map(|signed| (honest, key.clone(), signed));
             assert!(pair(&chain, gathered).is_empty());
         }
+    }
+
+    /// An untrusted node may serve a vote's ballot under signatures that are not the key's. They
+    /// neither bury the vote nor count as it.
+    #[test]
+    fn copies_of_a_vote_under_other_signatures_do_not_bury_it() {
+        let chain = chain();
+        let double = PrivateKey::from_seed(1);
+        let (a, b) = (proposal(2, 1), proposal(2, 2));
+        let (signer, key) = signer(&double);
+        let key = Arc::new(key);
+        let copies: Vec<Signed> = (2..6)
+            .map(|seed| sign(&chain, &PrivateKey::from_seed(seed), Ballot::Notarize(a)))
+            .collect();
+        let real =
+            [Ballot::Notarize(a), Ballot::Notarize(b)].map(|ballot| sign(&chain, &double, ballot));
+        for votes in [
+            [copies.clone(), real.to_vec()].concat(),
+            [real.to_vec(), copies].concat(),
+        ] {
+            let gathered = votes
+                .into_iter()
+                .map(|signed| (signer, key.clone(), signed));
+            let evidence = pair(&chain, gathered);
+            assert_eq!(evidence.len(), 1);
+            assert_eq!((evidence[0].first, evidence[0].second), (real[0], real[1]));
+        }
+    }
+
+    #[test]
+    fn the_latest_evidence_is_kept() {
+        let chain = chain();
+        let double = PrivateKey::from_seed(1);
+        let node = Votes::new(chain.clone());
+        for view in 1..=RETAINED_EVIDENCE as u64 + 1 {
+            for payload in [1, 2] {
+                cast(
+                    &node,
+                    &chain,
+                    &double,
+                    Ballot::Notarize(proposal(view, payload)),
+                );
+            }
+        }
+        let kept = node.evidence();
+        assert_eq!(kept.len(), RETAINED_EVIDENCE);
+        assert_eq!(kept[0].first.ballot.round(), round(2), "the oldest went");
     }
 
     /// A split seen in one round must still be there when someone compares nodes, however many
@@ -379,12 +424,13 @@ mod tests {
         // Signed once: the store checks a signature only when votes conflict.
         let nullify = sign(&chain, &one, Ballot::Nullify(round(3))).signature;
         let (one, key) = signer(&one);
+        let key = Arc::new(key);
         for view in 3..3 + RETAINED_ROUNDS as u64 + 1 {
             let signed = Signed {
                 ballot: Ballot::Nullify(round(view)),
                 signature: nullify,
             };
-            node.record(one, key, signed);
+            node.record(one, key.clone(), signed);
         }
 
         assert_eq!(node.disputed(), [round(2)]);

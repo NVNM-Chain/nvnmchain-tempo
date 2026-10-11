@@ -48,8 +48,9 @@ pub(crate) struct Scheme {
     threshold: Threshold,
     /// What vote keys sign this chain's votes under.
     namespace: Arc<VoteNamespace>,
-    /// Each participant's vote key, at its place, if the registry holds one.
-    keys: Arc<[Option<VoteKey>]>,
+    /// Each participant's vote key, at its place, if the registry holds one; shared with the
+    /// votes kept under it.
+    keys: Arc<[Option<Arc<VoteKey>>]>,
     /// Our vote key, if it is the one at our share's place.
     signer: Option<Private>,
 }
@@ -75,11 +76,14 @@ impl Scheme {
         let mut scheme = Self {
             threshold,
             namespace: Arc::new(VoteNamespace::new(chain_id, genesis)),
-            keys: keys.into(),
+            keys: keys.iter().map(|key| key.map(Arc::new)).collect(),
             signer: None,
         };
         if let Some(me) = certificate::Scheme::me(&scheme.threshold) {
-            if scheme.key(me) == Some(ops::compute_public::<MinSig>(&signer)) {
+            if scheme
+                .key(me)
+                .is_some_and(|key| **key == ops::compute_public::<MinSig>(&signer))
+            {
                 scheme.signer = Some(signer);
             } else {
                 error!("the registry does not hold our vote key for our share; verifying only");
@@ -89,8 +93,8 @@ impl Scheme {
     }
 
     /// The vote key of `signer`, if the registry holds one.
-    fn key(&self, signer: Participant) -> Option<VoteKey> {
-        *self.keys.get(usize::from(signer))?
+    fn key(&self, signer: Participant) -> Option<&Arc<VoteKey>> {
+        self.keys.get(usize::from(signer))?.as_ref()
     }
 
     /// A vote's threshold half as that scheme takes it, and its signer's vote key with the
@@ -104,7 +108,10 @@ impl Scheme {
             signer: attestation.signer,
             signature: signature.threshold.clone().into(),
         };
-        Some((partial, (self.key(attestation.signer)?, signature.identity)))
+        Some((
+            partial,
+            (**self.key(attestation.signer)?, signature.identity),
+        ))
     }
 }
 
@@ -319,7 +326,7 @@ impl<R> Recorder<R> {
         if let Some(ballot) = ballot(subject)
             && let Some(signature) = attestation.signature.get()
             && let Some(signer) = threshold.participants().get(attestation.signer.into())
-            && let Some(key) = self.scheme.key(attestation.signer)
+            && let Some(key) = self.scheme.key(attestation.signer).cloned()
         {
             let signed = Signed {
                 ballot,

@@ -236,7 +236,7 @@ fn votes_split_between_nodes_convict_their_signer() {
             let votes = nodes
                 .iter()
                 .flat_map(|node| node.in_round(round))
-                .map(|(signer, signed)| (signer, keys[&signer], signed));
+                .map(|(signer, signed)| (signer, Arc::new(keys[&signer]), signed));
             for evidence in pair(&chain, votes) {
                 assert_eq!(evidence.signer, public_key_to_b256(&double));
                 assert!(evidence.verify(&chain, &keys[&evidence.signer]));
