@@ -261,10 +261,12 @@ fn append_genesis_arg(source: &str, previous: &str, hardfork: &str) -> eyre::Res
     )?;
     let previous_insert = genesis_insert(previous, optional);
     let new_insert = genesis_insert(hardfork, optional);
+    // The list's layout is rustfmt's to choose, so an element is matched without it.
+    let separator = if optional { ", " } else { "" };
     insert_once(
         &output,
         &previous_insert,
-        &format!("{previous_insert}{new_insert}"),
+        &format!("{previous_insert}{separator}{new_insert}"),
     )
 }
 
@@ -278,12 +280,12 @@ fn genesis_arg(hardfork: &str, optional: bool) -> String {
     }
 }
 
-/// Where a fork's time enters the genesis config: an entry of the list written when set, or its
-/// own unconditional insert.
+/// Where a fork's time enters the genesis config: an element of the list written when set, or
+/// its own unconditional insert.
 fn genesis_insert(hardfork: &str, optional: bool) -> String {
     let fork = hardfork.to_ascii_lowercase();
     if optional {
-        format!("            (\"{fork}Time\", self.{fork}_time),\n")
+        format!("(\"{fork}Time\", self.{fork}_time)")
     } else {
         format!(
             "        chain_config\n            .extra_fields\n            .insert_value(\"{fork}Time\".to_string(), self.{fork}_time)?;\n"
