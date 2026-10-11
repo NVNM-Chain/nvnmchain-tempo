@@ -37,12 +37,12 @@ pub(crate) fn units(weights: &[U256], cap_bps: u64) -> Vec<u16> {
     let total = weights
         .iter()
         .fold(U512::ZERO, |sum, weight| sum + U512::from(*weight));
+    if total.is_zero() {
+        return vec![1; weights.len()];
+    }
     let mut units: Vec<u64> = weights
         .iter()
         .map(|weight| {
-            if total.is_zero() {
-                return 1;
-            }
             (U512::from(*weight) * U512::from(UNITS) / total)
                 .to::<u64>()
                 .max(1)
