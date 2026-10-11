@@ -56,7 +56,7 @@ impl ValidatorConfigV2 {
 
     /// Whether this chain's votes are, or are scheduled to be, attributable. Vote keys are taken
     /// from then on, ahead of the first such vote.
-    pub(super) fn takes_vote_keys(&self) -> bool {
+    pub fn takes_vote_keys(&self) -> bool {
         self.storage.spec().is_t12() && self.storage.attributable_votes_time().is_some()
     }
 
