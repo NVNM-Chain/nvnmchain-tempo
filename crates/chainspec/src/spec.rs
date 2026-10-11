@@ -41,8 +41,8 @@ pub struct TempoGenesisInfo {
     /// When the election activates, in the style of the hardfork times. Unset means genesis.
     #[serde(skip_serializing_if = "Option::is_none")]
     staking_election_time: Option<u64>,
-    /// From when, at T12 or later, each consensus vote also carries its signer's ed25519
-    /// signature, in the style of the hardfork times. Unset leaves votes as upstream has them.
+    /// From when, at T12 or later, each consensus vote also carries the signature of its signer's
+    /// vote key, in the style of the hardfork times. Unset leaves votes as upstream has them.
     #[serde(skip_serializing_if = "Option::is_none")]
     attributable_votes_time: Option<u64>,
     /// The fee router factory; from T12 a validator's fee recipient may only be the router it

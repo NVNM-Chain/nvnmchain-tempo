@@ -167,7 +167,8 @@ pub enum ConsensusSubcommand {
     /// Generates an ed25519 signing key pair to be used in consensus.
     #[command(alias = "generate-private-key")]
     GenerateSigningKey(GenerateSigningKey),
-    /// Rotate a validator to a new identity (then set its vote key; destroy the old signing key)
+    /// Rotate a validator to a new identity (then set its vote key; the old key's votes still
+    /// convict this validator, so destroy it)
     RotateValidator(RotateValidator),
     /// Set the validator Ip Address
     SetValidatorIpAddress(SetValidatorIpAddress),

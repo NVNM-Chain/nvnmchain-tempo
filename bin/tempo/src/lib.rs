@@ -476,6 +476,10 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
         for key in &builder.config().chain.unknown_config_keys {
             warn!(%key, "genesis config key is unknown to Tempo and ignored");
         }
+        let info = &builder.config().chain.info;
+        if info.staking_election_time().is_some() && info.staking_election().is_none() {
+            warn!("genesis sets stakingElectionTime but no stakingElection, so no election runs");
+        }
         if let Some(value) = args.consensus.message_backlog {
             warn!(
                 flag = "--consensus.message-backlog",
