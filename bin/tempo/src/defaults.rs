@@ -12,7 +12,7 @@ use tempo_chainspec::spec::TEMPO_T7_BASE_FEE_FLOOR;
 use url::Url;
 
 /// NVNM's snapshot host: `tempo download` discovers snapshots at its `/api/snapshots`.
-const SNAPSHOT_URL: &str = "https://snapshot.nvnm.testnet.nvnmchain.io";
+const SNAPSHOT_URL: &str = "https://download.nvnm.testnet.nvnmchain.io";
 /// NVNM peers list, `{"<chain id>": ["enode://…"]}`; "none" disables it.
 pub(crate) const BOOTNODES_ENDPOINT: &str = "none";
 const MINIMAL_PEER_SYNC_RETENTION_BLOCKS: u64 =
