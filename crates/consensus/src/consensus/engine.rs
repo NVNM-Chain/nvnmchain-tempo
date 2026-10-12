@@ -17,7 +17,7 @@ use commonware_cryptography::{
 use commonware_p2p::{AddressableManager, Blocker, Receiver, Sender};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::MetricsExt as _,
 };
 use commonware_utils::NZUsize;
 use eyre::{OptionExt as _, WrapErr as _, ensure};
@@ -232,10 +232,16 @@ where
             priority_responses: false,
         };
 
-        let votes = crate::equivocation::Votes::new(VoteNamespace::new(
-            execution_node.chain_spec().chain_id(),
-            execution_node.chain_spec().genesis_hash(),
-        ));
+        let votes = crate::equivocation::Votes::new(
+            VoteNamespace::new(
+                execution_node.chain_spec().chain_id(),
+                execution_node.chain_spec().genesis_hash(),
+            ),
+            context.counter(
+                "equivocations_found",
+                "pieces of evidence of conflicting votes this node found on its own",
+            ),
+        );
         self.feed_state.set_votes(votes.clone());
         let (feed, feed_mailbox) = crate::feed::init(
             context.child("feed"),

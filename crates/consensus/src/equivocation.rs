@@ -10,9 +10,11 @@ use std::{
     sync::Arc,
 };
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, hex};
+use commonware_codec::Encode as _;
 use commonware_consensus::simplex::types::Subject;
 use commonware_cryptography::Digest;
+use commonware_runtime::telemetry::metrics::Counter;
 use parking_lot::Mutex;
 use tempo_precompiles::validator_config_v2::{
     Ballot, Evidence, Proposal, Round, Signed, VoteKey, VoteNamespace,
@@ -142,6 +144,8 @@ fn is_disputed(signers: &Ballots) -> bool {
 #[derive(Clone)]
 pub(crate) struct Votes {
     namespace: Arc<VoteNamespace>,
+    /// How many pieces of evidence this node found on its own.
+    found: Counter,
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -152,9 +156,10 @@ struct Inner {
 }
 
 impl Votes {
-    pub(crate) fn new(namespace: VoteNamespace) -> Self {
+    pub(crate) fn new(namespace: VoteNamespace, found: Counter) -> Self {
         Self {
             namespace: Arc::new(namespace),
+            found,
             inner: Arc::new(Mutex::new(Inner {
                 held: Held::default(),
                 disputed: BTreeSet::new(),
@@ -169,7 +174,14 @@ impl Votes {
         let mut inner = self.inner.lock();
         let evidence = inner.held.keep(&self.namespace, signer, key, signed);
         if let Some(evidence) = evidence {
-            warn!(signer = %evidence.signer, ?round, "a validator signed conflicting votes");
+            // The bytes too: the store is in memory, the log may outlive it.
+            warn!(
+                signer = %evidence.signer,
+                ?round,
+                evidence = %hex::encode_prefixed(evidence.encode()),
+                "a validator signed conflicting votes"
+            );
+            self.found.metric().inc();
             if inner.evidence.len() == RETAINED_EVIDENCE {
                 inner.evidence.pop_front();
             }
@@ -222,7 +234,7 @@ impl Votes {
 mod double_signer;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use commonware_consensus::{
         simplex::types,
         types::{Epoch, View},
@@ -239,6 +251,13 @@ mod tests {
 
     fn chain() -> VoteNamespace {
         VoteNamespace::new(787_222, B256::repeat_byte(1))
+    }
+
+    /// A store counting into a metric nobody reads.
+    pub(crate) fn store(namespace: VoteNamespace) -> Votes {
+        use commonware_runtime::telemetry::metrics::{Registered, Registration, raw};
+        let found = Registered::with_registration(raw::Counter::default(), Registration::from(()));
+        Votes::new(namespace, found)
     }
 
     fn round(view: u64) -> Round {
@@ -299,7 +318,7 @@ mod tests {
 
         // The double signer shows each node a different notarize. The honest signer voted with
         // the second node's half.
-        let (first, second) = (Votes::new(chain.clone()), Votes::new(chain.clone()));
+        let (first, second) = (store(chain.clone()), store(chain.clone()));
         cast(&first, &chain, &double, Ballot::Notarize(a));
         cast(&second, &chain, &double, Ballot::Notarize(b));
         for node in [&first, &second] {
@@ -327,7 +346,7 @@ mod tests {
     fn a_node_that_sees_both_votes_holds_the_evidence_itself() {
         let chain = chain();
         let double = PrivateKey::from_seed(1);
-        let node = Votes::new(chain.clone());
+        let node = store(chain.clone());
         cast(&node, &chain, &double, Ballot::Nullify(round(2)));
         cast(&node, &chain, &double, Ballot::Finalize(proposal(2, 1)));
 
@@ -350,7 +369,7 @@ mod tests {
         let key = Arc::new(key);
 
         for votes in [[vote, forged], [forged, vote]] {
-            let node = Votes::new(chain.clone());
+            let node = store(chain.clone());
             for signed in votes {
                 node.record(honest, key.clone(), signed);
             }
@@ -396,7 +415,7 @@ mod tests {
     fn the_latest_evidence_is_kept() {
         let chain = chain();
         let double = PrivateKey::from_seed(1);
-        let node = Votes::new(chain.clone());
+        let node = store(chain.clone());
         for view in 1..=RETAINED_EVIDENCE as u64 + 1 {
             for payload in [1, 2] {
                 cast(
@@ -418,7 +437,7 @@ mod tests {
     fn a_disputed_round_outlives_the_retained_rounds() {
         let chain = chain();
         let (one, other) = (PrivateKey::from_seed(1), PrivateKey::from_seed(2));
-        let node = Votes::new(chain.clone());
+        let node = store(chain.clone());
         cast(&node, &chain, &one, Ballot::Notarize(proposal(2, 1)));
         cast(&node, &chain, &other, Ballot::Notarize(proposal(2, 2)));
         // Signed once: the store checks a signature only when votes conflict.

@@ -39,7 +39,7 @@ use futures::{StreamExt as _, channel::mpsc};
 use tempo_precompiles::validator_config_v2::VoteNamespace;
 use tempo_validator_config::VoteKeypair;
 
-use super::{Votes, pair};
+use super::pair;
 use crate::{
     attributable::{
         Recorder, Scheme,
@@ -167,7 +167,7 @@ fn votes_split_between_nodes_convict_their_signer() {
                 continue;
             }
 
-            let node = Votes::new(chain.clone());
+            let node = super::tests::store(chain.clone());
             nodes.push(node.clone());
             let (actor, application) = mocks::application::Application::new(
                 context.child("application"),

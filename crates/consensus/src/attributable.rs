@@ -716,7 +716,7 @@ pub(crate) mod tests {
                 finalize(&first).unwrap(),
             )),
         ] {
-            let votes = Votes::new(VoteNamespace::new(CHAIN_ID, GENESIS));
+            let votes = crate::equivocation::tests::store(VoteNamespace::new(CHAIN_ID, GENESIS));
             let mut recorder = Recorder {
                 scheme: signers[0].1.clone(),
                 votes: votes.clone(),

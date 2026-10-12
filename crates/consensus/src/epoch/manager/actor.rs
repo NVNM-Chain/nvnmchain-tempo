@@ -549,6 +549,9 @@ where
 
                 mailbox_size: self.config.mailbox_size,
                 forward: commonware_consensus::simplex::config::ForwardPolicy::Disabled,
+                // Upstream's setting, which the evidence relies on: a conflicting vote that
+                // arrives after the certificate, as a second machine's does, is still reported
+                // rather than dropped with its sender blocked.
                 track_historical_votes: true,
             },
         )
