@@ -27,6 +27,10 @@ const NOTARIZE: u8 = 0;
 const NULLIFY: u8 = 1;
 const FINALIZE: u8 = 2;
 
+/// How many epochs past its deactivation a key still answers for: the two it may still hold a
+/// share for, and a failed ceremony or two. A leaked key rotated out is no weapon after that.
+const RETIRED_KEY_GRACE: u64 = 4;
+
 /// A round of consensus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Round {
@@ -250,8 +254,8 @@ impl ValidatorConfigV2 {
     /// # Errors
     /// - `InvalidSignature` — the evidence does not decode, its votes do not conflict, they are
     ///   for an epoch yet to come, or the validator's vote key did not sign both on this chain
-    /// - `ValidatorNotFound` — the registry does not hold the key, did not yet in that epoch, or
-    ///   holds no vote key for it
+    /// - `ValidatorNotFound` — the registry does not hold the key, did not yet in that epoch or
+    ///   had retired it more than [`RETIRED_KEY_GRACE`] epochs before, or holds no vote key for it
     pub fn equivocator(
         &self,
         call: IEquivocation::equivocatorCall,
@@ -272,9 +276,8 @@ impl ValidatorConfigV2 {
         }
 
         // The record of this key, live or left by a rotation, names the address its bond is
-        // under. A key cannot have signed before that record held a seat. After it left one it
-        // still answers: failed key ceremonies carry an old set on for any number of epochs, and
-        // only the key itself can make the two signatures.
+        // under. A key cannot have signed before that record held a seat, nor past the grace
+        // after its deactivation.
         let record = self.validator_by_public_key(key)?;
         let epoch_length = self
             .storage
@@ -282,7 +285,11 @@ impl ValidatorConfigV2 {
         let epochs_ago = (self.storage.block_number() / epoch_length)
             .checked_sub(round.epoch)
             .ok_or_else(invalid)?;
-        if round.epoch < record.addedAtHeight / epoch_length {
+        let retired = (record.deactivatedAtHeight != 0)
+            .then(|| record.deactivatedAtHeight / epoch_length + RETIRED_KEY_GRACE);
+        if round.epoch < record.addedAtHeight / epoch_length
+            || retired.is_some_and(|last| round.epoch > last)
+        {
             Err(ValidatorConfigV2Error::validator_not_found())?
         }
 
@@ -479,8 +486,8 @@ mod tests {
                 Err(ValidatorConfigV2Error::invalid_signature().into())
             );
 
-            // Rotated out at NOW, the old key still answers, under the same address, for every
-            // epoch after: a failed key ceremony may keep it signing.
+            // Rotated out at NOW, the old key answers, under the same address, for the grace and
+            // no more.
             vc.rotate_validator(
                 owner,
                 IValidatorConfigV2::rotateValidatorCall {
@@ -498,12 +505,16 @@ mod tests {
                 },
             )?;
             vc.storage.set_block_number(NOW + 10);
-            for epoch in [EPOCH, NOW + 10] {
+            for epoch in [EPOCH, NOW + RETIRED_KEY_GRACE] {
                 assert_eq!(
                     vc.equivocator(double_notarize(&key, epoch))?.validator,
                     validator
                 );
             }
+            assert_eq!(
+                vc.equivocator(double_notarize(&key, NOW + RETIRED_KEY_GRACE + 1)),
+                not_found
+            );
             // Its successor answers from the rotation on, once it has a vote key of its own.
             let unregistered = vc.equivocator(double_notarize(&successor, NOW));
             assert_eq!(unregistered, not_found);
