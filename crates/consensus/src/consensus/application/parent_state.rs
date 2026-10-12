@@ -26,7 +26,7 @@ use crate::{
     consensus::block::Block,
     utils::public_key_to_b256,
     validators::{
-        NextPlayers, read_elected_players, read_seatable_players, read_validator_config_with_state,
+        NextPlayers, read_elected_players, read_eligible_players, read_validator_config_with_state,
     },
     weighted_elector,
 };
@@ -117,7 +117,7 @@ impl TempoParentState {
             .wrap_err("failed determining the elected players")?,
             None => NextPlayers {
                 players: self
-                    .read_validator_config(parent, read_seatable_players)
+                    .read_validator_config(parent, read_eligible_players)
                     .wrap_err("failed reading peers from validator config v2")?,
                 weights: None,
             },

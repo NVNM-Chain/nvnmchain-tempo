@@ -124,11 +124,12 @@ pub(crate) fn read_active_peers(
     Ok(ordered::Map::try_from_iter(all).expect("hashmaps don't contain duplicates"))
 }
 
-/// Those of `validators` that may be seated. From T12 on a chain that schedules attributable
-/// votes, only those with a vote key, as no other's vote will count. All of them while fewer
-/// than a quorum of them have one (and at least the smallest committee), so that the keys do not
-/// shrink the committee below what certifies, and an epoch short of them stops whole.
-fn seatable<T>(
+/// Those of `validators` the election may seat: what `computeCommittee` is passed. From T12 on a
+/// chain that schedules attributable votes, only those with a vote key, as no other's vote will
+/// count; all of them while fewer than a quorum (and at least the smallest committee) have one,
+/// so that the keys never shrink the committee below what certifies, and an epoch short of them
+/// stops whole.
+fn eligible<T>(
     config: &ValidatorConfigV2,
     validators: impl IntoIterator<Item = T>,
     key: impl Fn(&T) -> &PublicKey,
@@ -144,7 +145,7 @@ fn seatable<T>(
     let keyed = seats.iter().filter(|(_, keyed)| *keyed).count();
     let floor = match seats.len() {
         0 => 0, // no quorum of nobody
-        n => (N3f1::quorum(n as u32) as usize).max(MIN_ELECTED_COMMITTEE.min(n)),
+        n => (N3f1::quorum(n as u32) as usize).max(MIN_SEATS.min(n)),
     };
     let all = keyed < floor;
     Ok(seats
@@ -153,13 +154,13 @@ fn seatable<T>(
         .collect())
 }
 
-/// The next epoch's players where the genesis names no staking election: the active validators
-/// that may be seated.
-pub(crate) fn read_seatable_players(
+/// The next epoch's players where the genesis names no staking election: the eligible active
+/// validators.
+pub(crate) fn read_eligible_players(
     config: &ValidatorConfigV2,
 ) -> eyre::Result<ordered::Set<PublicKey>> {
     let active = read_active_peers(config)?.into_keys();
-    let seated = seatable(config, active, |key| key)?;
+    let seated = eligible(config, active, |key| key)?;
     Ok(ordered::Set::from_iter_dedup(seated))
 }
 
@@ -225,17 +226,17 @@ pub(crate) struct NextPlayers {
 
 /// The smallest committee the election or its fallback seats (3f+1, f=1), and the least the vote
 /// keys leave seated.
-const MIN_ELECTED_COMMITTEE: usize = 4;
+const MIN_SEATS: usize = 4;
 
 /// The largest committee the election may seat, the staking contract's `MAX_SEATS`, and the most
 /// of the registry its last fallback takes: the outcome of a larger one may not fit a header.
-const MAX_ELECTED_COMMITTEE: usize = 21;
+const MAX_SEATS: usize = 21;
 
 /// The next epoch's players where the genesis names a staking election, read from `state`, the
 /// post-state of the block with `header`. Once the election is active: the elected committee,
 /// else the `current_players` still registered, else the registry as the seat rule leaves it;
 /// before that, the registry. From T12 (`weighted`) a seated election's weights come with them,
-/// and the registry is cut to `MAX_ELECTED_COMMITTEE`. Each choice is a function of state, so
+/// and the registry is cut to `MAX_SEATS`. Each choice is a function of state, so
 /// every node makes it; an `Err` is node-local.
 #[instrument(skip_all, fields(%staking_election), err(Display))]
 pub(crate) fn read_elected_players(
@@ -279,22 +280,14 @@ pub(crate) fn read_elected_players(
         );
         players
     } else {
-        let most = if weighted {
-            MAX_ELECTED_COMMITTEE
-        } else {
-            usize::MAX
-        };
-        let mut keys = HashSet::new();
-        for validator in registry.iter().take(most) {
-            if !keys.insert(validator.public_key().clone()) {
-                warn!(duplicate = %validator.public_key(), "found duplicate public keys");
-            }
-        }
+        let most = if weighted { MAX_SEATS } else { usize::MAX };
+        let keys = registry.iter().take(most).map(|v| v.public_key().clone());
+        let players = ordered::Set::from_iter_dedup(keys);
         info!(
-            players = keys.len(),
+            players = players.len(),
             active, "next committee is the registry"
         );
-        ordered::Set::try_from_iter(keys).expect("a hash set does not contain duplicates")
+        players
     };
     // The players weighed are the ones the output hands the next epoch's shares, whichever
     // committee the election seats for the epoch after; on every fallback they draw alike.
@@ -357,7 +350,7 @@ fn read_registry(evm: &mut ConfigEvm) -> eyre::Result<Vec<DecodedValidatorV2>> {
                 registry.push(decoded);
             }
         }
-        seatable(config, registry, DecodedValidatorV2::public_key)
+        eligible(config, registry, DecodedValidatorV2::public_key)
     })
 }
 
@@ -389,7 +382,7 @@ fn elected_players(
     };
     let named: HashSet<Address> = elected.into_iter().collect();
     let players = seated_players(registry, |validator| named.contains(&validator.address))
-        .filter(|players| players.len() <= MAX_ELECTED_COMMITTEE);
+        .filter(|players| players.len() <= MAX_SEATS);
     if players.is_none() {
         warn!(%contract, "elected committee below the smallest or above the largest; falling back");
     }
@@ -485,7 +478,7 @@ fn election_call(
     Ok(Some(output.into_data()))
 }
 
-/// The registry entries `seat` picks, or `None` below `MIN_ELECTED_COMMITTEE` (capped at the
+/// The registry entries `seat` picks, or `None` below `MIN_SEATS` (capped at the
 /// registry's size, so a small chain cannot halt). The set sorts by key: the pick decides who
 /// makes the cut, not leader order.
 fn seated_players(
@@ -497,7 +490,7 @@ fn seated_players(
         .filter(|validator| seat(validator))
         .map(|validator| validator.public_key().clone())
         .collect();
-    let floor = MIN_ELECTED_COMMITTEE.min(registry.len());
+    let floor = MIN_SEATS.min(registry.len());
     if floor == 0 || seated.len() < floor {
         return None;
     }
@@ -959,7 +952,7 @@ mod tests {
                 for &seed in keyed {
                     config.set_vote_key(address(seed), vote_key_registration(seed))?;
                 }
-                read_seatable_players(&config)
+                read_eligible_players(&config)
             })
             .unwrap()
         };
@@ -982,10 +975,41 @@ mod tests {
         let players = StorageCtx::enter(&mut storage, || -> eyre::Result<_> {
             let mut config = ValidatorConfigV2::new();
             config.initialize(OWNER)?;
-            read_seatable_players(&config)
+            read_eligible_players(&config)
         })
         .unwrap();
         assert!(players.is_empty());
+    }
+
+    /// A rotated entry's new key is a stranger to the vote keys until it registers its own.
+    #[test]
+    fn a_rotated_key_is_unseated_until_it_registers_a_vote_key() {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T12);
+        storage.set_attributable_votes_time(Some(u64::MAX));
+        storage.set_block_number(1);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            let mut config = ValidatorConfigV2::new();
+            config.initialize(OWNER)?;
+            for seed in 1..=7 {
+                config.add_validator(OWNER, add_validator_call(seed, address(seed)))?;
+                config.set_vote_key(address(seed), vote_key_registration(seed))?;
+            }
+            assert_eq!(
+                read_eligible_players(&config)?,
+                keys(&[1, 2, 3, 4, 5, 6, 7])
+            );
+
+            config.rotate_validator(OWNER, rotate_validator_call(8, 0, address(1)))?;
+            assert_eq!(read_eligible_players(&config)?, keys(&[2, 3, 4, 5, 6, 7]));
+            let registration = VoteKeypair::derive(&key(8)).registration(1, 0);
+            config.set_vote_key(address(1), registration)?;
+            assert_eq!(
+                read_eligible_players(&config)?,
+                keys(&[2, 3, 4, 5, 6, 7, 8])
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 
     /// The election picks among the same validators: here it cannot answer, and its fallback
@@ -1022,13 +1046,13 @@ mod tests {
         assert_eq!(next_players(&node, None, &[]), keys(&all));
         // From T12, the first of them in the registry's order.
         let cut = read_next_players(&node, None, true, &[]).players;
-        assert_eq!(cut, keys(&all[..MAX_ELECTED_COMMITTEE]));
+        assert_eq!(cut, keys(&all[..MAX_SEATS]));
     }
 
     #[test]
     fn an_election_above_the_maximum_falls_back() {
-        let all: Vec<u8> = (1..=MAX_ELECTED_COMMITTEE as u8 + 1).collect();
-        let most = &all[..MAX_ELECTED_COMMITTEE];
+        let all: Vec<u8> = (1..=MAX_SEATS as u8 + 1).collect();
+        let most = &all[..MAX_SEATS];
         for (elected, seated) in [(all.as_slice(), None), (most, Some(keys(most)))] {
             let code = answering(&[committee(elected)]);
             let node = election_among(all.iter().copied(), &[], Some(code));
