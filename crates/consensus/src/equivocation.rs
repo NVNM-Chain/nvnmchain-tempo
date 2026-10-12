@@ -140,7 +140,7 @@ fn is_disputed(signers: &Ballots) -> bool {
 /// The signed votes a node saw in its latest rounds, and the evidence they make on their own.
 /// All of it in memory: a restart drops it, so it is read off a node as it appears.
 #[derive(Clone)]
-pub struct Votes {
+pub(crate) struct Votes {
     namespace: Arc<VoteNamespace>,
     inner: Arc<Mutex<Inner>>,
 }
@@ -152,7 +152,7 @@ struct Inner {
 }
 
 impl Votes {
-    pub fn new(namespace: VoteNamespace) -> Self {
+    pub(crate) fn new(namespace: VoteNamespace) -> Self {
         Self {
             namespace: Arc::new(namespace),
             inner: Arc::new(Mutex::new(Inner {
@@ -198,7 +198,7 @@ impl Votes {
 
     /// The votes held for `round`, unchecked: whoever pairs them checks the signatures, and so
     /// does the registry.
-    pub fn in_round(&self, round: Round) -> Vec<(B256, Signed)> {
+    pub(crate) fn in_round(&self, round: Round) -> Vec<(B256, Signed)> {
         let inner = self.inner.lock();
         (inner.held.0.get(&round).into_iter().flatten())
             .filter_map(|(signer, held)| Some((*signer, &held.as_ref()?.1)))
@@ -208,12 +208,12 @@ impl Votes {
 
     /// Rounds whose votes name two proposals, so that another node may hold the other half of a
     /// pair.
-    pub fn disputed(&self) -> Vec<Round> {
+    pub(crate) fn disputed(&self) -> Vec<Round> {
         self.inner.lock().disputed.iter().copied().collect()
     }
 
     /// Evidence this node's own votes make, the latest.
-    pub fn evidence(&self) -> Vec<Evidence> {
+    pub(crate) fn evidence(&self) -> Vec<Evidence> {
         self.inner.lock().evidence.iter().copied().collect()
     }
 }
