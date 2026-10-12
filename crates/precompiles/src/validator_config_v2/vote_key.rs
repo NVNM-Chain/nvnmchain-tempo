@@ -60,9 +60,9 @@ impl ValidatorConfigV2 {
         self.storage.spec().is_t12() && self.storage.attributable_votes_time().is_some()
     }
 
-    /// Whether the validator key `public_key` has a vote key.
+    /// Whether the validator key `public_key` has a vote key, by its length: one slot.
     pub(super) fn has_vote_key(&self, public_key: B256) -> Result<bool> {
-        Ok(!self.vote_keys().at(&public_key).read()?.is_empty())
+        Ok(self.vote_keys().at(&public_key).len()? != 0)
     }
 
     /// The vote key registered for the validator key `public_key`, if any.
