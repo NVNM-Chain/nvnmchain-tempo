@@ -50,22 +50,22 @@ pub(crate) struct Scheme {
     namespace: Arc<VoteNamespace>,
     /// Each participant's vote key, at its place, if the registry holds one; shared with the
     /// votes kept under it.
-    keys: Arc<[Option<Arc<VoteKey>>]>,
-    /// Our vote key, if it is the one at our share's place.
-    signer: Option<Private>,
+    vote_keys: Arc<[Option<Arc<VoteKey>>]>,
+    /// Our vote key's private half, if its public one is at our share's place.
+    private: Option<Private>,
 }
 
 impl Scheme {
-    /// `keys` are the participants' vote keys in their order, `signer` ours. A participant
-    /// without one is mute, and with too few keyed to certify so is the epoch.
+    /// `vote_keys` are the participants' in their order, `private` ours. A participant without
+    /// one is mute, and with too few keyed to certify so is the epoch.
     pub(crate) fn new(
         threshold: Threshold,
-        keys: &[Option<VoteKey>],
-        signer: Private,
+        vote_keys: &[Option<VoteKey>],
+        private: Private,
         chain_id: u64,
         genesis: B256,
     ) -> Self {
-        let keyed = keys.iter().flatten().count();
+        let keyed = vote_keys.iter().flatten().count();
         let quorum = N3f1::quorum(threshold.participants().len()) as usize;
         if keyed < quorum {
             error!(
@@ -76,15 +76,15 @@ impl Scheme {
         let mut scheme = Self {
             threshold,
             namespace: Arc::new(VoteNamespace::new(chain_id, genesis)),
-            keys: keys.iter().map(|key| key.map(Arc::new)).collect(),
-            signer: None,
+            vote_keys: vote_keys.iter().map(|key| key.map(Arc::new)).collect(),
+            private: None,
         };
         if let Some(me) = certificate::Scheme::me(&scheme.threshold) {
             if scheme
-                .key(me)
-                .is_some_and(|key| **key == ops::compute_public::<MinSig>(&signer))
+                .vote_key(me)
+                .is_some_and(|key| **key == ops::compute_public::<MinSig>(&private))
             {
-                scheme.signer = Some(signer);
+                scheme.private = Some(private);
             } else {
                 error!("the registry does not hold our vote key for our share; verifying only");
             }
@@ -93,8 +93,8 @@ impl Scheme {
     }
 
     /// The vote key of `signer`, if the registry holds one.
-    fn key(&self, signer: Participant) -> Option<&Arc<VoteKey>> {
-        self.keys.get(usize::from(signer))?.as_ref()
+    fn vote_key(&self, signer: Participant) -> Option<&Arc<VoteKey>> {
+        self.vote_keys.get(usize::from(signer))?.as_ref()
     }
 
     /// A vote's threshold half as that scheme takes it, and its signer's vote key with the
@@ -110,7 +110,7 @@ impl Scheme {
         };
         Some((
             partial,
-            (**self.key(attestation.signer)?, signature.identity),
+            (**self.vote_key(attestation.signer)?, signature.individual),
         ))
     }
 }
@@ -119,13 +119,13 @@ impl Scheme {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Signature {
     threshold: vrf::Signature<MinSig>,
-    identity: VoteSignature,
+    individual: VoteSignature,
 }
 
 impl Write for Signature {
     fn write(&self, writer: &mut impl BufMut) {
         self.threshold.write(writer);
-        self.identity.write(writer);
+        self.individual.write(writer);
     }
 }
 
@@ -135,7 +135,7 @@ impl Read for Signature {
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, Error> {
         Ok(Self {
             threshold: vrf::Signature::read(reader)?,
-            identity: VoteSignature::read(reader)?,
+            individual: VoteSignature::read(reader)?,
         })
     }
 }
@@ -194,7 +194,7 @@ impl certificate::Scheme for Scheme {
 
     /// Our place, if both halves of a vote are ours to sign from it.
     fn me(&self) -> Option<Participant> {
-        self.signer.as_ref()?;
+        self.private.as_ref()?;
         certificate::Scheme::me(&self.threshold)
     }
 
@@ -205,12 +205,12 @@ impl certificate::Scheme for Scheme {
     fn sign<D: Digest>(&self, subject: Subject<'_, D>) -> Option<Attestation<Self>> {
         let ballot = ballot(subject)?;
         let namespace = self.namespace.of(&ballot);
-        let identity =
-            ops::sign_message::<MinSig>(self.signer.as_ref()?, namespace, &ballot.body());
+        let individual =
+            ops::sign_message::<MinSig>(self.private.as_ref()?, namespace, &ballot.body());
         let partial = self.threshold.sign(subject)?;
         let signature = Signature {
             threshold: partial.signature.get()?.clone(),
-            identity,
+            individual,
         };
         Some(Attestation {
             signer: partial.signer,
@@ -326,11 +326,11 @@ impl<R> Recorder<R> {
         if let Some(ballot) = ballot(subject)
             && let Some(signature) = attestation.signature.get()
             && let Some(signer) = threshold.participants().get(attestation.signer.into())
-            && let Some(key) = self.scheme.key(attestation.signer).cloned()
+            && let Some(key) = self.scheme.vote_key(attestation.signer).cloned()
         {
             let signed = Signed {
                 ballot,
-                signature: signature.identity,
+                signature: signature.individual,
             };
             self.votes.record(public_key_to_b256(signer), key, signed);
         }
@@ -545,7 +545,7 @@ pub(crate) mod tests {
         // The second signer's valid partials, under the third's valid signature.
         let borrowed = Signature {
             threshold: votes[1].signature.get().unwrap().threshold.clone(),
-            identity: votes[2].signature.get().unwrap().identity,
+            individual: votes[2].signature.get().unwrap().individual,
         };
         votes[1].signature = borrowed.into();
         assert!(!scheme.verify_attestation(&mut rng, subject, &votes[1], &Sequential));
@@ -591,7 +591,7 @@ pub(crate) mod tests {
             signer: partial.signer,
             signature: Signature {
                 threshold: partial.signature.get().unwrap().clone(),
-                identity: votes[1].signature.get().unwrap().identity,
+                individual: votes[1].signature.get().unwrap().individual,
             }
             .into(),
         };
