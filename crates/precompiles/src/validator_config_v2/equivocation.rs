@@ -276,15 +276,15 @@ impl ValidatorConfigV2 {
         }
 
         // The record of this key, live or left by a rotation, names the address its bond is
-        // under. A key cannot have signed before that record held a seat, nor past the grace
-        // after its deactivation.
+        // under. A key cannot have signed in an epoch yet to come, before that record held a
+        // seat, nor past the grace after its deactivation.
         let record = self.validator_by_public_key(key)?;
         let epoch_length = self
             .storage
             .with_block_env(|block_env| block_env.epoch_length.get());
-        let epochs_ago = (self.storage.block_number() / epoch_length)
-            .checked_sub(round.epoch)
-            .ok_or_else(invalid)?;
+        if round.epoch > self.storage.block_number() / epoch_length {
+            Err(invalid())?
+        }
         let retired = (record.deactivatedAtHeight != 0)
             .then(|| record.deactivatedAtHeight / epoch_length + RETIRED_KEY_GRACE);
         if round.epoch < record.addedAtHeight / epoch_length
@@ -297,7 +297,6 @@ impl ValidatorConfigV2 {
             validator: record.validatorAddress,
             epoch: round.epoch,
             viewNumber: round.view,
-            epochsAgo: epochs_ago,
         })
     }
 }
@@ -394,7 +393,6 @@ mod tests {
                 let found = vc.equivocator(call)?;
                 assert_eq!(found.validator, validator);
                 assert_eq!((found.epoch, found.viewNumber), (EPOCH, 3));
-                assert_eq!(found.epochsAgo, NOW - EPOCH);
             }
             Ok(())
         })
@@ -540,7 +538,7 @@ mod tests {
 
             let answer = vc.call(&call, Address::random())?;
             assert!(!answer.is_revert());
-            let (found, ..) = <(Address, u64, u64, u64)>::abi_decode_params(&answer.bytes)?;
+            let (found, ..) = <(Address, u64, u64)>::abi_decode_params(&answer.bytes)?;
             assert_eq!(found, validator);
 
             // Before T12 the registry is upstream's and does not know the selector.

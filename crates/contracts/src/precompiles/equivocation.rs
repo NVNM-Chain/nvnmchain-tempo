@@ -20,8 +20,7 @@ crate::sol! {
         /// The vote key registered for the validator key `publicKey`; empty if none.
         function voteKey(bytes32 publicKey) external view returns (bytes memory key);
 
-        /// The validator whose vote key signed both votes in `evidence`, their round, and how
-        /// many epochs ago it was.
+        /// The validator whose vote key signed both votes in `evidence`, and their round.
         ///
         /// Reverts with the registry's `InvalidSignature` if the votes do not conflict or the
         /// validator's vote key did not sign both on this chain, and with its `ValidatorNotFound`
@@ -29,6 +28,6 @@ crate::sol! {
         function equivocator(bytes calldata evidence)
             external
             view
-            returns (address validator, uint64 epoch, uint64 viewNumber, uint64 epochsAgo);
+            returns (address validator, uint64 epoch, uint64 viewNumber);
     }
 }
