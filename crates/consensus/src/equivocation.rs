@@ -168,6 +168,11 @@ impl Votes {
         }
     }
 
+    /// What this chain's vote keys sign under.
+    pub(crate) fn namespace(&self) -> Arc<VoteNamespace> {
+        self.namespace.clone()
+    }
+
     /// Keeps a vote the engine reported, not yet verified, of `signer` whose vote key is `key`.
     pub(crate) fn record(&self, signer: B256, key: Arc<VoteKey>, signed: Signed) {
         let round = signed.ballot.round();

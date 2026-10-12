@@ -66,7 +66,6 @@ use reth_ethereum::chainspec::EthChainSpec;
 use tempo_chainspec::TempoHardforks as _;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_primitives::TempoHeader;
-use tempo_validator_config::VoteKeypair;
 use tracing::{Level, Span, debug, error, error_span, info, instrument, warn, warn_span};
 
 use crate::{
@@ -415,9 +414,8 @@ where
                 Some(attributable::Scheme::new(
                     scheme.clone(),
                     keys,
-                    VoteKeypair::derive(&self.config.signer).private(),
-                    chain_spec.chain_id(),
-                    chain_spec.genesis_hash(),
+                    self.config.vote_key.clone(),
+                    self.config.votes.namespace(),
                 ))
             }
             _ => None,

@@ -324,7 +324,7 @@ where
             mailbox_size: self.mailbox_size,
             marshal: marshal_mailbox,
             scheme_provider,
-            signer: self.signer.clone(),
+            vote_key: tempo_validator_config::VoteKeypair::derive(&self.signer).private(),
             votes,
             time_to_collect_notarizations: self.time_to_collect_notarizations,
             time_to_retry_nullify_broadcast: self.time_to_retry_nullify_broadcast,

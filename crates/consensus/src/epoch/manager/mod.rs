@@ -4,7 +4,7 @@ pub(super) mod ingress;
 use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub(crate) use actor::Actor;
-use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
+use commonware_cryptography::{bls12381::primitives::group::Private, ed25519::PublicKey};
 pub(crate) use ingress::Mailbox;
 
 use commonware_consensus::types::{FixedEpocher, ViewDelta};
@@ -35,8 +35,8 @@ where
     pub(crate) mailbox_size: NonZeroUsize,
     pub(crate) marshal: crate::alias::marshal::Mailbox,
     pub(crate) scheme_provider: SchemeProvider,
-    /// Its vote key signs this node's votes once they are attributable.
-    pub(crate) signer: PrivateKey,
+    /// The private half of this node's vote key, which signs its votes once attributable.
+    pub(crate) vote_key: Private,
     /// The attributable votes this node sees.
     pub(crate) votes: Votes,
     pub(crate) time_to_collect_notarizations: Duration,

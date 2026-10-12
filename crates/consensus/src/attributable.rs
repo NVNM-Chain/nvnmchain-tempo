@@ -7,7 +7,6 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use alloy_primitives::B256;
 use bytes::{Buf, BufMut};
 use commonware_actor::Feedback;
 use commonware_codec::{Encode, Error, FixedSize, Read, ReadExt as _, Write};
@@ -62,8 +61,7 @@ impl Scheme {
         threshold: Threshold,
         vote_keys: &[Option<VoteKey>],
         private: Private,
-        chain_id: u64,
-        genesis: B256,
+        namespace: Arc<VoteNamespace>,
     ) -> Self {
         let keyed = vote_keys.iter().flatten().count();
         let quorum = N3f1::quorum(threshold.participants().len()) as usize;
@@ -75,7 +73,7 @@ impl Scheme {
         }
         let mut scheme = Self {
             threshold,
-            namespace: Arc::new(VoteNamespace::new(chain_id, genesis)),
+            namespace,
             vote_keys: vote_keys.iter().map(|key| key.map(Arc::new)).collect(),
             private: None,
         };
@@ -417,6 +415,7 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use alloy_primitives::B256;
     use commonware_consensus::{
         simplex::types::{ConflictingFinalize, ConflictingNotarize, NullifyFinalize, Proposal},
         types::{Epoch, Round, View},
@@ -483,7 +482,8 @@ pub(crate) mod tests {
             .into_iter()
             .map(|(key, threshold)| {
                 let signer = VoteKeypair::derive(&key).private();
-                let scheme = Scheme::new(threshold.clone(), &keys, signer, chain_id, genesis);
+                let namespace = Arc::new(VoteNamespace::new(chain_id, genesis));
+                let scheme = Scheme::new(threshold.clone(), &keys, signer, namespace);
                 (threshold, scheme)
             })
             .collect()
@@ -642,7 +642,8 @@ pub(crate) mod tests {
         // Another participant's key, and one that is nobody's.
         for key in [dealt[1].0.clone(), PrivateKey::random(&mut rng)] {
             let signer = VoteKeypair::derive(&key).private();
-            let mismatched = Scheme::new(dealt[0].1.clone(), &keys, signer, CHAIN_ID, GENESIS);
+            let namespace = Arc::new(VoteNamespace::new(CHAIN_ID, GENESIS));
+            let mismatched = Scheme::new(dealt[0].1.clone(), &keys, signer, namespace);
             assert_eq!(mismatched.me(), None);
             assert!(mismatched.sign(subject).is_none());
             assert!(mismatched.verify_attestation(&mut rng, subject, &vote, &Sequential));
