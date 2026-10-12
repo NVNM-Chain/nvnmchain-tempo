@@ -11,7 +11,7 @@ use alloy_evm::{
         receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
     },
 };
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, Keccak256, U256};
 use alloy_rlp::Decodable;
 use alloy_sol_types::SolCall;
 use commonware_codec::ReadExt;
@@ -30,20 +30,35 @@ use tempo_contracts::precompiles::{
     initial_zone_factory_state, t13_zone_factory_state,
 };
 use tempo_precompiles::{
-    storage::StorageActions,
+    storage::{StorageActions, StorageCtx},
     validator_config_v2::{ValidatorConfigV2, ValidatorConfigV2Error},
 };
 use tempo_primitives::{SubBlockMetadata, TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{ExecutionContext, TempoStateAccess, evm::TempoContext};
 use tracing::trace;
 
-/// The proposer's fee recipient in the V2 validator registry as of the parent block, zero included,
-/// or `None` if the registry is not initialized by then or does not know the key.
-pub fn registry_fee_recipient<DB: Database>(
+/// The slot of `routerOf[validator]` in nvnm-contracts' FeeRouterFactory, whose fifth state
+/// variable that mapping is: `keccak256(validator . 4)`.
+fn router_of_slot(validator: Address) -> U256 {
+    let mut hasher = Keccak256::new();
+    hasher.update(validator.into_word());
+    hasher.update(B256::with_last_byte(4));
+    U256::from_be_bytes(hasher.finalize().0)
+}
+
+/// Where a block proposed by `proposer` pays its fees, as of the parent block: from T12, where
+/// the genesis names a fee router factory, the router it holds for the proposer's address; else,
+/// or until it holds one, the proposer's fee recipient in the V2 validator registry, zero
+/// included. `None` if the registry is not initialized by then or does not know the key.
+pub fn proposer_fee_recipient<DB: Database>(
     ctx: &mut TempoContext<DB>,
     proposer: B256,
 ) -> tempo_precompiles::Result<Option<Address>> {
     let parent_number = ctx.block.number.saturating_to::<u64>().saturating_sub(1);
+    let factory = ctx
+        .block
+        .fee_router_factory
+        .filter(|_| ctx.cfg.spec.is_t12());
     // Read-only, so the lookup warms no slot and leaves the block's gas accounting alone.
     ctx.journaled_state.database.with_read_only_storage_ctx(
         ctx.cfg.spec,
@@ -53,11 +68,21 @@ pub fn registry_fee_recipient<DB: Database>(
             if !config.is_initialized()? || config.get_initialized_at_height()? > parent_number {
                 return Ok(None);
             }
-            match config.validator_by_public_key(proposer) {
-                Ok(v) => Ok(Some(v.feeRecipient)),
-                Err(err) if err == ValidatorConfigV2Error::validator_not_found().into() => Ok(None),
-                Err(err) => Err(err),
+            let validator = match config.validator_by_public_key(proposer) {
+                Ok(v) => v,
+                Err(err) if err == ValidatorConfigV2Error::validator_not_found().into() => {
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            };
+            if let Some(factory) = factory {
+                let router =
+                    StorageCtx.sload(factory, router_of_slot(validator.validatorAddress))?;
+                if !router.is_zero() {
+                    return Ok(Some(Address::from_word(router.into())));
+                }
             }
+            Ok(Some(validator.feeRecipient))
         },
     )
 }
@@ -540,14 +565,14 @@ where
         }
 
         // From T12, where the genesis names a fee router factory, a block's fees go to its
-        // proposer's registered recipient, zero included, not one it picks.
+        // proposer's router, or its registered recipient until there is one, not where it picks.
         if self.evm().cfg.spec.is_t12()
             && self.evm().block().fee_router_factory.is_some()
             && let Some(proposer) = self.evm().block().proposer_public_key.map(B256::from)
         {
             let ctx = self.evm_mut().ctx_mut();
             if let Some(expected) =
-                registry_fee_recipient(ctx, proposer).map_err(BlockExecutionError::other)?
+                proposer_fee_recipient(ctx, proposer).map_err(BlockExecutionError::other)?
                 && ctx.block.beneficiary != expected
             {
                 return Err(BlockValidationError::msg(format!(
@@ -786,10 +811,7 @@ mod tests {
         },
     };
     use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
-    use tempo_precompiles::{
-        storage::StorageCtx,
-        validator_config_v2::{IValidatorConfigV2, VALIDATOR_NS_ADD},
-    };
+    use tempo_precompiles::validator_config_v2::{IValidatorConfigV2, VALIDATOR_NS_ADD};
     use tempo_primitives::{
         SubBlockMetadata, TempoSignature, TempoTransaction, TempoTxType,
         subblock::{SubBlockVersion, TEMPO_SUBBLOCK_NONCE_KEY_PREFIX},
@@ -2119,12 +2141,26 @@ mod tests {
     const PROPOSER_SEED: u64 = 7;
 
     /// A T11 block-2 executor whose proposer was registered in the V2 registry at block 1, with
-    /// `recipient` as its fee recipient.
+    /// `recipient` as its fee recipient, and `router` as the factory's router for it if any.
     fn executor_with_registry<'a>(
         db: &'a mut State<EmptyDB>,
         chainspec: &'a Arc<TempoChainSpec>,
         recipient: Address,
+        router: Option<Address>,
     ) -> TempoBlockExecutor<'a, &'a mut State<EmptyDB>, NoOpInspector> {
+        let validator = Address::new([0x02; 20]);
+        if let Some(router) = router {
+            db.insert_account_with_storage(
+                FACTORY,
+                AccountInfo {
+                    nonce: 1,
+                    ..Default::default()
+                },
+                [(router_of_slot(validator), router.into_word().into())]
+                    .into_iter()
+                    .collect(),
+            );
+        }
         let mut executor = TestExecutorBuilder::default()
             .with_block_number(2)
             .with_spec(TempoHardfork::T11)
@@ -2137,7 +2173,7 @@ mod tests {
         let ctx = executor.evm_mut().ctx_mut();
         let config = tempo_validator_config::ValidatorConfig {
             chain_id: ctx.cfg.chain_id,
-            validator_address: Address::new([0x02; 20]),
+            validator_address: validator,
             public_key,
             ingress: "192.168.1.1:8000".parse().unwrap(),
             egress: "192.168.1.1".parse().unwrap(),
@@ -2182,11 +2218,17 @@ mod tests {
 
     #[test]
     fn test_t12_requires_the_proposers_fee_recipient() {
-        // Zero too: a recipient left unset before the fork binds the beneficiary to zero.
-        for recipient in [ROUTER, Address::ZERO] {
+        // The factory's router whatever the registry holds; until there is one, the registered
+        // recipient, zero too: one left unset before the fork binds the beneficiary to zero.
+        let validator = Address::new([0x02; 20]);
+        for (recipient, router, expected) in [
+            (validator, Some(ROUTER), ROUTER),
+            (ROUTER, None, ROUTER),
+            (Address::ZERO, None, Address::ZERO),
+        ] {
             let chainspec = test_chainspec();
             let mut db = State::builder().with_bundle_update().build();
-            let mut executor = executor_with_registry(&mut db, &chainspec, recipient);
+            let mut executor = executor_with_registry(&mut db, &chainspec, recipient, router);
             executor.inner.evm.cfg.spec = TempoHardfork::T12;
             let block = &mut executor.evm_mut().ctx_mut().block;
             block.fee_router_factory = Some(FACTORY);
@@ -2198,20 +2240,21 @@ mod tests {
                 "{err}"
             );
 
-            executor.evm_mut().ctx_mut().block.beneficiary = recipient;
+            executor.evm_mut().ctx_mut().block.beneficiary = expected;
             executor.apply_pre_execution_changes().unwrap();
         }
     }
 
     #[test]
     fn test_the_beneficiary_is_free_before_t12_or_without_a_factory() {
+        let validator = Address::new([0x02; 20]);
         for (spec, factory) in [
             (TempoHardfork::T11, Some(FACTORY)),
             (TempoHardfork::T12, None),
         ] {
             let chainspec = test_chainspec();
             let mut db = State::builder().with_bundle_update().build();
-            let mut executor = executor_with_registry(&mut db, &chainspec, ROUTER);
+            let mut executor = executor_with_registry(&mut db, &chainspec, validator, Some(ROUTER));
             executor.inner.evm.cfg.spec = spec;
             let block = &mut executor.evm_mut().ctx_mut().block;
             block.fee_router_factory = factory;
@@ -2221,24 +2264,36 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_fee_recipient_reads_the_registered_recipient() {
+    fn test_proposer_fee_recipient_reads_the_router_or_the_registered_recipient() {
+        let validator = Address::new([0x02; 20]);
         let chainspec = test_chainspec();
         let mut db = State::builder().with_bundle_update().build();
-        let mut executor = executor_with_registry(&mut db, &chainspec, ROUTER);
+        let mut executor = executor_with_registry(&mut db, &chainspec, validator, Some(ROUTER));
         let ctx = executor.evm_mut().ctx_mut();
         let registered = B256::from(tempo_primitives::ed25519::PublicKey::from_seed(
             PROPOSER_SEED,
         ));
         let unknown = B256::from(tempo_primitives::ed25519::PublicKey::from_seed(8));
+        // The router is read from T12 with a factory; elsewhere the registry's recipient.
         assert_eq!(
-            registry_fee_recipient(ctx, registered).unwrap(),
+            proposer_fee_recipient(ctx, registered).unwrap(),
+            Some(validator)
+        );
+        ctx.cfg.spec = TempoHardfork::T12;
+        assert_eq!(
+            proposer_fee_recipient(ctx, registered).unwrap(),
+            Some(validator)
+        );
+        ctx.block.fee_router_factory = Some(FACTORY);
+        assert_eq!(
+            proposer_fee_recipient(ctx, registered).unwrap(),
             Some(ROUTER)
         );
         // An unknown key leaves the builder's own recipient, so there is nothing to check.
-        assert_eq!(registry_fee_recipient(ctx, unknown).unwrap(), None);
+        assert_eq!(proposer_fee_recipient(ctx, unknown).unwrap(), None);
 
         // Initialized at block 1: block 1 itself must not read it.
         ctx.block.number = U256::from(1);
-        assert_eq!(registry_fee_recipient(ctx, registered).unwrap(), None);
+        assert_eq!(proposer_fee_recipient(ctx, registered).unwrap(), None);
     }
 }

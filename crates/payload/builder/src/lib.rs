@@ -73,7 +73,7 @@ use std::{
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_evm::{
     StorageActionReplayError, TempoEvmConfig, TempoNextBlockEnvAttributes, TempoTxResult,
-    evm::TempoEvm, registry_fee_recipient,
+    evm::TempoEvm, proposer_fee_recipient,
 };
 use tempo_payload_types::{TempoBuiltPayload, TempoPayloadAttributes, ValidationLatencyWorkload};
 use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxEnvelope};
@@ -1205,9 +1205,9 @@ enum BalMessage {
     BumpIndex,
 }
 
-/// Overrides the block's fee recipient (beneficiary) with the proposer's recipient in the V2
-/// validator config contract, if the contract is active; a zero one is skipped unless block
-/// execution binds the beneficiary.
+/// Overrides the block's fee recipient (beneficiary) with the proposer's router, or its
+/// recipient in the V2 validator config contract, if the contract is active; a zero one is
+/// skipped unless block execution binds the beneficiary.
 fn maybe_override_fee_recipient<DB: Database>(
     executor: &mut impl BlockExecutor<Evm = TempoEvm<DB>>,
     attributes: &TempoPayloadAttributes,
@@ -1223,7 +1223,7 @@ fn maybe_override_fee_recipient<DB: Database>(
     // From T12, where the genesis names a fee router factory, block execution checks the
     // beneficiary against this same lookup.
     let bound = ctx.cfg.spec.is_t12() && ctx.block.fee_router_factory.is_some();
-    match registry_fee_recipient(ctx, *public_key) {
+    match proposer_fee_recipient(ctx, *public_key) {
         Ok(Some(fee_recipient)) if bound || !fee_recipient.is_zero() => {
             debug!(%fee_recipient, "resolved fee recipient from contract");
             ctx.block.beneficiary = fee_recipient;

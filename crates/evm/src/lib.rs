@@ -14,7 +14,7 @@ use alloy_consensus::BlockHeader as _;
 pub use assemble::TempoBlockAssembler;
 pub use pool::{TempoPoolValidationEvm, TempoPoolValidationResult};
 mod block;
-pub use block::{TempoBlockExecutor, TempoReceiptBuilder, TempoTxResult, registry_fee_recipient};
+pub use block::{TempoBlockExecutor, TempoReceiptBuilder, TempoTxResult, proposer_fee_recipient};
 mod context;
 pub use context::{TempoBlockExecutionCtx, TempoNextBlockEnvAttributes};
 pub mod consensus;
