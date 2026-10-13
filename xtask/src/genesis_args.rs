@@ -699,7 +699,10 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("t12Time".to_string(), self.t12_time)?;
-        for (key, time) in [("t13Time", self.t13_time), ("t14Time", self.t14_time)] {
+        for (key, time) in [
+            ("t13Time", self.t13_time),
+            ("t14Time", self.t14_time),
+        ] {
             if let Some(time) = time {
                 chain_config
                     .extra_fields
