@@ -11,7 +11,7 @@ use alloy_evm::{
         receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
     },
 };
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::Decodable;
 use alloy_sol_types::SolCall;
 use commonware_codec::ReadExt;
@@ -22,6 +22,7 @@ use reth_revm::{
     context::result::{ExecutionResult, HaltReason, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
+use std::sync::LazyLock;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
     anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, T12_ANCHORING_OWNERS},
@@ -316,25 +317,25 @@ where
     /// `T12_ANCHORING_OWNERS` gives this chain. The rest of the storage stays, and a chain
     /// without the contract gets none.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
-        let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
-        let code_hash = code.hash_slow();
-        let chain_id = self.inner.spec.chain().id();
-        let owner = T12_ANCHORING_OWNERS
-            .iter()
-            .find(|(id, _)| *id == chain_id)
-            .map(|(_, owner)| *owner);
+        // Every block past T12 comes through here; only the first one gets past this check.
+        static CODE_HASH: LazyLock<B256> = LazyLock::new(|| keccak256(&ANCHORING_RUNTIME));
 
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        if info.is_empty_code_hash() || info.code_hash == code_hash {
+        if info.is_empty_code_hash() || info.code_hash == *CODE_HASH {
             return Ok(());
         }
+        let chain_id = self.inner.spec.chain().id();
+        let owner = T12_ANCHORING_OWNERS
+            .iter()
+            .find(|(id, _)| *id == chain_id)
+            .map(|(_, owner)| *owner);
         let mut account = Account::from(info);
-        account.info.code_hash = code_hash;
-        account.info.code = Some(code);
+        account.info.code_hash = *CODE_HASH;
+        account.info.code = Some(Bytecode::new_legacy(ANCHORING_RUNTIME));
         if let Some(owner) = owner {
             let slot = U256::from(ANCHORING_OWNER_SLOT);
             let original_value = db
