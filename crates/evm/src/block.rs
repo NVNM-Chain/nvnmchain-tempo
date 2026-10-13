@@ -23,11 +23,14 @@ use reth_revm::{
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
-use tempo_contracts::precompiles::{
-    ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, INITIAL_FACTORY_OWNER,
-    InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS,
-    STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
-    initial_zone_factory_state, t13_zone_factory_state,
+use tempo_contracts::{
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME},
+    precompiles::{
+        ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
+        INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
+        SIGNATURE_VERIFIER_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
+        VALIDATOR_CONFIG_V2_ADDRESS, initial_zone_factory_state, t13_zone_factory_state,
+    },
 };
 use tempo_primitives::{SubBlockMetadata, TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{ExecutionContext, evm::TempoContext};
@@ -309,6 +312,43 @@ where
         Ok(())
     }
 
+    /// Installs the anchoring runtime over an earlier build, and with it the owner the chain
+    /// config names. The rest of the storage stays, and a chain without the contract gets none.
+    fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
+        let code_hash = code.hash_slow();
+        let owner = self.inner.spec.info.anchoring_admin();
+
+        let db = self.inner.evm.db_mut();
+        let info = db
+            .basic(ANCHORING_ADDRESS)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default();
+        if info.is_empty_code_hash() || info.code_hash == code_hash {
+            return Ok(());
+        }
+        let mut account = Account::from(info);
+        account.info.code_hash = code_hash;
+        account.info.code = Some(code);
+        if let Some(owner) = owner {
+            let slot = U256::from(ANCHORING_OWNER_SLOT);
+            let original_value = db
+                .storage(ANCHORING_ADDRESS, slot)
+                .map_err(BlockExecutionError::other)?;
+            account.storage.insert(
+                slot,
+                EvmStorageSlot::new_changed(
+                    original_value,
+                    owner.into_word().into(),
+                    TransactionId::ZERO,
+                ),
+            );
+        }
+        account.mark_touch();
+        db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
+        Ok(())
+    }
+
     fn apply_current_committee_system_call(&mut self) -> Result<(), BlockExecutionError> {
         if !self.evm().cfg.spec.is_t8() {
             return Ok(());
@@ -535,6 +575,15 @@ where
         }
         if self.inner.spec.is_t10_active_at_timestamp(timestamp) {
             self.deploy_zone_factory_at_boundary()?;
+        }
+        // As with T13 below: a chain starting at T12 keeps the anchoring runtime of its genesis.
+        if self.inner.spec.is_t12_active_at_timestamp(timestamp)
+            && !self
+                .inner
+                .spec
+                .is_t12_active_at_timestamp(self.inner.spec.genesis().timestamp)
+        {
+            self.upgrade_anchoring_at_boundary()?;
         }
         // Chains starting at T13 supply their runtime code in genesis. Preserve those
         // allocations (including locally compiled contracts on test chains). Chains
@@ -1870,6 +1919,83 @@ mod tests {
                     .unwrap();
                 assert_eq!(installed.original_bytes(), expected);
             }
+        }
+    }
+
+    /// The first T12 block installs the anchoring runtime and the owner the config names. Later
+    /// blocks leave the owner to the contract, and a chain starting at T12 keeps its genesis.
+    #[test]
+    fn anchoring_upgrade_activates_at_t12() {
+        let owner_slot = U256::from(ANCHORING_OWNER_SLOT);
+        let earlier = Bytes::from_static(&[0x00]);
+        let admin = Address::with_last_byte(0xA0);
+        let owner = Address::with_last_byte(0xB0);
+        let old = Some((&earlier, owner));
+        let new = Some((&ANCHORING_RUNTIME, owner));
+        let named = Some((&ANCHORING_RUNTIME, admin));
+        for (genesis_timestamp, t12_time, timestamp, launched, admin, expected) in [
+            (0, u64::MAX, 10, old, Some(admin), old),
+            (0, 10, 9, old, Some(admin), old),
+            (0, 10, 10, old, Some(admin), named),
+            (0, 10, 11, old, None, new),
+            (0, 10, 11, new, Some(admin), new),
+            // The actual genesis timestamp, not just t12Time == 0.
+            (100, 50, 101, old, Some(admin), old),
+            (100, 100, 101, old, Some(admin), old),
+            (0, 10, 10, None, Some(admin), None),
+        ] {
+            let mut genesis = DEV.genesis().clone();
+            genesis.timestamp = genesis_timestamp;
+            let config = &mut genesis.config.extra_fields;
+            config.insert_value("t12Time".into(), t12_time).unwrap();
+            if let Some(admin) = admin {
+                config.insert_value("anchoringAdmin".into(), admin).unwrap();
+            }
+            let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
+            let mut db = State::builder().with_bundle_update().build();
+            if let Some((code, owner)) = launched {
+                let code = Bytecode::new_legacy(code.clone());
+                let info = AccountInfo {
+                    nonce: 1,
+                    code_hash: code.hash_slow(),
+                    code: Some(code),
+                    ..Default::default()
+                };
+                db.insert_account_with_storage(
+                    ANCHORING_ADDRESS,
+                    info,
+                    [(owner_slot, owner.into_word().into())]
+                        .into_iter()
+                        .collect(),
+                );
+            }
+            let mut executor = TestExecutorBuilder::default()
+                .with_spec(if timestamp >= t12_time {
+                    TempoHardfork::T12
+                } else {
+                    TempoHardfork::T11
+                })
+                .with_parent_beacon_block_root(B256::ZERO)
+                .build(&mut db, &chainspec);
+            executor.evm_mut().ctx_mut().block.timestamp = U256::from(timestamp);
+            executor.apply_pre_execution_changes().unwrap();
+            drop(executor);
+
+            let info = db
+                .load_cache_account(ANCHORING_ADDRESS)
+                .unwrap()
+                .account_info();
+            let code = info.as_ref().map(|info| {
+                assert_eq!(info.nonce, 1);
+                info.code.as_ref().unwrap().original_bytes()
+            });
+            let owner = revm::Database::storage(&mut db, ANCHORING_ADDRESS, owner_slot).unwrap();
+            assert_eq!(
+                code.as_ref()
+                    .map(|code| (code, Address::from_word(owner.into()))),
+                expected,
+                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}"
+            );
         }
     }
 

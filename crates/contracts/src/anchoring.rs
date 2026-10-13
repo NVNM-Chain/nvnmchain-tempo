@@ -8,5 +8,9 @@ use alloy_primitives::{Address, Bytes, address};
 pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000A00");
 
 /// `layout/anchoring.bin` decoded. `layout/anchoring.json` pins its slots, which the dump writer
-/// and the explorer read too, so a new build cannot move one.
+/// and the explorer read too, so a new build cannot move one. T12 installs it over an earlier
+/// build, so no release after that fork may change it.
 pub const ANCHORING_RUNTIME: Bytes = Bytes::from_static(include_bytes!("anchoring_runtime.bin"));
+
+/// `owner` in `layout/anchoring.json`, past every slot the dump writes.
+pub const ANCHORING_OWNER_SLOT: u64 = 11;
