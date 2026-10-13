@@ -15,12 +15,12 @@ pub const ANCHORING_RUNTIME: Bytes = Bytes::from_static(include_bytes!("anchorin
 /// `owner` in `layout/anchoring.json`, past every slot the dump writes.
 pub const ANCHORING_OWNER_SLOT: u64 = 11;
 
-/// The owner a chain's contract gets in the block where T12 installs the runtime, by chain id. A
-/// chain not named here gets none from the fork, and only genesis can name one.
-pub const T12_ANCHORING_OWNERS: &[(u64, Address)] = &[
-    // NVNM testnet: its validator admin.
-    (
-        787223,
-        address!("0xd5fCEca17cE41Ebd2e88Ce730291a341864150eb"),
-    ),
-];
+/// The owner a chain's contract gets in the block where T12 installs the runtime. A chain not
+/// named here gets none from the fork, and only genesis can name one.
+pub const fn t12_anchoring_owner(chain_id: u64) -> Option<Address> {
+    match chain_id {
+        // NVNM testnet: its validator admin.
+        787223 => Some(address!("0xd5fCEca17cE41Ebd2e88Ce730291a341864150eb")),
+        _ => None,
+    }
+}

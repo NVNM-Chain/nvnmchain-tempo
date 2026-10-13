@@ -25,7 +25,7 @@ use reth_revm::{
 use std::sync::LazyLock;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
-    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, T12_ANCHORING_OWNERS},
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, t12_anchoring_owner},
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -314,7 +314,7 @@ where
     }
 
     /// Installs the anchoring runtime over an earlier build, and with it the owner
-    /// `T12_ANCHORING_OWNERS` gives this chain. The rest of the storage stays, and a chain
+    /// `t12_anchoring_owner` gives this chain. The rest of the storage stays, and a chain
     /// without the contract gets none.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         // Every block past T12 comes through here; only the first one gets past this check.
@@ -328,15 +328,10 @@ where
         if info.is_empty_code_hash() || info.code_hash == *CODE_HASH {
             return Ok(());
         }
-        let chain_id = self.inner.spec.chain().id();
-        let owner = T12_ANCHORING_OWNERS
-            .iter()
-            .find(|(id, _)| *id == chain_id)
-            .map(|(_, owner)| *owner);
         let mut account = Account::from(info);
         account.info.code_hash = *CODE_HASH;
         account.info.code = Some(Bytecode::new_legacy(ANCHORING_RUNTIME));
-        if let Some(owner) = owner {
+        if let Some(owner) = t12_anchoring_owner(self.inner.spec.chain().id()) {
             let slot = U256::from(ANCHORING_OWNER_SLOT);
             let original_value = db
                 .storage(ANCHORING_ADDRESS, slot)
@@ -776,7 +771,10 @@ mod tests {
         iter::repeat_with,
         sync::{Arc, Mutex},
     };
-    use tempo_chainspec::{TempoChainSpec, TempoHardfork, spec::DEV};
+    use tempo_chainspec::{
+        TempoChainSpec, TempoHardfork,
+        spec::{DEV, NVNM_TESTNET},
+    };
     use tempo_contracts::{
         precompiles::{
             CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, PATH_USD_ADDRESS, ZONE_FACTORY_ADDRESS,
@@ -1928,15 +1926,16 @@ mod tests {
         }
     }
 
-    /// The first T12 block installs the anchoring runtime and, on a chain the table names, its
-    /// owner. Later blocks leave the owner to the contract, and a chain starting at T12 keeps its
-    /// genesis.
+    /// The first T12 block installs the anchoring runtime and, on the testnet, its owner. Later
+    /// blocks leave the owner to the contract, and a chain starting at T12 keeps its genesis.
     #[test]
     fn anchoring_upgrade_activates_at_t12() {
         let owner_slot = U256::from(ANCHORING_OWNER_SLOT);
         let earlier = Bytes::from_static(&[0x00]);
-        let (named_id, named_owner) = T12_ANCHORING_OWNERS[0];
-        let unnamed_id = named_id + 1;
+        let named_id = NVNM_TESTNET.chain().id();
+        let named_owner = t12_anchoring_owner(named_id).unwrap();
+        let unnamed_id = DEV.chain().id();
+        assert_eq!(t12_anchoring_owner(unnamed_id), None);
         let owner = Address::with_last_byte(0xB0);
         let old = Some((&earlier, owner));
         let new = Some((&ANCHORING_RUNTIME, owner));
