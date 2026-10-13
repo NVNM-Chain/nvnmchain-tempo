@@ -38,9 +38,6 @@ pub struct TempoGenesisInfo {
     /// Optional override for the general (non-payment) gas limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     general_gas_limit: Option<u64>,
-    /// Owner the anchoring contract gets in the block where T12 installs its runtime.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    anchoring_admin: Option<Address>,
     /// Activation timestamp for T0 hardfork.
     #[serde(skip_serializing_if = "Option::is_none")]
     t0_time: Option<u64>,
@@ -113,10 +110,6 @@ impl TempoGenesisInfo {
 
     pub fn general_gas_limit(&self) -> Option<u64> {
         self.general_gas_limit
-    }
-
-    pub fn anchoring_admin(&self) -> Option<Address> {
-        self.anchoring_admin
     }
 
     /// Returns the activation timestamp for a given hardfork, or `None` if not scheduled.

@@ -24,7 +24,7 @@ use reth_revm::{
 };
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
-    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME},
+    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, T12_ANCHORING_OWNERS},
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -312,12 +312,17 @@ where
         Ok(())
     }
 
-    /// Installs the anchoring runtime over an earlier build, and with it the owner the chain
-    /// config names. The rest of the storage stays, and a chain without the contract gets none.
+    /// Installs the anchoring runtime over an earlier build, and with it the owner
+    /// `T12_ANCHORING_OWNERS` gives this chain. The rest of the storage stays, and a chain
+    /// without the contract gets none.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let code = Bytecode::new_legacy(ANCHORING_RUNTIME);
         let code_hash = code.hash_slow();
-        let owner = self.inner.spec.info.anchoring_admin();
+        let chain_id = self.inner.spec.chain().id();
+        let owner = T12_ANCHORING_OWNERS
+            .iter()
+            .find(|(id, _)| *id == chain_id)
+            .map(|(_, owner)| *owner);
 
         let db = self.inner.evm.db_mut();
         let info = db
@@ -1922,35 +1927,38 @@ mod tests {
         }
     }
 
-    /// The first T12 block installs the anchoring runtime and the owner the config names. Later
-    /// blocks leave the owner to the contract, and a chain starting at T12 keeps its genesis.
+    /// The first T12 block installs the anchoring runtime and, on a chain the table names, its
+    /// owner. Later blocks leave the owner to the contract, and a chain starting at T12 keeps its
+    /// genesis.
     #[test]
     fn anchoring_upgrade_activates_at_t12() {
         let owner_slot = U256::from(ANCHORING_OWNER_SLOT);
         let earlier = Bytes::from_static(&[0x00]);
-        let admin = Address::with_last_byte(0xA0);
+        let (named_id, named_owner) = T12_ANCHORING_OWNERS[0];
+        let unnamed_id = named_id + 1;
         let owner = Address::with_last_byte(0xB0);
         let old = Some((&earlier, owner));
         let new = Some((&ANCHORING_RUNTIME, owner));
-        let named = Some((&ANCHORING_RUNTIME, admin));
-        for (genesis_timestamp, t12_time, timestamp, launched, admin, expected) in [
-            (0, u64::MAX, 10, old, Some(admin), old),
-            (0, 10, 9, old, Some(admin), old),
-            (0, 10, 10, old, Some(admin), named),
-            (0, 10, 11, old, None, new),
-            (0, 10, 11, new, Some(admin), new),
+        let named = Some((&ANCHORING_RUNTIME, named_owner));
+        for (genesis_timestamp, t12_time, timestamp, launched, chain_id, expected) in [
+            (0, u64::MAX, 10, old, named_id, old),
+            (0, 10, 9, old, named_id, old),
+            (0, 10, 10, old, named_id, named),
+            (0, 10, 10, old, unnamed_id, new),
+            (0, 10, 11, new, named_id, new),
             // The actual genesis timestamp, not just t12Time == 0.
-            (100, 50, 101, old, Some(admin), old),
-            (100, 100, 101, old, Some(admin), old),
-            (0, 10, 10, None, Some(admin), None),
+            (100, 50, 101, old, named_id, old),
+            (100, 100, 101, old, named_id, old),
+            (0, 10, 10, None, named_id, None),
         ] {
             let mut genesis = DEV.genesis().clone();
             genesis.timestamp = genesis_timestamp;
-            let config = &mut genesis.config.extra_fields;
-            config.insert_value("t12Time".into(), t12_time).unwrap();
-            if let Some(admin) = admin {
-                config.insert_value("anchoringAdmin".into(), admin).unwrap();
-            }
+            genesis.config.chain_id = chain_id;
+            genesis
+                .config
+                .extra_fields
+                .insert_value("t12Time".into(), t12_time)
+                .unwrap();
             let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
             let mut db = State::builder().with_bundle_update().build();
             if let Some((code, owner)) = launched {
@@ -1994,7 +2002,7 @@ mod tests {
                 code.as_ref()
                     .map(|code| (code, Address::from_word(owner.into()))),
                 expected,
-                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}"
+                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}, chain {chain_id}"
             );
         }
     }
