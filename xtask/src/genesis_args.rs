@@ -235,10 +235,10 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     anchoring: bool,
 
-    /// Owner of the anchoring contract.
-    /// If not set, it has none, and only a fork can name one.
+    /// Owner of the anchoring contract. If not set, or zero, the validator admin on a chain that
+    /// starts at T12, and none until the fork on one that schedules it later.
     #[arg(long, requires = "anchoring")]
-    anchoring_admin: Option<Address>,
+    anchoring_owner: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -595,7 +595,8 @@ impl GenesisArgs {
         insert_anchoring_contract_at_genesis(
             self.anchoring,
             self.t12_time,
-            self.anchoring_admin,
+            self.anchoring_owner,
+            validator_admin,
             &mut genesis_alloc,
         );
 
@@ -728,31 +729,34 @@ impl GenesisArgs {
     }
 }
 
-/// Places the anchoring contract, the T12 build on a chain starting at T12 and the launch build
-/// else, and its owner where one is named. Every other slot is the dump's.
+/// Places the anchoring contract: the T12 build on a chain starting at T12, else the launch build.
 fn insert_anchoring_contract_at_genesis(
     anchoring: bool,
     t12_time: u64,
-    admin: Option<Address>,
+    owner: Option<Address>,
+    validator_admin: Address,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) {
     if !anchoring {
         return;
     }
     println!("Initializing the anchoring contract");
-    let code = if t12_time == 0 {
-        T12_ANCHORING_RUNTIME
+    let owner = owner.filter(|owner| !owner.is_zero());
+    let (code, owner) = if t12_time == 0 {
+        (
+            T12_ANCHORING_RUNTIME,
+            Some(owner.unwrap_or(validator_admin)),
+        )
     } else {
-        ANCHORING_RUNTIME
+        (ANCHORING_RUNTIME, owner)
     };
-    let storage =
-        admin.map(|admin| BTreeMap::from([(B256::from(ANCHORING_OWNER_SLOT), admin.into_word())]));
+    let slot = B256::from(ANCHORING_OWNER_SLOT);
     genesis_alloc.insert(
         ANCHORING_ADDRESS,
         GenesisAccount {
             code: Some(code),
             nonce: Some(1),
-            storage,
+            storage: owner.map(|owner| BTreeMap::from([(slot, owner.into_word())])),
             ..Default::default()
         },
     );
@@ -1399,32 +1403,54 @@ mod anchoring_tests {
     use alloy::sol_types::SolCall as _;
     use tempo_contracts::anchoring::IAnchoring;
 
+    const OWNER: Address = address!("0x00000000000000000000000000000000000000A0");
+    const VALIDATOR_ADMIN: Address = address!("0x00000000000000000000000000000000000000B0");
+
     fn alloc(
         anchoring: bool,
         t12_time: u64,
-        admin: Option<Address>,
+        owner: Option<Address>,
     ) -> BTreeMap<Address, GenesisAccount> {
         let mut alloc = BTreeMap::new();
-        insert_anchoring_contract_at_genesis(anchoring, t12_time, admin, &mut alloc);
+        insert_anchoring_contract_at_genesis(
+            anchoring,
+            t12_time,
+            owner,
+            VALIDATOR_ADMIN,
+            &mut alloc,
+        );
         alloc
     }
 
-    /// The launch build and the nonce a deployment would have left; every slot is the dump's.
     #[test]
     fn a_chain_scheduling_t12_later_starts_on_the_launch_build() {
-        let alloc = alloc(true, 1, None);
-        let anchoring = &alloc[&ANCHORING_ADDRESS];
-        assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
-        assert_eq!(anchoring.nonce, Some(1));
-        assert!(anchoring.storage.is_none());
-        assert_eq!(alloc.len(), 1, "nothing else belongs here");
+        let slot = B256::from(ANCHORING_OWNER_SLOT);
+        for (owner, storage) in [
+            (None, None),
+            (Some(Address::ZERO), None),
+            (
+                Some(OWNER),
+                Some(BTreeMap::from([(slot, OWNER.into_word())])),
+            ),
+        ] {
+            let alloc = alloc(true, 1, owner);
+            let anchoring = &alloc[&ANCHORING_ADDRESS];
+            assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
+            assert_eq!(anchoring.nonce, Some(1));
+            assert_eq!(anchoring.storage, storage);
+            assert_eq!(alloc.len(), 1, "nothing else belongs here");
+        }
     }
 
     /// Asked of the embedded runtime itself, so a build that moves the slot fails here.
     #[test]
-    fn a_named_owner_is_the_one_the_contract_answers_with() {
-        let admin = address!("0x00000000000000000000000000000000000000A0");
-        let alloc = alloc(true, 0, Some(admin));
+    fn a_chain_starting_at_t12_has_its_owner_from_block_0() {
+        let slot = B256::from(ANCHORING_OWNER_SLOT);
+        let unnamed = alloc(true, 0, None);
+        let storage = unnamed[&ANCHORING_ADDRESS].storage.as_ref().unwrap();
+        assert_eq!(storage[&slot], VALIDATOR_ADMIN.into_word());
+
+        let alloc = alloc(true, 0, Some(OWNER));
         let anchoring = &alloc[&ANCHORING_ADDRESS];
         assert_eq!(anchoring.code, Some(T12_ANCHORING_RUNTIME));
 
@@ -1446,12 +1472,12 @@ mod anchoring_tests {
             .transact_system_call(Address::ZERO, ANCHORING_ADDRESS, owner_call)
             .unwrap()
             .result;
-        assert_eq!(result.output().unwrap()[12..], admin[..]);
+        assert_eq!(result.output().unwrap()[12..], OWNER[..]);
     }
 
     /// Upstream's own networks generate the same way and must not pick it up.
     #[test]
     fn without_the_flag_the_genesis_carries_none() {
-        assert!(alloc(false, 0, None).is_empty());
+        assert!(alloc(false, 0, Some(OWNER)).is_empty());
     }
 }
