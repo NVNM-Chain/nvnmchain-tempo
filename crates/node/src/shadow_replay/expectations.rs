@@ -283,44 +283,62 @@ const T13_ZONE_RUNTIME_UPGRADE: Expectation = Expectation {
 };
 
 /// Accepts the T12 anchoring install: the proxy over the launch build, with an owner and the
-/// implementation in empty slots, and the zone factory leaving `INITIAL_FACTORY_OWNER` with its
-/// `nextZoneId` kept.
+/// implementation in empty slots.
 const T12_ANCHORING_UPGRADE: Expectation = Expectation {
     id: "t12.anchoring-upgrade",
     check: |ctx, field| {
-        if ctx.boundary != Boundary::PreBlock {
+        if ctx.boundary != Boundary::PreBlock || field.address != Some(ANCHORING_ADDRESS) {
             return None;
         }
         let real = ctx.real.pre_block.as_ref()?;
         let shadow = ctx.shadow.pre_block.as_ref()?;
-        let anchoring = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
-        if AccountDelta(real.transitions.get(&ANCHORING_ADDRESS))
-            .info(|info| info.code_hash)
-            .is_some()
-            || anchoring.info(|info| info.code_hash)
+        let real = AccountDelta(real.transitions.get(&ANCHORING_ADDRESS));
+        let shadow = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
+        if real.info(|info| info.code_hash).is_some()
+            || shadow.info(|info| info.code_hash)
                 != Some((T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH))
         {
             return None;
         }
         let implementation = U256::from_be_bytes(T12_ANCHORING_IMPLEMENTATION.into_word().0);
-        match (field.address?, field.name, field.slot) {
-            (ANCHORING_ADDRESS, "code", None) => Some(()),
-            (ANCHORING_ADDRESS, "storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
-                anchoring.storage(slot)?.0.is_zero().then_some(())
+        match (field.name, field.slot) {
+            ("code", None) => Some(()),
+            ("storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
+                shadow.storage(slot)?.0.is_zero().then_some(())
             }
-            (ANCHORING_ADDRESS, "storage", Some(slot)) if slot == ERC1967_IMPLEMENTATION_SLOT => {
-                (anchoring.storage(slot)? == (U256::ZERO, implementation)).then_some(())
-            }
-            (ZONE_FACTORY_ADDRESS, "storage", Some(slot)) if slot.is_zero() => {
-                let factory = AccountDelta(shadow.transitions.get(&ZONE_FACTORY_ADDRESS));
-                let (before, after) = factory.storage(slot)?;
-                let (owner_before, next_zone_id) = zone_factory_config_fields(before);
-                (owner_before == INITIAL_FACTORY_OWNER
-                    && zone_factory_config_fields(after).1 == next_zone_id)
-                    .then_some(())
+            ("storage", Some(slot)) if slot == ERC1967_IMPLEMENTATION_SLOT => {
+                (shadow.storage(slot)? == (U256::ZERO, implementation)).then_some(())
             }
             _ => None,
         }
+    },
+};
+
+/// Accepts the zone factory leaving `INITIAL_FACTORY_OWNER` at T12 with its `nextZoneId` kept.
+const T12_ZONE_FACTORY_HANDOVER: Expectation = Expectation {
+    id: "t12.zone-factory-handover",
+    check: |ctx, field| {
+        if ctx.boundary != Boundary::PreBlock
+            || field.address != Some(ZONE_FACTORY_ADDRESS)
+            || field.name != "storage"
+            || field.slot != Some(U256::ZERO)
+        {
+            return None;
+        }
+        let real = ctx.real.pre_block.as_ref()?;
+        let shadow = ctx.shadow.pre_block.as_ref()?;
+        if AccountDelta(real.transitions.get(&ZONE_FACTORY_ADDRESS))
+            .storage(U256::ZERO)
+            .is_some()
+        {
+            return None;
+        }
+        let factory = AccountDelta(shadow.transitions.get(&ZONE_FACTORY_ADDRESS));
+        let (before, after) = factory.storage(U256::ZERO)?;
+        let (owner_before, next_zone_id) = zone_factory_config_fields(before);
+        (owner_before == INITIAL_FACTORY_OWNER
+            && zone_factory_config_fields(after).1 == next_zone_id)
+            .then_some(())
     },
 };
 
@@ -351,6 +369,7 @@ const REGISTRY: &[(TempoHardfork, &[Expectation])] = &[
             T12_TIP20_CHANNEL,
             T12_STABLECOIN_DEX,
             T12_ANCHORING_UPGRADE,
+            T12_ZONE_FACTORY_HANDOVER,
             T12_ANCHORING_CALLS,
         ],
     ),
@@ -545,7 +564,7 @@ mod tests {
                 slot: Some(U256::ZERO),
                 fee_associated: false,
             };
-            (T12_ANCHORING_UPGRADE.check)(&ctx, &field).is_some()
+            (T12_ZONE_FACTORY_HANDOVER.check)(&ctx, &field).is_some()
         };
         let moved =
             |before, after| accepts(&transition(T12_ANCHORING_PROXY_RUNTIME_HASH, before, after));
@@ -555,13 +574,13 @@ mod tests {
         assert!(moved(config(upstream, 3), config(registry, 3)));
         assert!(!moved(config(upstream, 3), config(registry, 1)));
         assert!(!moved(config(other, 1), config(registry, 1)));
-        // Without the anchoring install beside it, the factory's owner has no reason to move.
+        // The hand-over does not wait for the anchoring install.
         let alone = transition(
             T11_ANCHORING_RUNTIME_HASH,
             config(upstream, 1),
             config(registry, 1),
         );
-        assert!(!accepts(&alone));
+        assert!(accepts(&alone));
     }
 
     #[test]
@@ -624,6 +643,7 @@ mod tests {
                 T12_TIP20_CHANNEL.id,
                 T12_STABLECOIN_DEX.id,
                 T12_ANCHORING_UPGRADE.id,
+                T12_ZONE_FACTORY_HANDOVER.id,
                 T12_ANCHORING_CALLS.id,
             ]
         );
