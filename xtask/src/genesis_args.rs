@@ -240,6 +240,11 @@ pub(crate) struct GenesisArgs {
     /// validator admin. A chain that schedules T12 later gets the registry's owner at the fork.
     #[arg(long, requires = "anchoring")]
     anchoring_owner: Option<Address>,
+
+    /// Owner of the zone factory. If not set, or zero, the validator admin on a chain that starts
+    /// at T12 with the anchoring contract, and upstream's `INITIAL_FACTORY_OWNER` otherwise.
+    #[arg(long)]
+    zone_owner: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -592,11 +597,11 @@ impl GenesisArgs {
             },
         );
 
-        // Where the T12 fork leaves it on a chain that crosses the fork.
-        let zone_owner = if self.anchoring && self.t12_time == 0 {
-            validator_admin
-        } else {
-            INITIAL_FACTORY_OWNER
+        // Unnamed, where the T12 fork leaves it on a chain that crosses the fork.
+        let zone_owner = match self.zone_owner.filter(|owner| !owner.is_zero()) {
+            Some(owner) => owner,
+            None if self.anchoring && self.t12_time == 0 => validator_admin,
+            None => INITIAL_FACTORY_OWNER,
         };
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, zone_owner, &mut genesis_alloc);
         insert_anchoring_contract_at_genesis(
