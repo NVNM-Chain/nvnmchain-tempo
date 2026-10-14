@@ -231,8 +231,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     t14_time: Option<u64>,
 
-    /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
-    /// networks want.
+    /// Places the anchoring contract and, on a chain that starts at T12, gives the zone factory to
+    /// the validator admin. Left out, the genesis carries none, as upstream's own networks want.
     #[arg(long)]
     anchoring: bool,
 
@@ -592,7 +592,13 @@ impl GenesisArgs {
             },
         );
 
-        insert_zone_state_at_genesis(self.t10_time, self.t13_time, &mut genesis_alloc);
+        // Where the T12 fork leaves it on a chain that crosses the fork.
+        let zone_owner = if self.anchoring && self.t12_time == 0 {
+            validator_admin
+        } else {
+            INITIAL_FACTORY_OWNER
+        };
+        insert_zone_state_at_genesis(self.t10_time, self.t13_time, zone_owner, &mut genesis_alloc);
         insert_anchoring_contract_at_genesis(
             self.anchoring,
             self.t12_time,
@@ -774,14 +780,15 @@ fn insert_anchoring_contract_at_genesis(
 fn insert_zone_state_at_genesis(
     t10_time: u64,
     t13_time: Option<u64>,
+    owner: Address,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) {
     if t10_time == 0 {
         println!("Initializing ZoneFactory and shared runtimes");
         let accounts = if t13_time == Some(0) {
-            t13_zone_factory_state(INITIAL_FACTORY_OWNER)
+            t13_zone_factory_state(owner)
         } else {
-            initial_zone_factory_state(INITIAL_FACTORY_OWNER)
+            initial_zone_factory_state(owner)
         };
         for account in accounts {
             genesis_alloc.insert(
@@ -1348,7 +1355,7 @@ mod tests {
     #[test]
     fn t10_genesis_installs_factory_and_canonical_shared_runtimes() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(0, Some(1), &mut alloc);
+        insert_zone_state_at_genesis(0, Some(1), INITIAL_FACTORY_OWNER, &mut alloc);
         let account = alloc.remove(&ZONE_FACTORY_ADDRESS).unwrap();
         let expected_config =
             U256::from(1) | (U256::from_be_slice(INITIAL_FACTORY_OWNER.as_slice()) << u32::BITS);
@@ -1370,7 +1377,7 @@ mod tests {
     #[test]
     fn future_t10_does_not_install_zone_factory_at_genesis() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(1, Some(1), &mut alloc);
+        insert_zone_state_at_genesis(1, Some(1), INITIAL_FACTORY_OWNER, &mut alloc);
 
         assert!(!alloc.contains_key(&ZONE_FACTORY_ADDRESS));
     }
@@ -1380,7 +1387,7 @@ mod tests {
     #[test]
     fn unscheduled_t13_genesis_installs_canonical_shared_runtimes() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(0, None, &mut alloc);
+        insert_zone_state_at_genesis(0, None, INITIAL_FACTORY_OWNER, &mut alloc);
 
         for (destination, expected) in [
             (ZONE_PORTAL_IMPL_ADDRESS, ZONE_PORTAL_RUNTIME),
@@ -1394,7 +1401,7 @@ mod tests {
     #[test]
     fn t13_genesis_installs_t13_shared_runtimes() {
         let mut alloc = BTreeMap::new();
-        insert_zone_state_at_genesis(0, Some(0), &mut alloc);
+        insert_zone_state_at_genesis(0, Some(0), INITIAL_FACTORY_OWNER, &mut alloc);
 
         for (destination, expected) in [
             (ZONE_PORTAL_IMPL_ADDRESS, T13_ZONE_PORTAL_RUNTIME),

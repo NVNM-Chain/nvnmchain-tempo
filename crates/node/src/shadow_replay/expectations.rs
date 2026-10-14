@@ -283,31 +283,41 @@ const T13_ZONE_RUNTIME_UPGRADE: Expectation = Expectation {
 };
 
 /// Accepts the T12 anchoring install: the proxy over the launch build, with an owner and the
-/// implementation in empty slots.
+/// implementation in empty slots, and the zone factory leaving `INITIAL_FACTORY_OWNER` with its
+/// `nextZoneId` kept.
 const T12_ANCHORING_UPGRADE: Expectation = Expectation {
     id: "t12.anchoring-upgrade",
     check: |ctx, field| {
-        if ctx.boundary != Boundary::PreBlock || field.address != Some(ANCHORING_ADDRESS) {
+        if ctx.boundary != Boundary::PreBlock {
             return None;
         }
         let real = ctx.real.pre_block.as_ref()?;
         let shadow = ctx.shadow.pre_block.as_ref()?;
-        let real = AccountDelta(real.transitions.get(&ANCHORING_ADDRESS));
-        let shadow = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
-        if real.info(|info| info.code_hash).is_some()
-            || shadow.info(|info| info.code_hash)
+        let anchoring = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
+        if AccountDelta(real.transitions.get(&ANCHORING_ADDRESS))
+            .info(|info| info.code_hash)
+            .is_some()
+            || anchoring.info(|info| info.code_hash)
                 != Some((T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH))
         {
             return None;
         }
         let implementation = U256::from_be_bytes(T12_ANCHORING_IMPLEMENTATION.into_word().0);
-        match (field.name, field.slot) {
-            ("code", None) => Some(()),
-            ("storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
-                shadow.storage(slot)?.0.is_zero().then_some(())
+        match (field.address?, field.name, field.slot) {
+            (ANCHORING_ADDRESS, "code", None) => Some(()),
+            (ANCHORING_ADDRESS, "storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
+                anchoring.storage(slot)?.0.is_zero().then_some(())
             }
-            ("storage", Some(slot)) if slot == ERC1967_IMPLEMENTATION_SLOT => {
-                (shadow.storage(slot)? == (U256::ZERO, implementation)).then_some(())
+            (ANCHORING_ADDRESS, "storage", Some(slot)) if slot == ERC1967_IMPLEMENTATION_SLOT => {
+                (anchoring.storage(slot)? == (U256::ZERO, implementation)).then_some(())
+            }
+            (ZONE_FACTORY_ADDRESS, "storage", Some(slot)) if slot.is_zero() => {
+                let factory = AccountDelta(shadow.transitions.get(&ZONE_FACTORY_ADDRESS));
+                let (before, after) = factory.storage(slot)?;
+                let (owner_before, next_zone_id) = zone_factory_config_fields(before);
+                (owner_before == INITIAL_FACTORY_OWNER
+                    && zone_factory_config_fields(after).1 == next_zone_id)
+                    .then_some(())
             }
             _ => None,
         }
@@ -489,6 +499,69 @@ mod tests {
             assert!(!accepts(&other, "code", None));
             assert!(!accepts(&other, "storage", Some(owner_slot)));
         }
+    }
+
+    #[test]
+    fn accepts_the_zone_factory_leaving_upstreams_owner() {
+        let config = zone_factory_config;
+        let registry = Address::with_last_byte(0xA0);
+        let transition = |anchoring_after, before, after| {
+            let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
+            let mut state = reth_revm::db::TransitionState::default();
+            state.transitions.insert(
+                ANCHORING_ADDRESS,
+                TransitionAccount {
+                    previous_info: info(T11_ANCHORING_RUNTIME_HASH),
+                    info: info(anchoring_after),
+                    ..Default::default()
+                },
+            );
+            state.transitions.insert(
+                ZONE_FACTORY_ADDRESS,
+                TransitionAccount {
+                    storage: [(U256::ZERO, StorageSlot::new_changed(before, after))]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+            Evidence {
+                pre_block: Some(state),
+                ..Default::default()
+            }
+        };
+        let unchanged = evidence(&[]);
+        let accepts = |shadow: &Evidence| {
+            let ctx = Context {
+                boundary: Boundary::PreBlock,
+                real: &unchanged,
+                shadow,
+                base_fee: None,
+                tx: None,
+            };
+            let field = Field {
+                name: "storage",
+                address: Some(ZONE_FACTORY_ADDRESS),
+                slot: Some(U256::ZERO),
+                fee_associated: false,
+            };
+            (T12_ANCHORING_UPGRADE.check)(&ctx, &field).is_some()
+        };
+        let moved =
+            |before, after| accepts(&transition(T12_ANCHORING_PROXY_RUNTIME_HASH, before, after));
+        let (upstream, other) = (INITIAL_FACTORY_OWNER, Address::with_last_byte(0xB0));
+
+        assert!(moved(config(upstream, 1), config(registry, 1)));
+        assert!(moved(config(upstream, 3), config(registry, 3)));
+        assert!(!moved(config(upstream, 3), config(registry, 1)));
+        assert!(!moved(config(other, 1), config(registry, 1)));
+        // Without the anchoring install beside it, the factory's owner has no reason to move.
+        let alone = transition(
+            T11_ANCHORING_RUNTIME_HASH,
+            config(upstream, 1),
+            config(registry, 1),
+        );
+        assert!(!accepts(&alone));
     }
 
     #[test]
