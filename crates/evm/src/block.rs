@@ -315,8 +315,9 @@ where
         Ok(())
     }
 
-    /// Installs the T12 runtime over the launch build, storage kept, and fills an empty owner slot
-    /// from the validator registry; a registry without an owner leaves it empty for good.
+    /// Installs the T12 runtime over the launch build, storage kept, and gives it the validator
+    /// registry's owner, or none if the registry has none. The code hash is the gate: this runs
+    /// once, so an owner transferred to zero afterwards stays zero.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
@@ -324,34 +325,27 @@ where
             .basic(ANCHORING_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        // Every block past T12 comes through here; only the first one gets past this check.
         if info.code_hash != ANCHORING_RUNTIME_HASH {
             return Ok(());
         }
-        let code = Bytecode::new_legacy(T12_ANCHORING_RUNTIME);
         let mut account = Account::from(info);
-        account.info.code_hash = code.hash_slow();
-        account.info.code = Some(code);
-        let unowned = db
-            .storage(ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT)
-            .map_err(BlockExecutionError::other)?
-            .is_zero();
-        if unowned {
-            let owner = db
-                .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
-                    ValidatorConfigV2::default().owner()
-                })
-                .map_err(BlockExecutionError::other)?;
-            if !owner.is_zero() {
-                account.storage.insert(
-                    ANCHORING_OWNER_SLOT,
-                    EvmStorageSlot::new_changed(
-                        U256::ZERO,
-                        owner.into_word().into(),
-                        TransactionId::ZERO,
-                    ),
-                );
-            }
+        account
+            .info
+            .set_code(Bytecode::new_legacy(T12_ANCHORING_RUNTIME));
+        let owner = db
+            .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+                ValidatorConfigV2::default().owner()
+            })
+            .map_err(BlockExecutionError::other)?;
+        if !owner.is_zero() {
+            account.storage.insert(
+                ANCHORING_OWNER_SLOT,
+                EvmStorageSlot::new_changed(
+                    U256::ZERO,
+                    owner.into_word().into(),
+                    TransactionId::ZERO,
+                ),
+            );
         }
         account.mark_touch();
         db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
@@ -585,13 +579,7 @@ where
         if self.inner.spec.is_t10_active_at_timestamp(timestamp) {
             self.deploy_zone_factory_at_boundary()?;
         }
-        // As with T13 below: a chain starting at T12 keeps the anchoring runtime of its genesis.
-        if self.inner.spec.is_t12_active_at_timestamp(timestamp)
-            && !self
-                .inner
-                .spec
-                .is_t12_active_at_timestamp(self.inner.spec.genesis().timestamp)
-        {
+        if self.inner.spec.is_t12_active_at_timestamp(timestamp) {
             self.upgrade_anchoring_at_boundary()?;
         }
         // Chains starting at T13 supply their runtime code in genesis. Preserve those
@@ -1938,26 +1926,21 @@ mod tests {
     #[test]
     fn anchoring_upgrade_activates_at_t12() {
         let registry = Address::with_last_byte(0xA0);
-        let named = Address::with_last_byte(0xB0);
-        let old = |owner| Some((ANCHORING_RUNTIME, owner));
         let new = |owner| Some((T12_ANCHORING_RUNTIME, owner));
-        let unowned = || old(Address::ZERO);
+        let unowned = || Some((ANCHORING_RUNTIME, Address::ZERO));
         let other = || Some((Bytes::from_static(&[0x00]), Address::ZERO));
-        for (genesis_timestamp, t12_time, timestamp, launched, registry, expected) in [
-            (0, u64::MAX, 10, unowned(), registry, unowned()),
-            (0, 10, 9, unowned(), registry, unowned()),
-            (0, 10, 10, unowned(), registry, new(registry)),
-            (0, 10, 10, old(named), registry, new(named)),
-            (0, 10, 10, unowned(), Address::ZERO, new(Address::ZERO)),
-            (0, 10, 11, new(Address::ZERO), registry, new(Address::ZERO)),
-            // The actual genesis timestamp, not just t12Time == 0.
-            (100, 50, 101, unowned(), registry, unowned()),
-            (100, 100, 101, unowned(), registry, unowned()),
-            (0, 10, 10, None, registry, None),
-            (0, 10, 10, other(), registry, other()),
+        for (t12_time, timestamp, launched, registry, expected) in [
+            (u64::MAX, 10, unowned(), registry, unowned()),
+            (10, 9, unowned(), registry, unowned()),
+            (10, 10, unowned(), registry, new(registry)),
+            (10, 10, unowned(), Address::ZERO, new(Address::ZERO)),
+            (10, 11, new(Address::ZERO), registry, new(Address::ZERO)),
+            // A chain starting at T12 on the launch build upgrades at its first block.
+            (0, 1, unowned(), registry, new(registry)),
+            (10, 10, None, registry, None),
+            (10, 10, other(), registry, other()),
         ] {
             let mut genesis = DEV.genesis().clone();
-            genesis.timestamp = genesis_timestamp;
             genesis
                 .config
                 .extra_fields
@@ -2009,7 +1992,7 @@ mod tests {
             assert_eq!(
                 code.map(|code| (code, Address::from_word(owner.into()))),
                 expected,
-                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}"
+                "T12 at {t12_time}, block at {timestamp}"
             );
         }
     }
