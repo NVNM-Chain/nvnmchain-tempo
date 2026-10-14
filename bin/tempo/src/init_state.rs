@@ -47,6 +47,7 @@ use reth_trie::{
     updates::{StorageTrieUpdates, TrieUpdates},
 };
 use reth_trie_db::DatabaseStateRoot;
+use sha2::{Digest as _, Sha256};
 use tempo_chainspec::spec::TempoChainSpecParser;
 use tracing::info;
 
@@ -96,6 +97,14 @@ pub struct InitFromBinaryDump<C: reth_cli::chainspec::ChainSpecParser = TempoCha
     /// empty before block 0. Skipping them costs no read: see `genesis_history_pruned`.
     #[arg(long)]
     skip_genesis_history: bool,
+
+    /// SHA-256 the dump file must have. Checked before the database is opened.
+    #[arg(long, value_name = "HEX")]
+    sha256: Option<B256>,
+
+    /// State root the load must end on. A mismatch leaves a datadir to discard.
+    #[arg(long, value_name = "HASH")]
+    state_root: Option<B256>,
 }
 
 impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumHardforks>>
@@ -107,6 +116,22 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
         N: CliNodeTypes<ChainSpec = C::ChainSpec>,
     {
         info!(target: "tempo::cli", "Tempo init-from-binary-dump starting");
+
+        if let Some(expected) = self.sha256 {
+            let file = File::open(&self.state)
+                .wrap_err_with(|| format!("failed to open {}", self.state.display()))?;
+            let mut hasher = Sha256::new();
+            std::io::copy(
+                &mut BufReader::with_capacity(READ_BUFFER, file),
+                &mut hasher,
+            )
+            .wrap_err_with(|| format!("failed to read {}", self.state.display()))?;
+            let found = B256::from_slice(&hasher.finalize());
+            ensure!(
+                found == expected,
+                "dump sha256 is {found}, expected {expected}"
+            );
+        }
 
         let etl_dir = self
             .env
@@ -433,6 +458,13 @@ impl<C: reth_cli::chainspec::ChainSpecParser<ChainSpec: EthChainSpec + EthereumH
             elapsed = ?trie_start.elapsed(),
             "State root computed"
         );
+
+        if let Some(expected) = self.state_root {
+            ensure!(
+                state_root == expected,
+                "state root is {state_root}, expected {expected}: discard this datadir"
+            );
+        }
 
         // Final commit
         provider_rw.commit()?;
