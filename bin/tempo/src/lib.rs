@@ -46,10 +46,7 @@ pub use reth_cli_util as cli_util;
 pub use tempo_node;
 pub use tempo_node as node;
 
-use crate::utils::{
-    block_on_consensus_public_key, fetch_bootnodes, install_crypto_provider,
-    print_extensions_footer,
-};
+use crate::utils::{block_on_consensus_public_key, fetch_bootnodes, install_crypto_provider};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256};
 use alloy_signer_local::MnemonicBuilder;
@@ -191,25 +188,12 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
     {
         Ok(matches) => matches,
         Err(err) => {
-            if err.kind() == clap::error::ErrorKind::InvalidSubcommand {
-                // Unknown subcommand — try the extension launcher.
-                let code = match tempo_ext::run(std::env::args_os()) {
-                    Ok(code) => code,
-                    Err(e) => {
-                        eprintln!("{e}");
-                        1
-                    }
-                };
-                std::process::exit(code);
-            }
-
             if matches!(
                 err.kind(),
                 clap::error::ErrorKind::DisplayHelp
                     | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             ) {
                 let _ = err.print();
-                print_extensions_footer();
                 std::process::exit(0);
             }
 

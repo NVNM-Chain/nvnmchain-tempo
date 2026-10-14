@@ -13550,7 +13550,6 @@ dependencies = [
  "tempo-contracts",
  "tempo-dkg-onchain-artifacts",
  "tempo-evm",
- "tempo-ext",
  "tempo-eyre",
  "tempo-faucet",
  "tempo-node",

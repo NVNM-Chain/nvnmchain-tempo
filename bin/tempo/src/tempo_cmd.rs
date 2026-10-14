@@ -50,17 +50,6 @@ fn get_env(key: &str) -> eyre::Result<String> {
     std::env::var(key).wrap_err_with(|| format!("failed reading environment variable `{key}`"))
 }
 
-/// Passthrough args for extension management commands.
-///
-/// These commands are defined here so they appear in `tempo --help`, but
-/// the actual implementation lives in `tempo_ext::run()`. We capture all
-/// trailing arguments and re-dispatch.
-#[derive(Debug, clap::Args)]
-pub struct ExtArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-    args: Vec<String>,
-}
-
 /// Tempo-specific subcommands that extend the reth CLI.
 #[derive(Debug, Subcommand)]
 pub enum TempoSubcommand {
@@ -82,31 +71,6 @@ pub enum TempoSubcommand {
 
     /// Replay historical canonical blocks under candidate hardfork rules.
     ShadowReplay(Box<shadow_replay::ShadowReplay>),
-
-    /// Install an extension (e.g., `tempo add wallet`).
-    #[command(
-        override_usage = "tempo add <EXT> [VERSION]",
-        after_help = "Examples:\n  tempo add wallet\n  tempo add wallet 0.2.0"
-    )]
-    Add(ExtArgs),
-
-    /// Update tempo and/or extensions.
-    #[command(
-        override_usage = "tempo update [EXT]",
-        after_help = "Examples:\n  tempo update          # update tempo + all extensions\n  tempo update wallet   # update a single extension"
-    )]
-    Update(ExtArgs),
-
-    /// Remove an extension.
-    #[command(
-        override_usage = "tempo remove <EXT>",
-        after_help = "Example: tempo remove wallet"
-    )]
-    Remove(ExtArgs),
-
-    /// List installed extensions.
-    #[command(override_usage = "tempo list")]
-    List(ExtArgs),
 }
 
 impl ExtendedCommand for TempoSubcommand {
@@ -134,13 +98,6 @@ impl ExtendedCommand for TempoSubcommand {
             Self::ShadowReplay(cmd) => {
                 let runtime = runner.runtime();
                 runner.run_blocking_until_ctrl_c(cmd.execute(runtime))?;
-                Ok(())
-            }
-            Self::Add(_) | Self::Update(_) | Self::Remove(_) | Self::List(_) => {
-                let code = tempo_ext::run(std::env::args_os()).map_err(|e| eyre!("{e}"))?;
-                if code != 0 {
-                    std::process::exit(code);
-                }
                 Ok(())
             }
         }

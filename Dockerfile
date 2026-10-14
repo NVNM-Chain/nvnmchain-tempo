@@ -51,7 +51,7 @@ RUN set -eux; \
 WORKDIR /data
 RUN chown "${TEMPO_UID}:${TEMPO_GID}" /data
 
-# The node resolves a few paths (account store, extension registry) from $HOME
+# The node resolves a few paths (the account store among them) from $HOME
 # via `dirs_next`. Root's default of /root is unwritable once the image drops
 # to an unprivileged user, so point it at the data directory the image already
 # owns. Deployments that pass an explicit --datadir are unaffected; without

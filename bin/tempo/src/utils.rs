@@ -30,39 +30,6 @@ pub(crate) fn block_on_consensus_public_key(
         .block_on(args.public_key())
 }
 
-/// Print installed extensions as a footer after root help output.
-/// Skips printing when help is for a subcommand (e.g. `tempo node --help`).
-pub(crate) fn print_extensions_footer() {
-    let is_subcommand_help = std::env::args()
-        .skip(1)
-        .any(|a| !a.starts_with('-') && a != "help");
-    if is_subcommand_help {
-        return;
-    }
-
-    let extensions = match tempo_ext::installed_extensions() {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    if extensions.is_empty() {
-        return;
-    }
-    let use_color = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let (b, bu, r) = if use_color {
-        ("\x1b[1m", "\x1b[1m\x1b[4m", "\x1b[0m")
-    } else {
-        ("", "", "")
-    };
-    println!("\n{bu}Extensions:{r}");
-    for (name, desc) in &extensions {
-        if desc.is_empty() {
-            println!("  {b}{name}{r}");
-        } else {
-            println!("  {b}{name:<22}{r} {desc}");
-        }
-    }
-}
-
 /// Fetches bootnodes from the given endpoint for the specified chain ID.
 ///
 /// The endpoint must return JSON in the format:
