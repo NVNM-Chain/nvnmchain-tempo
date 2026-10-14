@@ -17,12 +17,14 @@ use commonware_cryptography::{
 use commonware_p2p::{AddressableManager, Blocker, Receiver, Sender};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Spawner, Storage,
-    buffer::paged::CacheRef, spawn_cell,
+    buffer::paged::CacheRef, spawn_cell, telemetry::metrics::MetricsExt as _,
 };
 use commonware_utils::NZUsize;
 use eyre::{OptionExt as _, WrapErr as _, ensure};
 use rand_core::{CryptoRng, Rng};
+use reth_ethereum::chainspec::EthChainSpec as _;
 use tempo_node::TempoFullNode;
+use tempo_precompiles::validator_config_v2::VoteNamespace;
 use tracing::info;
 
 use crate::{
@@ -230,6 +232,17 @@ where
             priority_responses: false,
         };
 
+        let votes = crate::equivocation::Votes::new(
+            VoteNamespace::new(
+                execution_node.chain_spec().chain_id(),
+                execution_node.chain_spec().genesis_hash(),
+            ),
+            context.counter(
+                "equivocations_found",
+                "pieces of evidence of conflicting votes this node found on its own",
+            ),
+        );
+        self.feed_state.set_votes(votes.clone());
         let (feed, feed_mailbox) = crate::feed::init(
             context.child("feed"),
             marshal_mailbox.clone(),
@@ -311,6 +324,8 @@ where
             mailbox_size: self.mailbox_size,
             marshal: marshal_mailbox,
             scheme_provider,
+            vote_key: tempo_validator_config::VoteKeypair::derive(&self.signer).private(),
+            votes,
             time_to_collect_notarizations: self.time_to_collect_notarizations,
             time_to_retry_nullify_broadcast: self.time_to_retry_nullify_broadcast,
             partition_prefix: format!("{}_epoch_manager", self.partition_prefix),

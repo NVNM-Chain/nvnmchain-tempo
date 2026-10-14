@@ -67,6 +67,7 @@ tempo-dkg-onchain-artifacts.workspace = true
 tempo-consensus.workspace = true
 tempo-node.workspace = true
 tempo-precompiles = { workspace = true, features = ["rpc"] }
+tempo-validator-config.workspace = true
 
 tokio.workspace = true
 tracing.workspace = true

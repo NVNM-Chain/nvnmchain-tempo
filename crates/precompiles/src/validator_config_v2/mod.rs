@@ -4,10 +4,15 @@
 //! [consensus]: <https://docs.tempo.xyz/protocol/blockspace/consensus>
 
 pub mod dispatch;
+mod equivocation;
+mod vote_key;
 
-pub use tempo_contracts::precompiles::{IValidatorConfigV2, ValidatorConfigV2Error};
+pub use equivocation::{Ballot, Evidence, Proposal, Round, Signed, VoteNamespace};
+
+pub use tempo_contracts::precompiles::{IEquivocation, IValidatorConfigV2, ValidatorConfigV2Error};
 use tempo_contracts::precompiles::{VALIDATOR_CONFIG_V2_ADDRESS, ValidatorConfigV2Event};
 use tempo_precompiles_macros::{Storable, contract};
+pub use vote_key::{VoteKey, VoteSignature, vote_key_proof_namespace};
 
 use crate::{
     error::{Result, TempoPrecompileError},
@@ -817,14 +822,17 @@ impl ValidatorConfigV2 {
         ))
     }
 
-    /// Transfers a validator entry to a new address (owner or the validator itself).
+    /// Transfers a validator entry to a new address (owner or the validator itself), unless its
+    /// key has a vote key: a bond stands, here and on Ethereum, under the address an entry
+    /// carries, and evidence reaches it through that address. A validator that must change it
+    /// then deactivates and enrols anew.
     ///
     /// Updates the validator's address in the lookup maps: deletes the old `address_to_index`
     /// entry and creates a new one pointing to the same slot.
     ///
     /// # Errors
     /// - `ValidatorNotFound` / `ValidatorAlreadyDeleted` — `idx` is invalid
-    /// - `NotInitialized` / `Unauthorized` — auth failure
+    /// - `NotInitialized` / `Unauthorized` — auth failure, or the entry has a vote key
     /// - `InvalidValidatorAddress` — `newAddress` is zero
     /// - `AddressAlreadyHasValidator` — `newAddress` belongs to an active validator
     pub fn transfer_validator_ownership(
@@ -833,10 +841,12 @@ impl ValidatorConfigV2 {
         call: IValidatorConfigV2::transferValidatorOwnershipCall,
     ) -> Result<()> {
         let mut v = self.get_active_validator(call.idx)?;
-        self.config
-            .read()?
-            .require_init()?
-            .require_owner_or_validator(sender, v.validator_address)?;
+        let config = self.config.read()?.require_init()?;
+        // No storage is read for it where no vote key can exist: there the call is upstream's.
+        if self.takes_vote_keys() && self.has_vote_key(v.public_key)? {
+            Err(ValidatorConfigV2Error::unauthorized())?
+        }
+        config.require_owner_or_validator(sender, v.validator_address)?;
         self.require_new_address(call.newAddress)?;
 
         let old_address = v.validator_address;

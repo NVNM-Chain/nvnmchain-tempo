@@ -32,8 +32,9 @@ paste.workspace = true
 bitflags.workspace = true
 tempo-nitro-attestation = { workspace = true, features = ["aws-lc"] }
 
-commonware-cryptography.workspace = true
+commonware-cryptography = { workspace = true, features = ["bls12381"] }
 commonware-codec.workspace = true
+bytes.workspace = true
 
 tracing.workspace = true
 thiserror.workspace = true

@@ -6,6 +6,7 @@ use crate::{
     execution_runtime::{chainspec, test_db_args},
 };
 
+mod attributable_votes;
 mod backfill;
 mod blocked_transfers;
 mod consensus_context;
@@ -22,6 +23,7 @@ mod snapshot;
 mod sync;
 mod t12;
 mod testing_node;
+mod weighted_proposers;
 
 #[test_traced]
 fn spawning_execution_node_works() {

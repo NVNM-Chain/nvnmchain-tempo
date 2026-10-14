@@ -1,10 +1,13 @@
 //! ABI dispatch for the [`ValidatorConfigV2`] precompile (T2+).
 
 use super::*;
-use crate::{Precompile, charge_input_cost, dispatch, mutate, view};
-use alloy::primitives::Address;
+use crate::{
+    Precompile, charge_input_cost, dispatch,
+    dispatch::{selector_from_calldata, unknown_selector_result},
+    mutate, view,
+};
+use alloy::{primitives::Address, sol_types::SolCall as _};
 use revm::precompile::PrecompileResult;
-use tempo_contracts::precompiles::IValidatorConfigV2;
 
 impl Precompile for ValidatorConfigV2 {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -15,6 +18,18 @@ impl Precompile for ValidatorConfigV2 {
         // Pre-T2: behave like an empty contract (call succeeds, no execution)
         if !self.storage.spec().is_t2() {
             return Ok(self.storage.success_output(Default::default()));
+        }
+
+        // Elsewhere the registry is upstream's, to which these selectors are unknown.
+        let known = match selector_from_calldata(calldata) {
+            Some(IEquivocation::equivocatorCall::SELECTOR) => self.votes_are_attributable(),
+            Some(
+                IEquivocation::setVoteKeyCall::SELECTOR | IEquivocation::voteKeyCall::SELECTOR,
+            ) => self.takes_vote_keys(),
+            _ => true,
+        };
+        if !known {
+            return unknown_selector_result(calldata);
         }
 
         dispatch!(
@@ -45,6 +60,12 @@ impl Precompile for ValidatorConfigV2 {
                     }),
                     migrateValidator(call) => mutate(call, msg_sender, |sender, c| self.migrate_validator(sender, c)),
                     initializeIfMigrated(call) => mutate(call, msg_sender, |sender, _| self.initialize_if_migrated(sender))
+                }
+
+                IEquivocation::IEquivocationCalls {
+                    equivocator(call) => view(call, |c| self.equivocator(c)),
+                    voteKey(call) => view(call, |c| self.vote_key(c)),
+                    setVoteKey(call) => mutate(call, msg_sender, |sender, c| self.set_vote_key(sender, c))
                 }
             }
         )
