@@ -8,10 +8,11 @@ use alloy_primitives::{Address, B256, Bytes, U256, address, b256};
 pub const ANCHORING_ADDRESS: Address = address!("0x0000000000000000000000000000000000000A00");
 
 /// The launch build: what chains ran before T12, with no owner.
-pub const ANCHORING_RUNTIME: Bytes = Bytes::from_static(include_bytes!("anchoring_runtime.bin"));
+pub const T11_ANCHORING_RUNTIME: Bytes =
+    Bytes::from_static(include_bytes!("t11_anchoring_runtime.bin"));
 
 /// `keccak256` of the launch build, pinned: T12 replaces this code and no other.
-pub const ANCHORING_RUNTIME_HASH: B256 =
+pub const T11_ANCHORING_RUNTIME_HASH: B256 =
     b256!("893a2f955868c80ae17905aa36cc4f71a771731b530e72ff6cfb063f559a7c0e");
 
 /// The T12 build, with an owner. `layout/anchoring.json` pins its slots, which the dump writer and
@@ -40,7 +41,10 @@ mod tests {
 
     #[test]
     fn the_runtimes_are_the_pinned_ones() {
-        assert_eq!(keccak256(&ANCHORING_RUNTIME), ANCHORING_RUNTIME_HASH);
+        assert_eq!(
+            keccak256(&T11_ANCHORING_RUNTIME),
+            T11_ANCHORING_RUNTIME_HASH
+        );
         assert_eq!(
             keccak256(&T12_ANCHORING_RUNTIME),
             T12_ANCHORING_RUNTIME_HASH

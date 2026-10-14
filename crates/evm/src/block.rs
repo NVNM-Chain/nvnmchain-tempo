@@ -25,7 +25,7 @@ use reth_revm::{
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
     anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME,
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME,
     },
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
@@ -325,7 +325,7 @@ where
             .basic(ANCHORING_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        if info.code_hash != ANCHORING_RUNTIME_HASH {
+        if info.code_hash != T11_ANCHORING_RUNTIME_HASH {
             return Ok(());
         }
         let mut account = Account::from(info);
@@ -772,7 +772,7 @@ mod tests {
         spec::{DEV, NVNM_TESTNET},
     };
     use tempo_contracts::{
-        anchoring::{ANCHORING_RUNTIME, IAnchoring, T12_ANCHORING_RUNTIME_HASH},
+        anchoring::{IAnchoring, T11_ANCHORING_RUNTIME, T12_ANCHORING_RUNTIME_HASH},
         precompiles::{
             CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, PATH_USD_ADDRESS, ZONE_FACTORY_ADDRESS,
             ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
@@ -1927,7 +1927,7 @@ mod tests {
     fn anchoring_upgrade_activates_at_t12() {
         let registry = Address::with_last_byte(0xA0);
         let new = |owner| Some((T12_ANCHORING_RUNTIME, owner));
-        let unowned = || Some((ANCHORING_RUNTIME, Address::ZERO));
+        let unowned = || Some((T11_ANCHORING_RUNTIME, Address::ZERO));
         let other = || Some((Bytes::from_static(&[0x00]), Address::ZERO));
         for (t12_time, timestamp, launched, registry, expected) in [
             (u64::MAX, 10, unowned(), registry, unowned()),
@@ -2043,7 +2043,7 @@ mod tests {
         let mut db = State::builder().with_bundle_update().build();
         db.insert_account(
             ANCHORING_ADDRESS,
-            AccountInfo::from_bytecode(Bytecode::new_legacy(ANCHORING_RUNTIME)),
+            AccountInfo::from_bytecode(Bytecode::new_legacy(T11_ANCHORING_RUNTIME)),
         );
         db.insert_account_with_storage(
             VALIDATOR_CONFIG_V2_ADDRESS,

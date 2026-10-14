@@ -14,7 +14,8 @@ use std::sync::LazyLock;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::{
     anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH,
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, T11_ANCHORING_RUNTIME_HASH,
+        T12_ANCHORING_RUNTIME_HASH,
     },
     precompiles::*,
     zones::{
@@ -294,7 +295,7 @@ const T12_ANCHORING_UPGRADE: Expectation = Expectation {
         let shadow = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
         if real.info(|info| info.code_hash).is_some()
             || shadow.info(|info| info.code_hash)
-                != Some((ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH))
+                != Some((T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH))
         {
             return None;
         }
@@ -455,7 +456,7 @@ mod tests {
             (T12_ANCHORING_UPGRADE.check)(&ctx, &field).is_some()
         };
         let accepts = |shadow: &Evidence, name, slot| check(&unchanged, shadow, name, slot);
-        let (launch, t12) = (ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH);
+        let (launch, t12) = (T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH);
 
         let upgraded = transition(launch, t12, U256::ZERO);
         assert!(accepts(&upgraded, "code", None));

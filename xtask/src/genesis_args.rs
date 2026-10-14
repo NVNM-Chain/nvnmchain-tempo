@@ -43,7 +43,7 @@ use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
     anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, T12_ANCHORING_RUNTIME,
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, T11_ANCHORING_RUNTIME, T12_ANCHORING_RUNTIME,
     },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
@@ -753,7 +753,7 @@ fn insert_anchoring_contract_at_genesis(
             owner.is_none(),
             "--anchoring-owner needs T12 at genesis; T12 later gives the registry's owner"
         );
-        (ANCHORING_RUNTIME, None)
+        (T11_ANCHORING_RUNTIME, None)
     };
     let slot = B256::from(ANCHORING_OWNER_SLOT);
     genesis_alloc.insert(
@@ -1433,7 +1433,7 @@ mod anchoring_tests {
         for owner in [None, Some(Address::ZERO)] {
             let alloc = alloc(true, 1, owner).unwrap();
             let anchoring = &alloc[&ANCHORING_ADDRESS];
-            assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
+            assert_eq!(anchoring.code, Some(T11_ANCHORING_RUNTIME));
             assert_eq!(anchoring.nonce, Some(1));
             assert_eq!(anchoring.storage, None);
             assert_eq!(alloc.len(), 1, "nothing else belongs here");
