@@ -14,8 +14,8 @@ use std::sync::LazyLock;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::{
     anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, T11_ANCHORING_RUNTIME_HASH,
-        T12_ANCHORING_RUNTIME_HASH,
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ERC1967_IMPLEMENTATION_SLOT,
+        T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_IMPLEMENTATION, T12_ANCHORING_PROXY_RUNTIME_HASH,
     },
     precompiles::*,
     zones::{
@@ -282,7 +282,8 @@ const T13_ZONE_RUNTIME_UPGRADE: Expectation = Expectation {
     },
 };
 
-/// Accepts the T12 anchoring install: the code change and, with it, an owner in an empty slot.
+/// Accepts the T12 anchoring install: the proxy over the launch build, with an owner and the
+/// implementation in empty slots.
 const T12_ANCHORING_UPGRADE: Expectation = Expectation {
     id: "t12.anchoring-upgrade",
     check: |ctx, field| {
@@ -295,14 +296,18 @@ const T12_ANCHORING_UPGRADE: Expectation = Expectation {
         let shadow = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
         if real.info(|info| info.code_hash).is_some()
             || shadow.info(|info| info.code_hash)
-                != Some((T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH))
+                != Some((T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH))
         {
             return None;
         }
+        let implementation = U256::from_be_bytes(T12_ANCHORING_IMPLEMENTATION.into_word().0);
         match (field.name, field.slot) {
             ("code", None) => Some(()),
             ("storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
                 shadow.storage(slot)?.0.is_zero().then_some(())
+            }
+            ("storage", Some(slot)) if slot == ERC1967_IMPLEMENTATION_SLOT => {
+                (shadow.storage(slot)? == (U256::ZERO, implementation)).then_some(())
             }
             _ => None,
         }
@@ -314,7 +319,7 @@ const T12_ANCHORING_UPGRADE: Expectation = Expectation {
 static EOA_GATE_REFUSAL: LazyLock<B256> =
     LazyLock::new(|| keccak256(Revert::from("sender not an eoa").abi_encode()));
 
-/// The T12 build has no EOA gate, so a transaction the launch build refused for one now runs
+/// The implementation has no EOA gate, so a transaction the launch build refused for one now runs
 /// through, with whatever effects that has.
 const T12_ANCHORING_CALLS: Expectation = Expectation {
     id: "t12.anchoring-calls",
@@ -417,8 +422,9 @@ mod tests {
 
     #[test]
     fn accepts_the_anchoring_upgrade_with_its_first_owner() {
-        let owner_slot = ANCHORING_OWNER_SLOT;
+        let (owner_slot, pointer) = (ANCHORING_OWNER_SLOT, ERC1967_IMPLEMENTATION_SLOT);
         let owner = U256::from(0xA0);
+        let implementation = U256::from_be_bytes(T12_ANCHORING_IMPLEMENTATION.into_word().0);
         let transition = |before, after, owner_before| {
             let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
             let mut state = reth_revm::db::TransitionState::default();
@@ -427,9 +433,15 @@ mod tests {
                 TransitionAccount {
                     previous_info: info(before),
                     info: info(after),
-                    storage: [(owner_slot, StorageSlot::new_changed(owner_before, owner))]
-                        .into_iter()
-                        .collect(),
+                    storage: [
+                        (owner_slot, StorageSlot::new_changed(owner_before, owner)),
+                        (
+                            pointer,
+                            StorageSlot::new_changed(U256::ZERO, implementation),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
                     ..Default::default()
                 },
             );
@@ -456,22 +468,23 @@ mod tests {
             (T12_ANCHORING_UPGRADE.check)(&ctx, &field).is_some()
         };
         let accepts = |shadow: &Evidence, name, slot| check(&unchanged, shadow, name, slot);
-        let (launch, t12) = (T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH);
+        let (launch, proxy) = (T11_ANCHORING_RUNTIME_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH);
 
-        let upgraded = transition(launch, t12, U256::ZERO);
+        let upgraded = transition(launch, proxy, U256::ZERO);
         assert!(accepts(&upgraded, "code", None));
         assert!(accepts(&upgraded, "storage", Some(owner_slot)));
+        assert!(accepts(&upgraded, "storage", Some(pointer)));
         assert!(!accepts(&upgraded, "storage", Some(U256::ZERO)));
 
-        let replaced = transition(launch, t12, U256::from(0xB0));
+        let replaced = transition(launch, proxy, U256::from(0xB0));
         assert!(!accepts(&replaced, "storage", Some(owner_slot)));
         // A canonical arm that swapped the code too has nothing left to explain.
         assert!(!check(&upgraded, &upgraded, "code", None));
 
         for other in [
-            transition(t12, t12, U256::ZERO),
+            transition(proxy, proxy, U256::ZERO),
             transition(launch, launch, U256::ZERO),
-            transition(keccak256(b"another build"), t12, U256::ZERO),
+            transition(keccak256(b"another build"), proxy, U256::ZERO),
         ] {
             assert!(!accepts(&other, "code", None));
             assert!(!accepts(&other, "storage", Some(owner_slot)));

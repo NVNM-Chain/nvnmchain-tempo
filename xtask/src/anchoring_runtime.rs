@@ -1,19 +1,25 @@
 //! Copies the contract runtimes `tempo-contracts` embeds from the contracts repo's build, or with
 //! `--check` fails when one has gone stale. Each copy is a fork's payload, pinned by hash: a build
-//! that differs is refused, and belongs to the next fork.
+//! that differs is refused, and belongs to the next fork. The implementation is only checked: the
+//! chain deploys it.
 
 use crate::check_abi::find_workspace_root;
 use alloy::primitives::{B256, keccak256};
 use eyre::{Context, bail};
 use std::path::PathBuf;
-use tempo_contracts::anchoring::T12_ANCHORING_RUNTIME_HASH;
+use tempo_contracts::anchoring::{
+    T12_ANCHORING_IMPLEMENTATION_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH,
+};
 
-/// `layout/` build, embedded copy relative to the workspace root, and the copy's pinned hash.
-const COPIES: &[(&str, &str, B256)] = &[(
-    "anchoring.bin",
-    "crates/contracts/src/t12_anchoring_runtime.bin",
-    T12_ANCHORING_RUNTIME_HASH,
-)];
+/// `layout/` build, its embedded copy relative to the workspace root, if any, and its pinned hash.
+const COPIES: &[(&str, Option<&str>, B256)] = &[
+    (
+        "proxy.bin",
+        Some("crates/contracts/src/t12_anchoring_proxy.bin"),
+        T12_ANCHORING_PROXY_RUNTIME_HASH,
+    ),
+    ("anchoring.bin", None, T12_ANCHORING_IMPLEMENTATION_HASH),
+];
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct AnchoringRuntime {
@@ -38,10 +44,14 @@ impl AnchoringRuntime {
             let hash = keccak256(&bytes);
             if hash != *pinned {
                 bail!(
-                    "{} hashes to {hash}, not the {pinned} that {copy} is pinned to",
+                    "{} hashes to {hash}, not the pinned {pinned}",
                     built.display()
                 );
             }
+            let Some(copy) = copy else {
+                println!("{} is the pinned build", built.display());
+                continue;
+            };
 
             let copy_path = root.join(copy);
             if std::fs::read(&copy_path).is_ok_and(|current| current == bytes) {

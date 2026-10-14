@@ -43,7 +43,8 @@ use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
     anchoring::{
-        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, T11_ANCHORING_RUNTIME, T12_ANCHORING_RUNTIME,
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ERC1967_IMPLEMENTATION_SLOT,
+        T11_ANCHORING_RUNTIME, T12_ANCHORING_IMPLEMENTATION, T12_ANCHORING_PROXY_RUNTIME,
     },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
@@ -729,8 +730,9 @@ impl GenesisArgs {
     }
 }
 
-/// Places the anchoring contract: the T12 build and its owner on a chain starting at T12, else the
-/// launch build, which has no owner.
+/// Places the anchoring contract: on a chain starting at T12 the proxy, with its owner and the
+/// address its implementation is deployed to after launch; else the launch build, which has no
+/// owner.
 fn insert_anchoring_contract_at_genesis(
     anchoring: bool,
     t12_time: u64,
@@ -743,11 +745,13 @@ fn insert_anchoring_contract_at_genesis(
     }
     println!("Initializing the anchoring contract");
     let owner = owner.filter(|owner| !owner.is_zero());
-    let (code, owner) = if t12_time == 0 {
-        (
-            T12_ANCHORING_RUNTIME,
-            Some(owner.unwrap_or(validator_admin)),
-        )
+    let (code, storage) = if t12_time == 0 {
+        let slots = [
+            (ANCHORING_OWNER_SLOT, owner.unwrap_or(validator_admin)),
+            (ERC1967_IMPLEMENTATION_SLOT, T12_ANCHORING_IMPLEMENTATION),
+        ];
+        let storage = slots.map(|(slot, address)| (B256::from(slot), address.into_word()));
+        (T12_ANCHORING_PROXY_RUNTIME, Some(BTreeMap::from(storage)))
     } else {
         eyre::ensure!(
             owner.is_none(),
@@ -755,13 +759,12 @@ fn insert_anchoring_contract_at_genesis(
         );
         (T11_ANCHORING_RUNTIME, None)
     };
-    let slot = B256::from(ANCHORING_OWNER_SLOT);
     genesis_alloc.insert(
         ANCHORING_ADDRESS,
         GenesisAccount {
             code: Some(code),
             nonce: Some(1),
-            storage: owner.map(|owner| BTreeMap::from([(slot, owner.into_word())])),
+            storage,
             ..Default::default()
         },
     );
@@ -1406,8 +1409,6 @@ mod tests {
 #[cfg(test)]
 mod anchoring_tests {
     use super::*;
-    use alloy::sol_types::SolCall as _;
-    use tempo_contracts::anchoring::IAnchoring;
 
     const OWNER: Address = address!("0x00000000000000000000000000000000000000A0");
     const VALIDATOR_ADMIN: Address = address!("0x00000000000000000000000000000000000000B0");
@@ -1441,37 +1442,29 @@ mod anchoring_tests {
         assert!(alloc(true, 1, Some(OWNER)).is_err());
     }
 
-    /// Asked of the embedded runtime itself, so a build that moves the slot fails here.
     #[test]
-    fn a_chain_starting_at_t12_has_its_owner_from_block_0() {
-        let slot = B256::from(ANCHORING_OWNER_SLOT);
+    fn a_chain_starting_at_t12_has_the_proxy_and_its_owner_from_block_0() {
+        let slots = |owner: Address| {
+            Some(BTreeMap::from([
+                (B256::from(ANCHORING_OWNER_SLOT), owner.into_word()),
+                (
+                    B256::from(ERC1967_IMPLEMENTATION_SLOT),
+                    T12_ANCHORING_IMPLEMENTATION.into_word(),
+                ),
+            ]))
+        };
         let unnamed = alloc(true, 0, None).unwrap();
-        let storage = unnamed[&ANCHORING_ADDRESS].storage.as_ref().unwrap();
-        assert_eq!(storage[&slot], VALIDATOR_ADMIN.into_word());
+        assert_eq!(unnamed[&ANCHORING_ADDRESS].storage, slots(VALIDATOR_ADMIN));
 
         let alloc = alloc(true, 0, Some(OWNER)).unwrap();
         let anchoring = &alloc[&ANCHORING_ADDRESS];
-        assert_eq!(anchoring.code, Some(T12_ANCHORING_RUNTIME));
-
-        let mut evm = setup_tempo_evm(1);
-        evm.db_mut().insert_account_info(
-            ANCHORING_ADDRESS,
-            AccountInfo {
-                code: anchoring.code.clone().map(Bytecode::new_raw),
-                ..Default::default()
-            },
+        assert_eq!(anchoring.code, Some(T12_ANCHORING_PROXY_RUNTIME));
+        assert_eq!(anchoring.storage, slots(OWNER));
+        assert_eq!(
+            alloc.len(),
+            1,
+            "the implementation is deployed after launch"
         );
-        for (slot, value) in anchoring.storage.as_ref().unwrap() {
-            evm.db_mut()
-                .insert_account_storage(ANCHORING_ADDRESS, (*slot).into(), (*value).into())
-                .unwrap();
-        }
-        let owner_call = IAnchoring::ownerCall {}.abi_encode().into();
-        let result = evm
-            .transact_system_call(Address::ZERO, ANCHORING_ADDRESS, owner_call)
-            .unwrap()
-            .result;
-        assert_eq!(result.output().unwrap()[12..], OWNER[..]);
     }
 
     /// Upstream's own networks generate the same way and must not pick it up.
