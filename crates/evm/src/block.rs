@@ -11,7 +11,7 @@ use alloy_evm::{
         receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
     },
 };
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Decodable;
 use alloy_sol_types::SolCall;
 use commonware_codec::ReadExt;
@@ -22,10 +22,11 @@ use reth_revm::{
     context::result::{ExecutionResult, HaltReason, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
-use std::sync::LazyLock;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
 use tempo_contracts::{
-    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, t12_anchoring_owner},
+    anchoring::{
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME,
+    },
     precompiles::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
@@ -33,8 +34,9 @@ use tempo_contracts::{
         VALIDATOR_CONFIG_V2_ADDRESS, initial_zone_factory_state, t13_zone_factory_state,
     },
 };
+use tempo_precompiles::{storage::StorageActions, validator_config_v2::ValidatorConfigV2};
 use tempo_primitives::{SubBlockMetadata, TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{ExecutionContext, evm::TempoContext};
+use tempo_revm::{ExecutionContext, TempoStateAccess as _, evm::TempoContext};
 use tracing::trace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -313,37 +315,43 @@ where
         Ok(())
     }
 
-    /// Installs the anchoring runtime over an earlier build, and with it the owner
-    /// `t12_anchoring_owner` gives this chain. The rest of the storage stays, and a chain
-    /// without the contract gets none.
+    /// Installs the T12 runtime over the launch build, storage kept, and fills an empty owner slot
+    /// from the validator registry; a registry without an owner leaves it empty for good.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
-        // Every block past T12 comes through here; only the first one gets past this check.
-        static CODE_HASH: LazyLock<B256> = LazyLock::new(|| keccak256(&ANCHORING_RUNTIME));
-
+        let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        if info.is_empty_code_hash() || info.code_hash == *CODE_HASH {
+        // Every block past T12 comes through here; only the first one gets past this check.
+        if info.code_hash != ANCHORING_RUNTIME_HASH {
             return Ok(());
         }
+        let code = Bytecode::new_legacy(T12_ANCHORING_RUNTIME);
         let mut account = Account::from(info);
-        account.info.code_hash = *CODE_HASH;
-        account.info.code = Some(Bytecode::new_legacy(ANCHORING_RUNTIME));
-        if let Some(owner) = t12_anchoring_owner(self.inner.spec.chain().id()) {
-            let slot = U256::from(ANCHORING_OWNER_SLOT);
-            let original_value = db
-                .storage(ANCHORING_ADDRESS, slot)
+        account.info.code_hash = code.hash_slow();
+        account.info.code = Some(code);
+        let unowned = db
+            .storage(ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT)
+            .map_err(BlockExecutionError::other)?
+            .is_zero();
+        if unowned {
+            let owner = db
+                .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+                    ValidatorConfigV2::default().owner()
+                })
                 .map_err(BlockExecutionError::other)?;
-            account.storage.insert(
-                slot,
-                EvmStorageSlot::new_changed(
-                    original_value,
-                    owner.into_word().into(),
-                    TransactionId::ZERO,
-                ),
-            );
+            if !owner.is_zero() {
+                account.storage.insert(
+                    ANCHORING_OWNER_SLOT,
+                    EvmStorageSlot::new_changed(
+                        U256::ZERO,
+                        owner.into_word().into(),
+                        TransactionId::ZERO,
+                    ),
+                );
+            }
         }
         account.mark_touch();
         db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
@@ -776,6 +784,7 @@ mod tests {
         spec::{DEV, NVNM_TESTNET},
     };
     use tempo_contracts::{
+        anchoring::{ANCHORING_RUNTIME, IAnchoring, T12_ANCHORING_RUNTIME_HASH},
         precompiles::{
             CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, PATH_USD_ADDRESS, ZONE_FACTORY_ADDRESS,
             ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
@@ -1926,34 +1935,29 @@ mod tests {
         }
     }
 
-    /// The first T12 block installs the anchoring runtime and, on the testnet, its owner. Later
-    /// blocks leave the owner to the contract, and a chain starting at T12 keeps its genesis.
     #[test]
     fn anchoring_upgrade_activates_at_t12() {
-        let owner_slot = U256::from(ANCHORING_OWNER_SLOT);
-        let earlier = Bytes::from_static(&[0x00]);
-        let named_id = NVNM_TESTNET.chain().id();
-        let named_owner = t12_anchoring_owner(named_id).unwrap();
-        let unnamed_id = DEV.chain().id();
-        assert_eq!(t12_anchoring_owner(unnamed_id), None);
-        let owner = Address::with_last_byte(0xB0);
-        let old = Some((&earlier, owner));
-        let new = Some((&ANCHORING_RUNTIME, owner));
-        let named = Some((&ANCHORING_RUNTIME, named_owner));
-        for (genesis_timestamp, t12_time, timestamp, launched, chain_id, expected) in [
-            (0, u64::MAX, 10, old, named_id, old),
-            (0, 10, 9, old, named_id, old),
-            (0, 10, 10, old, named_id, named),
-            (0, 10, 10, old, unnamed_id, new),
-            (0, 10, 11, new, named_id, new),
+        let registry = Address::with_last_byte(0xA0);
+        let named = Address::with_last_byte(0xB0);
+        let old = |owner| Some((ANCHORING_RUNTIME, owner));
+        let new = |owner| Some((T12_ANCHORING_RUNTIME, owner));
+        let unowned = || old(Address::ZERO);
+        let other = || Some((Bytes::from_static(&[0x00]), Address::ZERO));
+        for (genesis_timestamp, t12_time, timestamp, launched, registry, expected) in [
+            (0, u64::MAX, 10, unowned(), registry, unowned()),
+            (0, 10, 9, unowned(), registry, unowned()),
+            (0, 10, 10, unowned(), registry, new(registry)),
+            (0, 10, 10, old(named), registry, new(named)),
+            (0, 10, 10, unowned(), Address::ZERO, new(Address::ZERO)),
+            (0, 10, 11, new(Address::ZERO), registry, new(Address::ZERO)),
             // The actual genesis timestamp, not just t12Time == 0.
-            (100, 50, 101, old, named_id, old),
-            (100, 100, 101, old, named_id, old),
-            (0, 10, 10, None, named_id, None),
+            (100, 50, 101, unowned(), registry, unowned()),
+            (100, 100, 101, unowned(), registry, unowned()),
+            (0, 10, 10, None, registry, None),
+            (0, 10, 10, other(), registry, other()),
         ] {
             let mut genesis = DEV.genesis().clone();
             genesis.timestamp = genesis_timestamp;
-            genesis.config.chain_id = chain_id;
             genesis
                 .config
                 .extra_fields
@@ -1962,21 +1966,22 @@ mod tests {
             let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
             let mut db = State::builder().with_bundle_update().build();
             if let Some((code, owner)) = launched {
-                let code = Bytecode::new_legacy(code.clone());
-                let info = AccountInfo {
-                    nonce: 1,
-                    code_hash: code.hash_slow(),
-                    code: Some(code),
-                    ..Default::default()
-                };
                 db.insert_account_with_storage(
                     ANCHORING_ADDRESS,
-                    info,
-                    [(owner_slot, owner.into_word().into())]
+                    AccountInfo::from_bytecode(Bytecode::new_legacy(code)),
+                    [(ANCHORING_OWNER_SLOT, owner.into_word().into())]
                         .into_iter()
                         .collect(),
                 );
             }
+            // The registry's `config` is its first slot, the owner its low bytes.
+            db.insert_account_with_storage(
+                VALIDATOR_CONFIG_V2_ADDRESS,
+                AccountInfo::default(),
+                [(U256::ZERO, registry.into_word().into())]
+                    .into_iter()
+                    .collect(),
+            );
             let mut executor = TestExecutorBuilder::default()
                 .with_spec(if timestamp >= t12_time {
                     TempoHardfork::T12
@@ -1995,16 +2000,100 @@ mod tests {
                 .account_info();
             let code = info.as_ref().map(|info| {
                 assert_eq!(info.nonce, 1);
-                info.code.as_ref().unwrap().original_bytes()
+                let code = info.code.as_ref().unwrap();
+                assert_eq!(info.code_hash, code.hash_slow());
+                code.original_bytes()
             });
-            let owner = revm::Database::storage(&mut db, ANCHORING_ADDRESS, owner_slot).unwrap();
+            let owner =
+                revm::Database::storage(&mut db, ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT).unwrap();
             assert_eq!(
-                code.as_ref()
-                    .map(|code| (code, Address::from_word(owner.into()))),
+                code.map(|code| (code, Address::from_word(owner.into()))),
                 expected,
-                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}, chain {chain_id}"
+                "genesis at {genesis_timestamp}, T12 at {t12_time}, block at {timestamp}"
             );
         }
+    }
+
+    #[test]
+    fn the_testnet_contract_takes_its_validator_admin_at_t12() {
+        let mut genesis = NVNM_TESTNET.genesis().clone();
+        genesis
+            .config
+            .extra_fields
+            .insert_value("t12Time".into(), 10)
+            .unwrap();
+        let mut db = State::builder().with_bundle_update().build();
+        for address in [ANCHORING_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS] {
+            let account = &genesis.alloc[&address];
+            let info =
+                AccountInfo::from_bytecode(Bytecode::new_legacy(account.code.clone().unwrap()));
+            let storage = account
+                .storage
+                .iter()
+                .flatten()
+                .map(|(slot, value)| ((*slot).into(), (*value).into()))
+                .collect();
+            db.insert_account_with_storage(address, info, storage);
+        }
+        let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
+        let mut executor = TestExecutorBuilder::default()
+            .with_spec(TempoHardfork::T12)
+            .with_parent_beacon_block_root(B256::ZERO)
+            .build(&mut db, &chainspec);
+        executor.evm_mut().ctx_mut().block.timestamp = U256::from(10);
+        executor.apply_pre_execution_changes().unwrap();
+
+        // Only the T12 build answers `owner()`.
+        let calldata = IAnchoring::ownerCall {}.abi_encode().into();
+        let result = executor
+            .evm_mut()
+            .transact_system_call(Address::ZERO, ANCHORING_ADDRESS, calldata)
+            .unwrap();
+        let admin = address!("0xd5fCEca17cE41Ebd2e88Ce730291a341864150eb");
+        assert_eq!(result.result.output().unwrap()[12..], admin[..]);
+    }
+
+    #[test]
+    fn test_upgrade_anchoring_at_boundary_dispatches_state_hook() {
+        let chainspec = test_chainspec();
+        let owner = Address::with_last_byte(0xA0);
+        let mut db = State::builder().with_bundle_update().build();
+        db.insert_account(
+            ANCHORING_ADDRESS,
+            AccountInfo::from_bytecode(Bytecode::new_legacy(ANCHORING_RUNTIME)),
+        );
+        db.insert_account_with_storage(
+            VALIDATOR_CONFIG_V2_ADDRESS,
+            AccountInfo::default(),
+            [(U256::ZERO, owner.into_word().into())]
+                .into_iter()
+                .collect(),
+        );
+        let mut executor = TestExecutorBuilder::default()
+            .with_parent_beacon_block_root(B256::ZERO)
+            .build(&mut db, &chainspec);
+
+        let hook_calls: Arc<Mutex<Vec<EvmState>>> = Arc::new(Mutex::new(Vec::new()));
+        let hook_calls_clone = hook_calls.clone();
+        executor
+            .evm_mut()
+            .db_mut()
+            .set_state_hook(Some(Box::new(move |state: EvmState| {
+                hook_calls_clone.lock().unwrap().push(state);
+            })));
+
+        executor.upgrade_anchoring_at_boundary().unwrap();
+        executor.upgrade_anchoring_at_boundary().unwrap();
+        drop(executor);
+
+        // The install and nothing else, once.
+        let calls = hook_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 1);
+        let account = &calls[0][&ANCHORING_ADDRESS];
+        assert_eq!(account.info.code_hash, T12_ANCHORING_RUNTIME_HASH);
+        let slot = account.storage[&ANCHORING_OWNER_SLOT].present_value;
+        assert_eq!(Address::from_word(slot.into()), owner);
     }
 
     #[test]

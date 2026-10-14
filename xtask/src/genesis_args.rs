@@ -42,7 +42,9 @@ use tempo_consensus_config::{SigningKey, SigningShare};
 use tempo_contracts::{
     ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
     PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
-    anchoring::{ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME},
+    anchoring::{
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME, T12_ANCHORING_RUNTIME,
+    },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
         INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
@@ -592,6 +594,7 @@ impl GenesisArgs {
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, &mut genesis_alloc);
         insert_anchoring_contract_at_genesis(
             self.anchoring,
+            self.t12_time,
             self.anchoring_admin,
             &mut genesis_alloc,
         );
@@ -725,11 +728,11 @@ impl GenesisArgs {
     }
 }
 
-/// Places the anchoring contract, and its owner where one is named. Every other slot is the
-/// dump's: the corpus, and the address the source chain called its admin, which this build does
-/// not read.
+/// Places the anchoring contract, the T12 build on a chain starting at T12 and the launch build
+/// else, and its owner where one is named. Every other slot is the dump's.
 fn insert_anchoring_contract_at_genesis(
     anchoring: bool,
+    t12_time: u64,
     admin: Option<Address>,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) {
@@ -737,16 +740,17 @@ fn insert_anchoring_contract_at_genesis(
         return;
     }
     println!("Initializing the anchoring contract");
-    let storage = admin.map(|admin| {
-        BTreeMap::from([(
-            B256::from(U256::from(ANCHORING_OWNER_SLOT)),
-            admin.into_word(),
-        )])
-    });
+    let code = if t12_time == 0 {
+        T12_ANCHORING_RUNTIME
+    } else {
+        ANCHORING_RUNTIME
+    };
+    let storage =
+        admin.map(|admin| BTreeMap::from([(B256::from(ANCHORING_OWNER_SLOT), admin.into_word())]));
     genesis_alloc.insert(
         ANCHORING_ADDRESS,
         GenesisAccount {
-            code: Some(ANCHORING_RUNTIME),
+            code: Some(code),
             nonce: Some(1),
             storage,
             ..Default::default()
@@ -1392,18 +1396,23 @@ mod tests {
 #[cfg(test)]
 mod anchoring_tests {
     use super::*;
+    use alloy::sol_types::SolCall as _;
+    use tempo_contracts::anchoring::IAnchoring;
 
-    fn alloc(anchoring: bool, admin: Option<Address>) -> BTreeMap<Address, GenesisAccount> {
+    fn alloc(
+        anchoring: bool,
+        t12_time: u64,
+        admin: Option<Address>,
+    ) -> BTreeMap<Address, GenesisAccount> {
         let mut alloc = BTreeMap::new();
-        insert_anchoring_contract_at_genesis(anchoring, admin, &mut alloc);
+        insert_anchoring_contract_at_genesis(anchoring, t12_time, admin, &mut alloc);
         alloc
     }
 
-    /// The runtime this binary embeds, and the nonce a deployment would have left. Every slot is
-    /// the dump's.
+    /// The launch build and the nonce a deployment would have left; every slot is the dump's.
     #[test]
-    fn the_contract_is_placed_with_no_storage() {
-        let alloc = alloc(true, None);
+    fn a_chain_scheduling_t12_later_starts_on_the_launch_build() {
+        let alloc = alloc(true, 1, None);
         let anchoring = &alloc[&ANCHORING_ADDRESS];
         assert_eq!(anchoring.code, Some(ANCHORING_RUNTIME));
         assert_eq!(anchoring.nonce, Some(1));
@@ -1415,8 +1424,9 @@ mod anchoring_tests {
     #[test]
     fn a_named_owner_is_the_one_the_contract_answers_with() {
         let admin = address!("0x00000000000000000000000000000000000000A0");
-        let alloc = alloc(true, Some(admin));
+        let alloc = alloc(true, 0, Some(admin));
         let anchoring = &alloc[&ANCHORING_ADDRESS];
+        assert_eq!(anchoring.code, Some(T12_ANCHORING_RUNTIME));
 
         let mut evm = setup_tempo_evm(1);
         evm.db_mut().insert_account_info(
@@ -1431,7 +1441,7 @@ mod anchoring_tests {
                 .insert_account_storage(ANCHORING_ADDRESS, (*slot).into(), (*value).into())
                 .unwrap();
         }
-        let owner_call = Bytes::from_static(&[0x8d, 0xa5, 0xcb, 0x5b]); // owner()
+        let owner_call = IAnchoring::ownerCall {}.abi_encode().into();
         let result = evm
             .transact_system_call(Address::ZERO, ANCHORING_ADDRESS, owner_call)
             .unwrap()
@@ -1442,6 +1452,6 @@ mod anchoring_tests {
     /// Upstream's own networks generate the same way and must not pick it up.
     #[test]
     fn without_the_flag_the_genesis_carries_none() {
-        assert!(alloc(false, None).is_empty());
+        assert!(alloc(false, 0, None).is_empty());
     }
 }
