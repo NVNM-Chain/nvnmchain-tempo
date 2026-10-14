@@ -11,6 +11,10 @@ ignore = [
   # https://rustsec.org/advisories/RUSTSEC-2026-0173 proc-macro-error2 is unmaintained
   # and is pulled in transitively by upstream crates with no safe upgrade available.
   "RUSTSEC-2026-0173",
+  # https://rustsec.org/advisories/RUSTSEC-2026-0253 lru 0.16 `pop()` is unsound when a
+  # key's Drop panics. Only ratatui-core 0.1.0 (reth's TUIs) is held on 0.16, with plain-data keys.
+  # TODO: remove once Cargo.lock has ratatui-core 0.1.2.
+  "RUSTSEC-2026-0253",
 ]
 
 # This section is considered when running `cargo deny check bans`.
