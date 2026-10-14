@@ -8,9 +8,14 @@ use crate::shadow_replay::{Boundary, Evidence, ObservedTx, TxOutcome, fees::post
 use alloy::{
     consensus::Transaction as _,
     primitives::{Address, B256, KECCAK256_EMPTY, TxKind, U256, address, keccak256},
+    sol_types::{Revert, SolError as _},
 };
+use std::sync::LazyLock;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::{
+    anchoring::{
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH,
+    },
     precompiles::*,
     zones::{
         T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
@@ -276,6 +281,51 @@ const T13_ZONE_RUNTIME_UPGRADE: Expectation = Expectation {
     },
 };
 
+/// Accepts the T12 anchoring install: the code change and, with it, an owner in an empty slot.
+const T12_ANCHORING_UPGRADE: Expectation = Expectation {
+    id: "t12.anchoring-upgrade",
+    check: |ctx, field| {
+        if ctx.boundary != Boundary::PreBlock || field.address != Some(ANCHORING_ADDRESS) {
+            return None;
+        }
+        let real = ctx.real.pre_block.as_ref()?;
+        let shadow = ctx.shadow.pre_block.as_ref()?;
+        let real = AccountDelta(real.transitions.get(&ANCHORING_ADDRESS));
+        let shadow = AccountDelta(shadow.transitions.get(&ANCHORING_ADDRESS));
+        if real.info(|info| info.code_hash).is_some()
+            || shadow.info(|info| info.code_hash)
+                != Some((ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH))
+        {
+            return None;
+        }
+        match (field.name, field.slot) {
+            ("code", None) => Some(()),
+            ("storage", Some(slot)) if slot == ANCHORING_OWNER_SLOT => {
+                shadow.storage(slot)?.0.is_zero().then_some(())
+            }
+            _ => None,
+        }
+    },
+};
+
+/// What the launch build's EOA gate reverted with: a call from a contract, whatever the
+/// transaction's own target.
+static EOA_GATE_REFUSAL: LazyLock<B256> =
+    LazyLock::new(|| keccak256(Revert::from("sender not an eoa").abi_encode()));
+
+/// The T12 build has no EOA gate, so a transaction the launch build refused for one now runs
+/// through, with whatever effects that has.
+const T12_ANCHORING_CALLS: Expectation = Expectation {
+    id: "t12.anchoring-calls",
+    check: |ctx, field| {
+        let (real, _) = ctx.observed_txs()?;
+        (real.outcome == TxOutcome::Revert
+            && real.output_hash == *EOA_GATE_REFUSAL
+            && field.name != "execution")
+            .then_some(())
+    },
+};
+
 /// Fork-specific checks are ordered oldest-first; baseline fee normalization is added separately.
 const REGISTRY: &[(TempoHardfork, &[Expectation])] = &[
     (
@@ -284,6 +334,8 @@ const REGISTRY: &[(TempoHardfork, &[Expectation])] = &[
             T12_ALLOW_PRECOMPILE_ABI_SUFFIX,
             T12_TIP20_CHANNEL,
             T12_STABLECOIN_DEX,
+            T12_ANCHORING_UPGRADE,
+            T12_ANCHORING_CALLS,
         ],
     ),
     (TempoHardfork::T13, &[T13_ZONE_RUNTIME_UPGRADE]),
@@ -363,6 +415,112 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_anchoring_upgrade_with_its_first_owner() {
+        let owner_slot = ANCHORING_OWNER_SLOT;
+        let owner = U256::from(0xA0);
+        let transition = |before, after, owner_before| {
+            let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
+            let mut state = reth_revm::db::TransitionState::default();
+            state.transitions.insert(
+                ANCHORING_ADDRESS,
+                TransitionAccount {
+                    previous_info: info(before),
+                    info: info(after),
+                    storage: [(owner_slot, StorageSlot::new_changed(owner_before, owner))]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+            Evidence {
+                pre_block: Some(state),
+                ..Default::default()
+            }
+        };
+        let unchanged = evidence(&[]);
+        let check = |real: &Evidence, shadow: &Evidence, name, slot| {
+            let ctx = Context {
+                boundary: Boundary::PreBlock,
+                real,
+                shadow,
+                base_fee: None,
+                tx: None,
+            };
+            let field = Field {
+                name,
+                address: Some(ANCHORING_ADDRESS),
+                slot,
+                fee_associated: false,
+            };
+            (T12_ANCHORING_UPGRADE.check)(&ctx, &field).is_some()
+        };
+        let accepts = |shadow: &Evidence, name, slot| check(&unchanged, shadow, name, slot);
+        let (launch, t12) = (ANCHORING_RUNTIME_HASH, T12_ANCHORING_RUNTIME_HASH);
+
+        let upgraded = transition(launch, t12, U256::ZERO);
+        assert!(accepts(&upgraded, "code", None));
+        assert!(accepts(&upgraded, "storage", Some(owner_slot)));
+        assert!(!accepts(&upgraded, "storage", Some(U256::ZERO)));
+
+        let replaced = transition(launch, t12, U256::from(0xB0));
+        assert!(!accepts(&replaced, "storage", Some(owner_slot)));
+        // A canonical arm that swapped the code too has nothing left to explain.
+        assert!(!check(&upgraded, &upgraded, "code", None));
+
+        for other in [
+            transition(t12, t12, U256::ZERO),
+            transition(launch, launch, U256::ZERO),
+            transition(keccak256(b"another build"), t12, U256::ZERO),
+        ] {
+            assert!(!accepts(&other, "code", None));
+            assert!(!accepts(&other, "storage", Some(owner_slot)));
+        }
+    }
+
+    #[test]
+    fn accepts_what_follows_a_call_the_eoa_gate_refused() {
+        let tx = |outcome, output_hash| Evidence {
+            txs: vec![Ok(ObservedTx {
+                outcome,
+                output_hash,
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let refused = tx(TxOutcome::Revert, *EOA_GATE_REFUSAL);
+        let ran = tx(TxOutcome::Success, KECCAK256_EMPTY);
+        let field = |name| Field {
+            name,
+            address: Some(ANCHORING_ADDRESS),
+            slot: None,
+            fee_associated: false,
+        };
+        let check = |real: &Evidence, boundary, name| {
+            let ctx = Context {
+                boundary,
+                real,
+                shadow: &ran,
+                base_fee: None,
+                tx: None,
+            };
+            (T12_ANCHORING_CALLS.check)(&ctx, &field(name)).is_some()
+        };
+        let transaction = Boundary::Transaction(0);
+
+        assert!(check(&refused, transaction, "storage"));
+        assert!(check(&refused, transaction, "output"));
+        assert!(!check(&refused, transaction, "execution"));
+        assert!(!check(&refused, Boundary::PreBlock, "storage"));
+        // Any other revert, or a success, is not the gate's.
+        assert!(!check(
+            &tx(TxOutcome::Revert, KECCAK256_EMPTY),
+            transaction,
+            "storage"
+        ));
+        assert!(!check(&ran, transaction, "storage"));
+    }
+
+    #[test]
     fn selects_only_newly_active_forks() {
         use TempoHardfork::*;
         let ids = |a, b| {
@@ -378,6 +536,8 @@ mod tests {
                 T12_ALLOW_PRECOMPILE_ABI_SUFFIX.id,
                 T12_TIP20_CHANNEL.id,
                 T12_STABLECOIN_DEX.id,
+                T12_ANCHORING_UPGRADE.id,
+                T12_ANCHORING_CALLS.id,
             ]
         );
         assert_eq!(ids(T12, T13), [FEE_STATE.id, T13_ZONE_RUNTIME_UPGRADE.id]);
