@@ -15,6 +15,16 @@ ignore = [
   # key's Drop panics. Only ratatui-core 0.1.0 (reth's TUIs) is held on 0.16, with plain-data keys.
   # TODO: remove once Cargo.lock has ratatui-core 0.1.2.
   "RUSTSEC-2026-0253",
+  # Release v1.16.1 exception: retain rustls 0.23.45 for dependency consistency.
+  # Remove these exceptions when upgrading rustls to >=0.23.46.
+  # Client session Debug implementations expose TLS secrets.
+  "RUSTSEC-2026-0346",
+  # Buffered application data sent after ECH rejection.
+  "RUSTSEC-2026-0347",
+  # Excessive allocation during Brotli certificate decompression.
+  "RUSTSEC-2026-0348",
+  # Unauthenticated ServerHello can downgrade subsequent key exchanges.
+  "RUSTSEC-2026-0349",
 ]
 
 # This section is considered when running `cargo deny check bans`.
