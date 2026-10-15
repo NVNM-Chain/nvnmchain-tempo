@@ -1,6 +1,6 @@
 //! The anchoring contract, as the genesis alloc places it. `cargo xtask anchoring-runtime` copies
 //! the proxy in from the contracts repo's `layout/` and checks the implementation there: both pins
-//! are contracts `6971b53`'s, whose `layout/anchoring.json` fixes the slots the dump writer and the
+//! are contracts `dcf8c09`'s, whose `layout/anchoring.json` fixes the slots the dump writer and the
 //! explorer read. The corpus arrives separately, from the dump loader.
 
 use alloy_primitives::{Address, B256, Bytes, U256, address, b256};
@@ -31,12 +31,12 @@ pub const T12_ANCHORING_PROXY_RUNTIME_HASH: B256 =
 /// Where an ordinary deployment of `layout/anchoring.init.bin` through Arachnid's factory, salt
 /// zero, puts the implementation the proxy points to.
 pub const T12_ANCHORING_IMPLEMENTATION: Address =
-    address!("0x203FcB8765f54f53de69EcD1002e356Fa1600bC4");
+    address!("0xF873bbD8B4ed0580425592a37b218BC46A628C70");
 
 /// `keccak256` of `layout/anchoring.bin`, the code that deployment leaves: the proxy points at no
 /// other.
 pub const T12_ANCHORING_IMPLEMENTATION_HASH: B256 =
-    b256!("9eddafc9b2758f8c604d996240b35cfb7e51104c7dc5a00067dec187eef179cc");
+    b256!("3a426e639db460f80b40dd88cd0712830b4f5ee44301fd10decbf07204fa023f");
 
 /// ERC-1967's implementation slot, which the proxy reads.
 pub const ERC1967_IMPLEMENTATION_SLOT: U256 = U256::from_be_bytes(
