@@ -314,6 +314,34 @@ const T12_ANCHORING_UPGRADE: Expectation = Expectation {
     },
 };
 
+/// Accepts the zone factory leaving `INITIAL_FACTORY_OWNER` at T12 with its `nextZoneId` kept.
+const T12_ZONE_FACTORY_HANDOVER: Expectation = Expectation {
+    id: "t12.zone-factory-handover",
+    check: |ctx, field| {
+        if ctx.boundary != Boundary::PreBlock
+            || field.address != Some(ZONE_FACTORY_ADDRESS)
+            || field.name != "storage"
+            || field.slot != Some(U256::ZERO)
+        {
+            return None;
+        }
+        let real = ctx.real.pre_block.as_ref()?;
+        let shadow = ctx.shadow.pre_block.as_ref()?;
+        if AccountDelta(real.transitions.get(&ZONE_FACTORY_ADDRESS))
+            .storage(U256::ZERO)
+            .is_some()
+        {
+            return None;
+        }
+        let factory = AccountDelta(shadow.transitions.get(&ZONE_FACTORY_ADDRESS));
+        let (before, after) = factory.storage(U256::ZERO)?;
+        let (owner_before, next_zone_id) = zone_factory_config_fields(before);
+        (owner_before == INITIAL_FACTORY_OWNER
+            && zone_factory_config_fields(after).1 == next_zone_id)
+            .then_some(())
+    },
+};
+
 /// What the launch build's EOA gate reverted with: a call from a contract, whatever the
 /// transaction's own target.
 static EOA_GATE_REFUSAL: LazyLock<B256> =
@@ -341,6 +369,7 @@ const REGISTRY: &[(TempoHardfork, &[Expectation])] = &[
             T12_TIP20_CHANNEL,
             T12_STABLECOIN_DEX,
             T12_ANCHORING_UPGRADE,
+            T12_ZONE_FACTORY_HANDOVER,
             T12_ANCHORING_CALLS,
         ],
     ),
@@ -492,6 +521,69 @@ mod tests {
     }
 
     #[test]
+    fn accepts_the_zone_factory_leaving_upstreams_owner() {
+        let config = zone_factory_config;
+        let registry = Address::with_last_byte(0xA0);
+        let transition = |anchoring_after, before, after| {
+            let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
+            let mut state = reth_revm::db::TransitionState::default();
+            state.transitions.insert(
+                ANCHORING_ADDRESS,
+                TransitionAccount {
+                    previous_info: info(T11_ANCHORING_RUNTIME_HASH),
+                    info: info(anchoring_after),
+                    ..Default::default()
+                },
+            );
+            state.transitions.insert(
+                ZONE_FACTORY_ADDRESS,
+                TransitionAccount {
+                    storage: [(U256::ZERO, StorageSlot::new_changed(before, after))]
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            );
+            Evidence {
+                pre_block: Some(state),
+                ..Default::default()
+            }
+        };
+        let unchanged = evidence(&[]);
+        let accepts = |shadow: &Evidence| {
+            let ctx = Context {
+                boundary: Boundary::PreBlock,
+                real: &unchanged,
+                shadow,
+                base_fee: None,
+                tx: None,
+            };
+            let field = Field {
+                name: "storage",
+                address: Some(ZONE_FACTORY_ADDRESS),
+                slot: Some(U256::ZERO),
+                fee_associated: false,
+            };
+            (T12_ZONE_FACTORY_HANDOVER.check)(&ctx, &field).is_some()
+        };
+        let moved =
+            |before, after| accepts(&transition(T12_ANCHORING_PROXY_RUNTIME_HASH, before, after));
+        let (upstream, other) = (INITIAL_FACTORY_OWNER, Address::with_last_byte(0xB0));
+
+        assert!(moved(config(upstream, 1), config(registry, 1)));
+        assert!(moved(config(upstream, 3), config(registry, 3)));
+        assert!(!moved(config(upstream, 3), config(registry, 1)));
+        assert!(!moved(config(other, 1), config(registry, 1)));
+        // The hand-over does not wait for the anchoring install.
+        let alone = transition(
+            T11_ANCHORING_RUNTIME_HASH,
+            config(upstream, 1),
+            config(registry, 1),
+        );
+        assert!(accepts(&alone));
+    }
+
+    #[test]
     fn accepts_what_follows_a_call_the_eoa_gate_refused() {
         let tx = |outcome, output_hash| Evidence {
             txs: vec![Ok(ObservedTx {
@@ -551,6 +643,7 @@ mod tests {
                 T12_TIP20_CHANNEL.id,
                 T12_STABLECOIN_DEX.id,
                 T12_ANCHORING_UPGRADE.id,
+                T12_ZONE_FACTORY_HANDOVER.id,
                 T12_ANCHORING_CALLS.id,
             ]
         );

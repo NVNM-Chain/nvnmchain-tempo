@@ -33,7 +33,8 @@ use tempo_contracts::{
         ADDRESS_REGISTRY_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
         INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
         SIGNATURE_VERIFIER_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-        VALIDATOR_CONFIG_V2_ADDRESS, initial_zone_factory_state, t13_zone_factory_state,
+        VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS, initial_zone_factory_state,
+        t13_zone_factory_state, zone_factory_config, zone_factory_config_fields,
     },
 };
 use tempo_precompiles::{storage::StorageActions, validator_config_v2::ValidatorConfigV2};
@@ -322,7 +323,6 @@ where
     /// owner, or none if the registry has none. Every block past T12 looks until then; the launch
     /// build's hash is the gate, so this runs once and an owner transferred to zero stays zero.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
-        let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
@@ -338,11 +338,7 @@ where
         if implementation.code_hash != T12_ANCHORING_IMPLEMENTATION_HASH {
             return Ok(());
         }
-        let owner = db
-            .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
-                ValidatorConfigV2::default().owner()
-            })
-            .map_err(BlockExecutionError::other)?;
+        let owner = self.validator_registry_owner()?;
         let mut account = Account::from(info);
         account
             .info
@@ -360,8 +356,68 @@ where
             );
         }
         account.mark_touch();
-        db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
+        self.inner
+            .evm
+            .db_mut()
+            .commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
         Ok(())
+    }
+
+    /// Gives a zone factory still owned by upstream's `INITIAL_FACTORY_OWNER` to the validator
+    /// registry's owner, if it has one, its zone count kept. A chain without the anchoring
+    /// contract is one of upstream's, and keeps its owner. Nothing records a hand-over: a factory
+    /// given back to upstream's key is taken again.
+    fn hand_over_zone_factory_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        let db = self.inner.evm.db_mut();
+        let config = db
+            .storage(ZONE_FACTORY_ADDRESS, U256::ZERO)
+            .map_err(BlockExecutionError::other)?;
+        let (factory_owner, next_zone_id) = zone_factory_config_fields(config);
+        if factory_owner != INITIAL_FACTORY_OWNER {
+            return Ok(());
+        }
+        let anchoring = db
+            .basic(ANCHORING_ADDRESS)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default();
+        if anchoring.is_empty_code_hash() {
+            return Ok(());
+        }
+        let info = db
+            .basic(ZONE_FACTORY_ADDRESS)
+            .map_err(BlockExecutionError::other)?
+            .unwrap_or_default();
+        let owner = self.validator_registry_owner()?;
+        if owner.is_zero() {
+            return Ok(());
+        }
+        let mut factory = Account::from(info);
+        factory.storage.insert(
+            U256::ZERO,
+            EvmStorageSlot::new_changed(
+                config,
+                zone_factory_config(owner, next_zone_id),
+                TransactionId::ZERO,
+            ),
+        );
+        factory.mark_touch();
+        self.inner
+            .evm
+            .db_mut()
+            .commit(EvmState::from_iter([(ZONE_FACTORY_ADDRESS, factory)]));
+        Ok(())
+    }
+
+    /// The validator registry's owner, zero where it has none.
+    fn validator_registry_owner(&mut self) -> Result<Address, BlockExecutionError> {
+        let spec = self.evm().cfg.spec;
+        self.inner
+            .evm
+            .db_mut()
+            .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+                ValidatorConfigV2::default().owner()
+            })
+            .map_err(BlockExecutionError::other)
     }
 
     fn apply_current_committee_system_call(&mut self) -> Result<(), BlockExecutionError> {
@@ -593,6 +649,7 @@ where
         }
         if self.inner.spec.is_t12_active_at_timestamp(timestamp) {
             self.upgrade_anchoring_at_boundary()?;
+            self.hand_over_zone_factory_at_boundary()?;
         }
         // Chains starting at T13 supply their runtime code in genesis. Preserve those
         // allocations (including locally compiled contracts on test chains). Chains
@@ -786,8 +843,8 @@ mod tests {
     use tempo_contracts::{
         anchoring::{T11_ANCHORING_RUNTIME, T12_ANCHORING_PROXY_RUNTIME_HASH},
         precompiles::{
-            CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, PATH_USD_ADDRESS, ZONE_FACTORY_ADDRESS,
-            ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+            CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee, PATH_USD_ADDRESS, ZONE_MESSENGER_ADDRESS,
+            ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS, initial_zone_factory_config,
         },
         zones::{
             T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
@@ -1966,7 +2023,7 @@ mod tests {
                 .unwrap();
             let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
             let mut db = State::builder().with_bundle_update().build();
-            let upgraded = launch != expected;
+            let (upgraded, present) = (launch != expected, launch.is_some());
             if let Some((code, owner)) = launch {
                 db.insert_account_with_storage(
                     ANCHORING_ADDRESS,
@@ -2023,11 +2080,22 @@ mod tests {
             let case = format!("T12 at {t12_time}, block at {timestamp}");
             assert_eq!(code.map(|code| (code, owner)), expected, "{case}");
             assert_eq!(pointed == T12_ANCHORING_IMPLEMENTATION, upgraded, "{case}");
+            // The zone factory T10 installs in the same block goes to the registry's owner in
+            // any T12 block where the anchoring contract has code, deployed implementation or not.
+            let handed = timestamp >= t12_time && present && registry != zero;
+            let zones = if handed {
+                registry
+            } else {
+                INITIAL_FACTORY_OWNER
+            };
+            let config =
+                revm::Database::storage(&mut db, ZONE_FACTORY_ADDRESS, U256::ZERO).unwrap();
+            assert_eq!(config, initial_zone_factory_config(zones), "{case}");
         }
     }
 
     #[test]
-    fn the_testnet_contract_takes_its_validator_admin_at_t12() {
+    fn the_testnet_contracts_take_their_validator_admin_at_t12() {
         let mut genesis = NVNM_TESTNET.genesis().clone();
         genesis
             .config
@@ -2035,7 +2103,11 @@ mod tests {
             .insert_value("t12Time".into(), 10)
             .unwrap();
         let mut db = State::builder().with_bundle_update().build();
-        for address in [ANCHORING_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS] {
+        for address in [
+            ANCHORING_ADDRESS,
+            VALIDATOR_CONFIG_V2_ADDRESS,
+            ZONE_FACTORY_ADDRESS,
+        ] {
             let account = &genesis.alloc[&address];
             let info =
                 AccountInfo::from_bytecode(Bytecode::new_legacy(account.code.clone().unwrap()));
@@ -2068,10 +2140,13 @@ mod tests {
         let owner = revm::Database::storage(&mut db, ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT);
         let admin = address!("0xd5fCEca17cE41Ebd2e88Ce730291a341864150eb");
         assert_eq!(Address::from_word(owner.unwrap().into()), admin);
+        // The factory goes to the same owner, no zone created.
+        let config = revm::Database::storage(&mut db, ZONE_FACTORY_ADDRESS, U256::ZERO);
+        assert_eq!(config.unwrap(), initial_zone_factory_config(admin));
     }
 
     #[test]
-    fn test_upgrade_anchoring_at_boundary_dispatches_state_hook() {
+    fn test_boundary_hand_overs_dispatch_state_hooks() {
         let chainspec = test_chainspec();
         let owner = Address::with_last_byte(0xA0);
         let mut db = State::builder().with_bundle_update().build();
@@ -2082,6 +2157,16 @@ mod tests {
         db.insert_account(
             T12_ANCHORING_IMPLEMENTATION,
             AccountInfo::default().with_code_hash(T12_ANCHORING_IMPLEMENTATION_HASH),
+        );
+        db.insert_account_with_storage(
+            ZONE_FACTORY_ADDRESS,
+            AccountInfo::default(),
+            [(
+                U256::ZERO,
+                initial_zone_factory_config(INITIAL_FACTORY_OWNER),
+            )]
+            .into_iter()
+            .collect(),
         );
         db.insert_account_with_storage(
             VALIDATOR_CONFIG_V2_ADDRESS,
@@ -2103,15 +2188,18 @@ mod tests {
                 hook_calls_clone.lock().unwrap().push(state);
             })));
 
-        executor.upgrade_anchoring_at_boundary().unwrap();
-        executor.upgrade_anchoring_at_boundary().unwrap();
+        for _ in 0..2 {
+            executor.upgrade_anchoring_at_boundary().unwrap();
+            executor.hand_over_zone_factory_at_boundary().unwrap();
+        }
         drop(executor);
 
-        // The install and nothing else, once.
+        // Each install once, each its own account and nothing else.
         let calls = hook_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].len(), 1);
-        let account = &calls[0][&ANCHORING_ADDRESS];
+        assert_eq!(calls.len(), 2);
+        let [anchoring, factory] = [&calls[0], &calls[1]];
+        assert_eq!(anchoring.len(), 1);
+        let account = &anchoring[&ANCHORING_ADDRESS];
         assert_eq!(account.info.code_hash, T12_ANCHORING_PROXY_RUNTIME_HASH);
         let slot = |slot| Address::from_word(account.storage[&slot].present_value.into());
         assert_eq!(slot(ANCHORING_OWNER_SLOT), owner);
@@ -2119,6 +2207,9 @@ mod tests {
             slot(ERC1967_IMPLEMENTATION_SLOT),
             T12_ANCHORING_IMPLEMENTATION
         );
+        assert_eq!(factory.len(), 1);
+        let slot = factory[&ZONE_FACTORY_ADDRESS].storage[&U256::ZERO].present_value;
+        assert_eq!(slot, initial_zone_factory_config(owner));
     }
 
     #[test]
