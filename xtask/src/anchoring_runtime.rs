@@ -1,14 +1,18 @@
 //! Copies the contract runtimes `tempo-contracts` embeds from the contracts repo's build, or with
 //! `--check` fails when one has gone stale. Each copy is a fork's payload, pinned by hash: a build
-//! that differs is refused, and belongs to the next fork. The implementation is only checked: the
-//! chain deploys it.
+//! that differs is refused, and belongs to the next fork. The implementation and its address are
+//! only checked: the chain deploys it.
 
 use crate::check_abi::find_workspace_root;
 use alloy::primitives::{B256, keccak256};
 use eyre::{Context, bail};
-use std::path::PathBuf;
-use tempo_contracts::anchoring::{
-    T12_ANCHORING_IMPLEMENTATION_HASH, T12_ANCHORING_PROXY_RUNTIME_HASH,
+use std::path::{Path, PathBuf};
+use tempo_contracts::{
+    ARACHNID_CREATE2_FACTORY_ADDRESS,
+    anchoring::{
+        T12_ANCHORING_IMPLEMENTATION, T12_ANCHORING_IMPLEMENTATION_HASH,
+        T12_ANCHORING_PROXY_RUNTIME_HASH,
+    },
 };
 
 /// `layout/` build, its embedded copy relative to the workspace root, if any, and its pinned hash.
@@ -37,10 +41,7 @@ impl AnchoringRuntime {
         let root = find_workspace_root()?;
         for (build, copy, pinned) in BUILDS {
             let built = self.layout.join(build);
-            let hex = std::fs::read_to_string(&built)
-                .with_context(|| format!("failed reading {}", built.display()))?;
-            let bytes = alloy::primitives::hex::decode(hex.trim())
-                .with_context(|| format!("{} is not hex", built.display()))?;
+            let bytes = read_hex(&built)?;
             let hash = keccak256(&bytes);
             if hash != *pinned {
                 bail!(
@@ -68,6 +69,24 @@ impl AnchoringRuntime {
                 .with_context(|| format!("failed writing {}", copy_path.display()))?;
             println!("wrote {copy} from {}", built.display());
         }
+
+        let init = self.layout.join("anchoring.init.bin");
+        let deployed =
+            ARACHNID_CREATE2_FACTORY_ADDRESS.create2_from_code(B256::ZERO, read_hex(&init)?);
+        if deployed != T12_ANCHORING_IMPLEMENTATION {
+            bail!(
+                "{} deploys to {deployed}, not the pinned {T12_ANCHORING_IMPLEMENTATION}",
+                init.display()
+            );
+        }
+        println!("{} deploys to the pinned address", init.display());
         Ok(())
     }
+}
+
+fn read_hex(path: &Path) -> eyre::Result<Vec<u8>> {
+    let hex = std::fs::read_to_string(path)
+        .with_context(|| format!("failed reading {}", path.display()))?;
+    alloy::primitives::hex::decode(hex.trim())
+        .with_context(|| format!("{} is not hex", path.display()))
 }
