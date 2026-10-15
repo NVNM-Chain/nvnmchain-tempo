@@ -12,7 +12,7 @@ use tempo_contracts::anchoring::{
 };
 
 /// `layout/` build, its embedded copy relative to the workspace root, if any, and its pinned hash.
-const COPIES: &[(&str, Option<&str>, B256)] = &[
+const BUILDS: &[(&str, Option<&str>, B256)] = &[
     (
         "proxy.bin",
         Some("crates/contracts/src/t12_anchoring_proxy.bin"),
@@ -35,7 +35,7 @@ pub(crate) struct AnchoringRuntime {
 impl AnchoringRuntime {
     pub(crate) fn run(self) -> eyre::Result<()> {
         let root = find_workspace_root()?;
-        for (build, copy, pinned) in COPIES {
+        for (build, copy, pinned) in BUILDS {
             let built = self.layout.join(build);
             let hex = std::fs::read_to_string(&built)
                 .with_context(|| format!("failed reading {}", built.display()))?;

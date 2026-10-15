@@ -1,6 +1,7 @@
 //! The anchoring contract, as the genesis alloc places it. `cargo xtask anchoring-runtime` copies
-//! the proxy in from the contracts repo's `layout/` and checks the implementation there; the corpus
-//! arrives separately, from the dump loader.
+//! the proxy in from the contracts repo's `layout/` and checks the implementation there: both pins
+//! are contracts `6971b53`'s, whose `layout/anchoring.json` fixes the slots the dump writer and the
+//! explorer read. The corpus arrives separately, from the dump loader.
 
 use alloy_primitives::{Address, B256, Bytes, U256, address, b256};
 
@@ -15,7 +16,7 @@ pub const T11_ANCHORING_RUNTIME: Bytes =
 pub const T11_ANCHORING_RUNTIME_HASH: B256 =
     b256!("893a2f955868c80ae17905aa36cc4f71a771731b530e72ff6cfb063f559a7c0e");
 
-/// `owner` in `layout/anchoring.json`, past every slot the dump writes.
+/// `_owner` in `layout/anchoring.json`, past every slot the dump writes.
 pub const ANCHORING_OWNER_SLOT: U256 = U256::from_limbs([11, 0, 0, 0]);
 
 /// The ERC-1967 proxy T12 puts over the launch build once the implementation is deployed: solady's,
@@ -30,12 +31,12 @@ pub const T12_ANCHORING_PROXY_RUNTIME_HASH: B256 =
 /// Where an ordinary deployment of `layout/anchoring.init.bin` through Arachnid's factory, salt
 /// zero, puts the implementation the proxy points to.
 pub const T12_ANCHORING_IMPLEMENTATION: Address =
-    address!("0x4d84d0E553B1BEad40dA5E6D7818B72EeE93cF01");
+    address!("0x203FcB8765f54f53de69EcD1002e356Fa1600bC4");
 
 /// `keccak256` of `layout/anchoring.bin`, the code that deployment leaves: the proxy points at no
-/// other. `layout/anchoring.json` pins its slots, which the dump writer and the explorer read too.
+/// other.
 pub const T12_ANCHORING_IMPLEMENTATION_HASH: B256 =
-    b256!("c3b62e631f3fc2d8ecb55f9caaa5c11417e5cfb62b2e1092e959d2f2ab11e12b");
+    b256!("9eddafc9b2758f8c604d996240b35cfb7e51104c7dc5a00067dec187eef179cc");
 
 /// ERC-1967's implementation slot, which the proxy reads.
 pub const ERC1967_IMPLEMENTATION_SLOT: U256 = U256::from_be_bytes(
