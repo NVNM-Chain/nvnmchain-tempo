@@ -383,16 +383,14 @@ where
         if anchoring.is_empty_code_hash() {
             return Ok(());
         }
-        let owner = self.validator_registry_owner()?;
-        if owner.is_zero() {
-            return Ok(());
-        }
-
-        let db = self.inner.evm.db_mut();
         let info = db
             .basic(ZONE_FACTORY_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
+        let owner = self.validator_registry_owner()?;
+        if owner.is_zero() {
+            return Ok(());
+        }
         let mut factory = Account::from(info);
         factory.storage.insert(
             U256::ZERO,
@@ -403,7 +401,10 @@ where
             ),
         );
         factory.mark_touch();
-        db.commit(EvmState::from_iter([(ZONE_FACTORY_ADDRESS, factory)]));
+        self.inner
+            .evm
+            .db_mut()
+            .commit(EvmState::from_iter([(ZONE_FACTORY_ADDRESS, factory)]));
         Ok(())
     }
 
@@ -2000,54 +2001,19 @@ mod tests {
         // The hook reads only the implementation's code hash, so a deployment is an account with it.
         let deployed = Some(T12_ANCHORING_IMPLEMENTATION_HASH);
         let stranger = Some(B256::repeat_byte(0x11));
-        // The zone factory T10 installs in the same block, and who owns it afterwards: the
-        // hand-over needs the anchoring contract present, not its install.
-        let upstream = INITIAL_FACTORY_OWNER;
-        for (t12_time, timestamp, launch, implementation, registry, expected, zones) in [
-            (
-                u64::MAX,
-                10,
-                launched(),
-                deployed,
-                registry,
-                launched(),
-                upstream,
-            ),
-            (10, 9, launched(), deployed, registry, launched(), upstream),
-            (
-                10,
-                10,
-                launched(),
-                deployed,
-                registry,
-                proxied(registry),
-                registry,
-            ),
-            (10, 10, launched(), deployed, zero, proxied(zero), upstream),
+        for (t12_time, timestamp, launch, implementation, registry, expected) in [
+            (u64::MAX, 10, launched(), deployed, registry, launched()),
+            (10, 9, launched(), deployed, registry, launched()),
+            (10, 10, launched(), deployed, registry, proxied(registry)),
+            (10, 10, launched(), deployed, zero, proxied(zero)),
             // It waits for the deployment, and takes no other code for it.
-            (10, 10, launched(), None, registry, launched(), registry),
-            (10, 11, launched(), stranger, registry, launched(), registry),
-            (
-                10,
-                11,
-                proxied(zero),
-                deployed,
-                registry,
-                proxied(zero),
-                registry,
-            ),
+            (10, 10, launched(), None, registry, launched()),
+            (10, 11, launched(), stranger, registry, launched()),
+            (10, 11, proxied(zero), deployed, registry, proxied(zero)),
             // A chain starting at T12 on the launch build upgrades at its first block.
-            (
-                0,
-                1,
-                launched(),
-                deployed,
-                registry,
-                proxied(registry),
-                registry,
-            ),
-            (10, 10, None, deployed, registry, None, upstream),
-            (10, 10, other(), deployed, registry, other(), registry),
+            (0, 1, launched(), deployed, registry, proxied(registry)),
+            (10, 10, None, deployed, registry, None),
+            (10, 10, other(), deployed, registry, other()),
         ] {
             let mut genesis = DEV.genesis().clone();
             genesis
@@ -2057,7 +2023,7 @@ mod tests {
                 .unwrap();
             let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
             let mut db = State::builder().with_bundle_update().build();
-            let upgraded = launch != expected;
+            let (upgraded, present) = (launch != expected, launch.is_some());
             if let Some((code, owner)) = launch {
                 db.insert_account_with_storage(
                     ANCHORING_ADDRESS,
@@ -2114,6 +2080,14 @@ mod tests {
             let case = format!("T12 at {t12_time}, block at {timestamp}");
             assert_eq!(code.map(|code| (code, owner)), expected, "{case}");
             assert_eq!(pointed == T12_ANCHORING_IMPLEMENTATION, upgraded, "{case}");
+            // The zone factory T10 installs in the same block goes to the registry's owner in
+            // any T12 block where the anchoring contract has code, deployed implementation or not.
+            let handed = timestamp >= t12_time && present && registry != zero;
+            let zones = if handed {
+                registry
+            } else {
+                INITIAL_FACTORY_OWNER
+            };
             let config =
                 revm::Database::storage(&mut db, ZONE_FACTORY_ADDRESS, U256::ZERO).unwrap();
             assert_eq!(config, initial_zone_factory_config(zones), "{case}");
