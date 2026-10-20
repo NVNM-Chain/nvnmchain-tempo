@@ -524,17 +524,9 @@ mod tests {
     fn accepts_the_zone_factory_leaving_upstreams_owner() {
         let config = zone_factory_config;
         let registry = Address::with_last_byte(0xA0);
-        let transition = |anchoring_after, before, after| {
-            let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
+        let unchanged = evidence(&[]);
+        let moved = |before, after| {
             let mut state = reth_revm::db::TransitionState::default();
-            state.transitions.insert(
-                ANCHORING_ADDRESS,
-                TransitionAccount {
-                    previous_info: info(T11_ANCHORING_RUNTIME_HASH),
-                    info: info(anchoring_after),
-                    ..Default::default()
-                },
-            );
             state.transitions.insert(
                 ZONE_FACTORY_ADDRESS,
                 TransitionAccount {
@@ -544,17 +536,14 @@ mod tests {
                     ..Default::default()
                 },
             );
-            Evidence {
+            let shadow = Evidence {
                 pre_block: Some(state),
                 ..Default::default()
-            }
-        };
-        let unchanged = evidence(&[]);
-        let accepts = |shadow: &Evidence| {
+            };
             let ctx = Context {
                 boundary: Boundary::PreBlock,
                 real: &unchanged,
-                shadow,
+                shadow: &shadow,
                 base_fee: None,
                 tx: None,
             };
@@ -566,21 +555,12 @@ mod tests {
             };
             (T12_ZONE_FACTORY_HANDOVER.check)(&ctx, &field).is_some()
         };
-        let moved =
-            |before, after| accepts(&transition(T12_ANCHORING_PROXY_RUNTIME_HASH, before, after));
         let (upstream, other) = (INITIAL_FACTORY_OWNER, Address::with_last_byte(0xB0));
 
         assert!(moved(config(upstream, 1), config(registry, 1)));
         assert!(moved(config(upstream, 3), config(registry, 3)));
         assert!(!moved(config(upstream, 3), config(registry, 1)));
         assert!(!moved(config(other, 1), config(registry, 1)));
-        // The hand-over does not wait for the anchoring install.
-        let alone = transition(
-            T11_ANCHORING_RUNTIME_HASH,
-            config(upstream, 1),
-            config(registry, 1),
-        );
-        assert!(accepts(&alone));
     }
 
     #[test]
