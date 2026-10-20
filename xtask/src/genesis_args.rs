@@ -48,8 +48,7 @@ use tempo_contracts::{
     },
     contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
     precompiles::{
-        INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
-        t13_zone_factory_state,
+        IValidatorConfigV2, createTokenCall, initial_zone_factory_state, t13_zone_factory_state,
     },
 };
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
@@ -241,8 +240,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long, requires = "anchoring")]
     anchoring_owner: Option<Address>,
 
-    /// Owner of the zone factory on a chain that starts at T10. If not set, or zero, the validator
-    /// admin where the chain also starts at T12, and upstream's `INITIAL_FACTORY_OWNER` otherwise.
+    /// Owner of the zone factory on a chain that starts at T10; zero leaves it with no owner, so no
+    /// zone can ever be created. If not set, the validator admin.
     #[arg(long)]
     zone_owner: Option<Address>,
 }
@@ -597,12 +596,7 @@ impl GenesisArgs {
             },
         );
 
-        let zone_owner = zone_owner_at_genesis(
-            self.zone_owner,
-            self.t10_time,
-            self.t12_time == 0,
-            validator_admin,
-        )?;
+        let zone_owner = zone_owner_at_genesis(self.zone_owner, self.t10_time, validator_admin)?;
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, zone_owner, &mut genesis_alloc);
         insert_anchoring_contract_at_genesis(
             self.anchoring,
@@ -787,19 +781,13 @@ fn insert_anchoring_contract_at_genesis(
 fn zone_owner_at_genesis(
     named: Option<Address>,
     t10_time: u64,
-    t12_at_genesis: bool,
     validator_admin: Address,
 ) -> eyre::Result<Address> {
-    let named = named.filter(|owner| !owner.is_zero());
     eyre::ensure!(
         named.is_none() || t10_time == 0,
         "--zone-owner needs T10 at genesis; T10 later installs upstream's owner, and T12 the registry's"
     );
-    Ok(named.unwrap_or(if t12_at_genesis {
-        validator_admin
-    } else {
-        INITIAL_FACTORY_OWNER
-    }))
+    Ok(named.unwrap_or(validator_admin))
 }
 
 fn insert_zone_state_at_genesis(
@@ -1368,8 +1356,8 @@ mod tests {
     use super::*;
     use tempo_contracts::{
         precompiles::{
-            ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS,
-            ZONE_VERIFIER_ADDRESS,
+            INITIAL_FACTORY_OWNER, ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS,
+            ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
         },
         zones::{
             T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
@@ -1380,13 +1368,11 @@ mod tests {
     #[test]
     fn the_zone_owner_flag_needs_t10_at_genesis() {
         let (named, admin) = (Address::with_last_byte(0xA0), Address::with_last_byte(0xB0));
-        let resolve = |flag, t10_time, t12_at_genesis| {
-            zone_owner_at_genesis(flag, t10_time, t12_at_genesis, admin)
-        };
-        assert_eq!(resolve(Some(named), 0, true).unwrap(), named);
-        assert_eq!(resolve(Some(Address::ZERO), 0, true).unwrap(), admin);
-        assert_eq!(resolve(None, 0, false).unwrap(), INITIAL_FACTORY_OWNER);
-        assert!(resolve(Some(named), 1, true).is_err());
+        let resolve = |flag, t10_time| zone_owner_at_genesis(flag, t10_time, admin);
+        assert_eq!(resolve(Some(named), 0).unwrap(), named);
+        assert_eq!(resolve(Some(Address::ZERO), 0).unwrap(), Address::ZERO);
+        assert_eq!(resolve(None, 0).unwrap(), admin);
+        assert!(resolve(Some(named), 1).is_err());
     }
 
     #[test]

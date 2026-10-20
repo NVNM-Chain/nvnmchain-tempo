@@ -314,7 +314,8 @@ const T12_ANCHORING_UPGRADE: Expectation = Expectation {
     },
 };
 
-/// Accepts the zone factory leaving `INITIAL_FACTORY_OWNER` at T12 with its `nextZoneId` kept.
+/// Accepts the T12 zone factory hand-over: `INITIAL_FACTORY_OWNER` replaced as owner, with
+/// `nextZoneId` unchanged.
 const T12_ZONE_FACTORY_HANDOVER: Expectation = Expectation {
     id: "t12.zone-factory-handover",
     check: |ctx, field| {
@@ -521,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_the_zone_factory_leaving_upstreams_owner() {
+    fn accepts_the_zone_factory_moving_off_upstreams_key() {
         let config = zone_factory_config;
         let registry = Address::with_last_byte(0xA0);
         let unchanged = evidence(&[]);
