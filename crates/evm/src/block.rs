@@ -365,9 +365,8 @@ where
     }
 
     /// Gives a zone factory still owned by upstream's `INITIAL_FACTORY_OWNER` to the validator
-    /// registry's owner, if it has one, its zone count kept. A chain without the anchoring
-    /// contract is one of upstream's, and keeps its owner. Nothing records a hand-over: a factory
-    /// given back to upstream's key is taken again.
+    /// registry's owner, if it has one, its zone count kept. Nothing records a hand-over: a
+    /// factory given back to upstream's key is taken again.
     fn hand_over_zone_factory_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
@@ -378,21 +377,14 @@ where
         if factory_owner != INITIAL_FACTORY_OWNER {
             return Ok(());
         }
-        let anchoring = db
-            .basic(ANCHORING_ADDRESS)
-            .map_err(BlockExecutionError::other)?
-            .unwrap_or_default();
-        if anchoring.is_empty_code_hash() {
+        let owner = Self::registry_owner(db, spec)?;
+        if owner.is_zero() {
             return Ok(());
         }
         let info = db
             .basic(ZONE_FACTORY_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        let owner = Self::registry_owner(db, spec)?;
-        if owner.is_zero() {
-            return Ok(());
-        }
         let mut factory = Account::from(info);
         factory.storage.insert(
             U256::ZERO,
@@ -2018,7 +2010,7 @@ mod tests {
                 .unwrap();
             let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
             let mut db = State::builder().with_bundle_update().build();
-            let (upgraded, present) = (launch != expected, launch.is_some());
+            let upgraded = launch != expected;
             if let Some((code, owner)) = launch {
                 db.insert_account_with_storage(
                     ANCHORING_ADDRESS,
@@ -2075,17 +2067,58 @@ mod tests {
             let case = format!("T12 at {t12_time}, block at {timestamp}");
             assert_eq!(code.map(|code| (code, owner)), expected, "{case}");
             assert_eq!(pointed == T12_ANCHORING_IMPLEMENTATION, upgraded, "{case}");
-            // The zone factory T10 installs in the same block goes to the registry's owner in
-            // any T12 block where the anchoring contract has code, deployed implementation or not.
-            let handed = timestamp >= t12_time && present && registry != zero;
-            let zones = if handed {
-                registry
-            } else {
-                INITIAL_FACTORY_OWNER
-            };
+        }
+    }
+
+    #[test]
+    fn zone_factory_goes_to_the_registry_owner_at_t12() {
+        let (registry, other) = (Address::with_last_byte(0xA0), Address::with_last_byte(0xB0));
+        let upstream = INITIAL_FACTORY_OWNER;
+        for (t12_time, registry, before, after) in [
+            (u64::MAX, registry, upstream, upstream),
+            (10, Address::ZERO, upstream, upstream),
+            (10, registry, upstream, registry),
+            (10, registry, other, other),
+        ] {
+            let mut genesis = DEV.genesis().clone();
+            genesis
+                .config
+                .extra_fields
+                .insert_value("t12Time".into(), t12_time)
+                .unwrap();
+            let chainspec = Arc::new(TempoChainSpec::from_genesis(genesis));
+            let mut db = State::builder().with_bundle_update().build();
+            // Code keeps T10's install off it; two zones made, for the count to survive.
+            db.insert_account_with_storage(
+                ZONE_FACTORY_ADDRESS,
+                AccountInfo::from_bytecode(Bytecode::new_legacy(Bytes::from_static(&[0xef]))),
+                [(U256::ZERO, zone_factory_config(before, 3))]
+                    .into_iter()
+                    .collect(),
+            );
+            db.insert_account_with_storage(
+                VALIDATOR_CONFIG_V2_ADDRESS,
+                AccountInfo::default(),
+                [(U256::ZERO, registry.into_word().into())]
+                    .into_iter()
+                    .collect(),
+            );
+            let mut executor = TestExecutorBuilder::default()
+                .with_spec(if t12_time <= 10 {
+                    TempoHardfork::T12
+                } else {
+                    TempoHardfork::T11
+                })
+                .with_parent_beacon_block_root(B256::ZERO)
+                .build(&mut db, &chainspec);
+            executor.evm_mut().ctx_mut().block.timestamp = U256::from(10);
+            executor.apply_pre_execution_changes().unwrap();
+            drop(executor);
+
             let config =
                 revm::Database::storage(&mut db, ZONE_FACTORY_ADDRESS, U256::ZERO).unwrap();
-            assert_eq!(config, initial_zone_factory_config(zones), "{case}");
+            let case = format!("T12 at {t12_time}, registry {registry}, factory {before}");
+            assert_eq!(config, zone_factory_config(after, 3), "{case}");
         }
     }
 

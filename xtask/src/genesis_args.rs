@@ -231,8 +231,8 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     t14_time: Option<u64>,
 
-    /// Places the anchoring contract and, on a chain that starts at T12, gives the zone factory to
-    /// the validator admin. Left out, the genesis carries none, as upstream's own networks want.
+    /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
+    /// networks want.
     #[arg(long)]
     anchoring: bool,
 
@@ -242,8 +242,7 @@ pub(crate) struct GenesisArgs {
     anchoring_owner: Option<Address>,
 
     /// Owner of the zone factory on a chain that starts at T10. If not set, or zero, the validator
-    /// admin where the chain also starts at T12 with the anchoring contract, and upstream's
-    /// `INITIAL_FACTORY_OWNER` otherwise.
+    /// admin where the chain also starts at T12, and upstream's `INITIAL_FACTORY_OWNER` otherwise.
     #[arg(long)]
     zone_owner: Option<Address>,
 }
@@ -601,7 +600,7 @@ impl GenesisArgs {
         let zone_owner = zone_owner_at_genesis(
             self.zone_owner,
             self.t10_time,
-            self.anchoring && self.t12_time == 0,
+            self.t12_time == 0,
             validator_admin,
         )?;
         insert_zone_state_at_genesis(self.t10_time, self.t13_time, zone_owner, &mut genesis_alloc);
@@ -788,7 +787,7 @@ fn insert_anchoring_contract_at_genesis(
 fn zone_owner_at_genesis(
     named: Option<Address>,
     t10_time: u64,
-    anchoring_at_t12: bool,
+    t12_at_genesis: bool,
     validator_admin: Address,
 ) -> eyre::Result<Address> {
     let named = named.filter(|owner| !owner.is_zero());
@@ -796,7 +795,7 @@ fn zone_owner_at_genesis(
         named.is_none() || t10_time == 0,
         "--zone-owner needs T10 at genesis; T10 later installs upstream's owner, and T12 the registry's"
     );
-    Ok(named.unwrap_or(if anchoring_at_t12 {
+    Ok(named.unwrap_or(if t12_at_genesis {
         validator_admin
     } else {
         INITIAL_FACTORY_OWNER
@@ -1381,8 +1380,8 @@ mod tests {
     #[test]
     fn the_zone_owner_flag_needs_t10_at_genesis() {
         let (named, admin) = (Address::with_last_byte(0xA0), Address::with_last_byte(0xB0));
-        let resolve = |flag, t10_time, anchoring_at_t12| {
-            zone_owner_at_genesis(flag, t10_time, anchoring_at_t12, admin)
+        let resolve = |flag, t10_time, t12_at_genesis| {
+            zone_owner_at_genesis(flag, t10_time, t12_at_genesis, admin)
         };
         assert_eq!(resolve(Some(named), 0, true).unwrap(), named);
         assert_eq!(resolve(Some(Address::ZERO), 0, true).unwrap(), admin);
