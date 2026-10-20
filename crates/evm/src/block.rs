@@ -22,7 +22,10 @@ use reth_revm::{
     context::result::{ExecutionResult, HaltReason, ResultAndState},
     state::{Account, Bytecode, EvmState, EvmStorageSlot, TransactionId},
 };
-use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardforks};
+use tempo_chainspec::{
+    TempoChainSpec,
+    hardfork::{TempoHardfork, TempoHardforks},
+};
 use tempo_contracts::{
     anchoring::{
         ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ERC1967_IMPLEMENTATION_SLOT,
@@ -323,6 +326,7 @@ where
     /// owner, or none if the registry has none. Every block past T12 looks until then; the launch
     /// build's hash is the gate, so this runs once and an owner transferred to zero stays zero.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
@@ -338,7 +342,7 @@ where
         if implementation.code_hash != T12_ANCHORING_IMPLEMENTATION_HASH {
             return Ok(());
         }
-        let owner = self.validator_registry_owner()?;
+        let owner = Self::registry_owner(db, spec)?;
         let mut account = Account::from(info);
         account
             .info
@@ -356,10 +360,7 @@ where
             );
         }
         account.mark_touch();
-        self.inner
-            .evm
-            .db_mut()
-            .commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
+        db.commit(EvmState::from_iter([(ANCHORING_ADDRESS, account)]));
         Ok(())
     }
 
@@ -368,6 +369,7 @@ where
     /// contract is one of upstream's, and keeps its owner. Nothing records a hand-over: a factory
     /// given back to upstream's key is taken again.
     fn hand_over_zone_factory_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
+        let spec = self.evm().cfg.spec;
         let db = self.inner.evm.db_mut();
         let config = db
             .storage(ZONE_FACTORY_ADDRESS, U256::ZERO)
@@ -387,7 +389,7 @@ where
             .basic(ZONE_FACTORY_ADDRESS)
             .map_err(BlockExecutionError::other)?
             .unwrap_or_default();
-        let owner = self.validator_registry_owner()?;
+        let owner = Self::registry_owner(db, spec)?;
         if owner.is_zero() {
             return Ok(());
         }
@@ -401,23 +403,16 @@ where
             ),
         );
         factory.mark_touch();
-        self.inner
-            .evm
-            .db_mut()
-            .commit(EvmState::from_iter([(ZONE_FACTORY_ADDRESS, factory)]));
+        db.commit(EvmState::from_iter([(ZONE_FACTORY_ADDRESS, factory)]));
         Ok(())
     }
 
     /// The validator registry's owner, zero where it has none.
-    fn validator_registry_owner(&mut self) -> Result<Address, BlockExecutionError> {
-        let spec = self.evm().cfg.spec;
-        self.inner
-            .evm
-            .db_mut()
-            .with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
-                ValidatorConfigV2::default().owner()
-            })
-            .map_err(BlockExecutionError::other)
+    fn registry_owner(db: &mut DB, spec: TempoHardfork) -> Result<Address, BlockExecutionError> {
+        db.with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+            ValidatorConfigV2::default().owner()
+        })
+        .map_err(BlockExecutionError::other)
     }
 
     fn apply_current_committee_system_call(&mut self) -> Result<(), BlockExecutionError> {
