@@ -98,7 +98,7 @@ pub struct TempoGenesisInfo {
     unread: BTreeMap<String, Unread>,
 }
 
-/// What an unread key holds: nothing this Tempo looks at, whatever it is.
+/// What an unread key holds: nothing this Tempo looks at; `IgnoredAny` would do but has no `Eq`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(from = "serde::de::IgnoredAny")]
 struct Unread;
@@ -114,9 +114,7 @@ impl From<serde::de::IgnoredAny> for Unread {
 pub enum TempoGenesisError {
     /// A Tempo field holds a value of the wrong shape.
     Malformed(serde_json::Error),
-    /// Tempo's own networks, by chain id, carry an NVNM fork time.
-    NvnmForkOnTempoChain(u64),
-    /// Keys no field reads, other than a newer Tempo's fork times.
+    /// Keys no field reads.
     UnknownKeys(Vec<String>),
     /// The second fork is scheduled no later than the first, or without it.
     NvnmForksOutOfOrder(&'static str, &'static str),
@@ -128,7 +126,6 @@ impl core::fmt::Display for TempoGenesisError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Malformed(err) => write!(f, "malformed Tempo genesis field: {err}"),
-            Self::NvnmForkOnTempoChain(id) => write!(f, "chain {id} is Tempo's: no NVNM fork"),
             Self::UnknownKeys(keys) => write!(f, "unknown Tempo genesis fields {keys:?}"),
             Self::NvnmForksOutOfOrder(earlier, later) => {
                 write!(f, "{later} must be scheduled after {earlier}")
@@ -141,22 +138,6 @@ impl core::fmt::Display for TempoGenesisError {
 }
 
 impl core::error::Error for TempoGenesisError {}
-
-/// `n<k>Time`, the genesis key of an NVNM fork.
-fn is_nvnm_fork_key(key: &str) -> bool {
-    key.strip_prefix('n')
-        .and_then(|key| key.strip_suffix("Time"))
-        .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// `t<N>Time`, with letters after the number as in `t1aTime`: a Tempo fork's genesis key, the one
-/// key a newer Tempo reads and this one does not.
-fn is_tempo_fork_key(key: &str) -> bool {
-    key.strip_prefix('t')
-        .and_then(|key| key.strip_suffix("Time"))
-        .map(|k| k.trim_end_matches(|c: char| c.is_ascii_lowercase()))
-        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
-}
 
 /// A scheduled NVNM fork follows the one before it, which must be scheduled, and shares no time
 /// with a Tempo fork; times at genesis are exempt, since fork id leaves them out.
@@ -190,27 +171,16 @@ fn check_nvnm_schedule(
 impl TempoGenesisInfo {
     /// Extract Tempo genesis info from genesis extra_fields
     fn extract_from(genesis: &Genesis) -> Result<Self, TempoGenesisError> {
-        let fields = &genesis.config.extra_fields;
-        if matches!(genesis.config.chain_id, 4217 | 42431)
-            && fields.keys().any(|key| is_nvnm_fork_key(key))
-        {
-            return Err(TempoGenesisError::NvnmForkOnTempoChain(
-                genesis.config.chain_id,
-            ));
-        }
-        let info: Self = fields
+        let info: Self = genesis
+            .config
+            .extra_fields
             .deserialize_as()
             .map_err(TempoGenesisError::Malformed)?;
-        // A key no field reads would otherwise be dropped: a misspelling, or a fork this node
-        // does not know, which an older node would silently leave off.
-        let unknown: Vec<String> = info
-            .unread
-            .keys()
-            .filter(|key| !is_tempo_fork_key(key))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            return Err(TempoGenesisError::UnknownKeys(unknown));
+        // A key no field reads, a misspelling or a fork this node does not know, would be dropped.
+        if !info.unread.is_empty() {
+            return Err(TempoGenesisError::UnknownKeys(
+                info.unread.keys().cloned().collect(),
+            ));
         }
         let nvnm: Vec<_> = NvnmHardfork::VARIANTS[1..]
             .iter()
@@ -222,11 +192,6 @@ impl TempoGenesisInfo {
             .collect();
         check_nvnm_schedule(&nvnm, &tempo, genesis.timestamp)?;
         Ok(info)
-    }
-
-    /// Fork times of a Tempo newer than this one, for the node to warn about once logging is up.
-    pub fn newer_fork_times(&self) -> impl Iterator<Item = &str> {
-        self.unread.keys().map(String::as_str)
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -1377,7 +1342,7 @@ mod tests {
     #[test]
     #[cfg(feature = "cli")]
     fn an_unknown_key_stops_startup() {
-        for key in ["n999Time", "epochLenght"] {
+        for key in ["n999Time", "t99Time", "epochLenght"] {
             let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, key: 5 }));
             let err = super::TempoChainSpec::try_from_genesis(genesis.clone()).unwrap_err();
             assert!(matches!(&err, super::TempoGenesisError::UnknownKeys(keys) if keys == &[key]));
@@ -1385,28 +1350,6 @@ mod tests {
             let err =
                 super::chain_value_parser(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
             assert!(err.to_string().contains("unknown Tempo genesis fields"));
-        }
-    }
-
-    #[test]
-    fn a_newer_tempo_forks_time_is_kept_to_warn_about() {
-        let genesis =
-            lane_genesis(serde_json::json!({ "chainId": 1234, "t99Time": 5, "t1zTime": 6 }));
-        let spec = super::TempoChainSpec::try_from_genesis(genesis).unwrap();
-        assert_eq!(
-            spec.info.newer_fork_times().collect::<Vec<_>>(),
-            ["t1zTime", "t99Time"]
-        );
-    }
-
-    #[test]
-    fn a_tempo_chain_carries_no_nvnm_fork() {
-        for id in [4217, 42431] {
-            let genesis = lane_genesis(serde_json::json!({ "chainId": id, "n999Time": 5 }));
-            let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
-            assert!(
-                matches!(err, super::TempoGenesisError::NvnmForkOnTempoChain(found) if found == id)
-            );
         }
     }
 
