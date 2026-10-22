@@ -66,16 +66,20 @@ fn every_mode_over_a_growing_corpus() {
         let build = at.elapsed();
 
         let reader = store.reader();
-        let time =
-            |mode, query: &str| best(|| reader.search(mode, query, 0, 50).expect("search").len());
+        let time = |mode, query: &str| best(|| reader.search(mode, query).expect("search").len());
         let one = &rows[(count / 2) as usize].1;
 
         let (exact, hits) = time(Mode::Exact, one);
         assert_eq!(hits, 1);
         let (prefix, _) = time(Mode::Prefix, one);
-        // One name in thirty holds it, so the page fills early.
+        // One name in thirty holds it, and every one is read to count them.
         let (common, hits) = time(Mode::Contains, "nyoytermct");
-        assert_eq!(hits, 50.min(count as usize / 30));
+        assert_eq!(
+            hits,
+            rows.iter()
+                .filter(|(_, name)| name.contains("nyoytermct"))
+                .count()
+        );
         // Held by none: a scan reads the whole corpus to say so.
         let (rare, hits) = time(Mode::Contains, "qqq");
         assert_eq!(hits, 0);
