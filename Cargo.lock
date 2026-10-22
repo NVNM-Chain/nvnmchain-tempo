@@ -14036,7 +14036,6 @@ dependencies = [
  "alloy-hardforks",
  "paste",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -14347,7 +14346,6 @@ dependencies = [
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
- "tempfile",
  "tempo-chainspec",
  "tempo-consensus-config",
  "tempo-contracts",

@@ -21,10 +21,7 @@ alloy-hardforks.workspace = true
 paste.workspace = true
 serde = { workspace = true, optional = true }
 
-[dev-dependencies]
-serde_json.workspace = true
-
 [features]
 default = ["std", "serde"]
-std = ["serde?/std", "serde_json/std"]
+std = ["serde?/std"]
 serde = ["dep:serde", "alloy-hardforks/serde"]

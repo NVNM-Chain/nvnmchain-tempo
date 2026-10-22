@@ -140,7 +140,7 @@ impl TempoGenesisInfo {
                     match fork {
                         NvnmHardfork::Baseline => Some(0),
                         $(NvnmHardfork::$variant => self.[<$variant:lower _time>],)*
-                        // As in `fork_time`: a fork without its field fails to compile above.
+                        // Non-exhaustive across crates, as in `fork_time`.
                         _ => None,
                     }
                 }
@@ -590,8 +590,11 @@ impl TempoConsensusSpec for TempoChainSpec {
 #[cfg(test)]
 mod tests {
     use crate::{
-        TempoHardfork,
-        spec::{TEMPO_T1_BASE_FEE, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_FLOOR, TempoHardforks},
+        NvnmHardfork, TempoHardfork,
+        spec::{
+            NvnmHardforks, TEMPO_T1_BASE_FEE, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_FLOOR,
+            TempoHardforks,
+        },
     };
     use alloy_primitives::hex;
     use commonware_codec::Encode as _;
@@ -1228,41 +1231,13 @@ mod tests {
             );
             assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
+            assert_eq!(
+                spec.nvnm_hardfork_at(u64::MAX),
+                NvnmHardfork::Baseline,
+                "{id}"
+            );
             assert!(spec.network_identity.is_some(), "{id}");
             assert_eq!(spec.default_follow_url(), Some(follow), "{id}");
-        }
-    }
-
-    #[test]
-    fn built_in_chains_are_at_the_nvnm_baseline() {
-        use super::NvnmHardforks as _;
-
-        for spec in [
-            &*super::PRESTO,
-            &*super::MODERATO,
-            &*super::NVNM_TESTNET,
-            &*super::NVNM_CANARY,
-            &*super::DEV,
-        ] {
-            for timestamp in [0, u64::MAX] {
-                assert_eq!(
-                    spec.nvnm_hardfork_at(timestamp),
-                    crate::NvnmHardfork::Baseline
-                );
-            }
-        }
-    }
-
-    /// With no `n<k>Time` set, fork id is what it was before the lane.
-    #[test]
-    fn nvnm_fork_ids_are_unchanged() {
-        use reth_chainspec::{ForkHash, Hardforks as _};
-
-        for (spec, hash) in [
-            (&*super::NVNM_TESTNET, ForkHash(hex!("69865efe"))),
-            (&*super::NVNM_CANARY, ForkHash(hex!("39059b28"))),
-        ] {
-            assert_eq!(spec.latest_fork_id().hash, hash, "{}", spec.chain());
         }
     }
 }

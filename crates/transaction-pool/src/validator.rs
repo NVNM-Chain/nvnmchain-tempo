@@ -146,7 +146,7 @@ where
             .evm_env(latest_header.header())
             .expect("failed constructing EvmEnv from latest header");
         let active_hardfork = AtomicU8::new(evm_env.cfg_env.spec.variant_index());
-        let active_nvnm_hardfork = AtomicU8::new(evm_env.block_env.nvnm_hardfork.variant_index());
+        let active_nvnm_hardfork = AtomicU8::new(evm_env.block_env.nvnm_hardfork as u8);
         Self {
             inner,
             aa_valid_after_max_secs,
@@ -192,11 +192,8 @@ where
     }
 
     /// Returns the NVNM fork active at the current tip.
-    ///
-    /// Updated on each `on_new_head_block`.
     pub fn active_nvnm_hardfork(&self) -> NvnmHardfork {
-        NvnmHardfork::from_variant_index(self.active_nvnm_hardfork.load(Ordering::Relaxed))
-            .expect("stored fork index is valid")
+        NvnmHardfork::VARIANTS[self.active_nvnm_hardfork.load(Ordering::Relaxed) as usize]
     }
 
     /// Obtains a clone of the shared [`AmmLiquidityCache`].
@@ -797,8 +794,8 @@ where
             != tempo.variant_index();
         let nvnm_changed = self
             .active_nvnm_hardfork
-            .swap(nvnm.variant_index(), Ordering::Relaxed)
-            != nvnm.variant_index();
+            .swap(nvnm as u8, Ordering::Relaxed)
+            != nvnm as u8;
         if tempo_changed || nvnm_changed {
             tracing::info!(
                 target: "txpool",

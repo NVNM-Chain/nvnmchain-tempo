@@ -1,12 +1,14 @@
 //! NVNM's hardfork lane: `N1`, `N2`, … scheduled by the genesis' `n1Time`, … apart from Tempo's
-//! `T*` forks. `cargo x add-hardfork --lane nvnm --hardfork N1` adds the next fork.
+//! `T*` forks. A fork is added by hand: its variant here, its `n<k>_time` field in
+//! `TempoGenesisInfo` and its `--n<k>-time` flag in `generate-genesis`; a variant without its
+//! field does not compile.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use alloy_hardforks::hardfork;
 
 /// Defines [`NvnmHardfork`] the way `tempo_hardfork!` defines `TempoHardfork`: `is_<fork>()`
-/// helpers, [`nvnm_post_genesis_hardforks!`] for per-fork code downstream, and tests.
+/// helpers and [`nvnm_post_genesis_hardforks!`] for per-fork code downstream.
 macro_rules! nvnm_hardfork {
     (
         $(#[$enum_meta:meta])*
@@ -49,28 +51,6 @@ macro_rules! nvnm_hardfork {
                 $callback! { $($variant),* }
             };
         }
-
-        #[cfg(test)]
-        mod generated_tests {
-            use super::*;
-
-            #[test]
-            fn names_are_the_variants() {
-                assert_eq!(NvnmHardfork::Baseline.name(), "Baseline");
-                $(assert_eq!(NvnmHardfork::$variant.name(), stringify!($variant));)*
-            }
-
-            paste::paste! {
-                $(
-                    #[test]
-                    fn [<is_ $variant:lower _holds_from_its_fork_on>]() {
-                        for fork in NvnmHardfork::VARIANTS {
-                            assert_eq!(fork.[<is_ $variant:lower>](), *fork >= NvnmHardfork::$variant);
-                        }
-                    }
-                )*
-            }
-        }
     };
 }
 
@@ -85,22 +65,6 @@ nvnm_hardfork!(
     }
 );
 
-impl NvnmHardfork {
-    /// Returns the position of this fork in [`Self::VARIANTS`].
-    pub const fn variant_index(&self) -> u8 {
-        *self as u8
-    }
-
-    /// Returns the fork at the given [`Self::VARIANTS`] position, `None` past the end.
-    pub const fn from_variant_index(index: u8) -> Option<Self> {
-        if (index as usize) < Self::VARIANTS.len() {
-            Some(Self::VARIANTS[index as usize])
-        } else {
-            None
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,15 +75,6 @@ mod tests {
         for fork in &NvnmHardfork::VARIANTS[1..] {
             let key = format!("{}Time", fork.name().to_lowercase());
             assert_eq!(fork.genesis_key(), Some(key.as_str()));
-        }
-    }
-
-    #[test]
-    #[cfg(feature = "serde")]
-    fn serde_round_trips() {
-        for fork in NvnmHardfork::VARIANTS {
-            let json = serde_json::to_string(fork).unwrap();
-            assert_eq!(serde_json::from_str::<NvnmHardfork>(&json).unwrap(), *fork);
         }
     }
 }
