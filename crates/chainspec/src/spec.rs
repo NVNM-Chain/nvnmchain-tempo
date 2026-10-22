@@ -1163,7 +1163,7 @@ mod tests {
                 &*super::NVNM_TESTNET,
                 787223,
                 b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
-                1_793_174_400,
+                1_793_260_800,
                 "wss://ws.nvnm.testnet.nvnmchain.io",
             ),
         ] {
