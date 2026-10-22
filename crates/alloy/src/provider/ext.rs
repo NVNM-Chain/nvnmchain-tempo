@@ -10,7 +10,7 @@ use alloy_transport::{
     Authorization, BoxTransport, TransportConnect, TransportError, TransportErrorKind,
 };
 use std::str::FromStr;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     IAccountKeychain::{IAccountKeychainInstance, KeyInfo},
@@ -170,6 +170,22 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
             .await?
             .active
             .parse::<TempoHardfork>()
+            .map_err(TransportErrorKind::custom)
+    }
+
+    /// Returns the latest active NVNM fork at the connected chain's head; `Baseline` from a
+    /// node without the lane.
+    ///
+    /// Returns an error if the node reports a fork that this version of the SDK does not
+    /// recognize.
+    async fn get_active_nvnm_hardfork(&self) -> Result<NvnmHardfork, TransportError>
+    where
+        Self: Sized,
+    {
+        self.get_fork_schedule()
+            .await?
+            .nvnm_active
+            .map_or(Ok(NvnmHardfork::Baseline), |name| name.parse())
             .map_err(TransportErrorKind::custom)
     }
 

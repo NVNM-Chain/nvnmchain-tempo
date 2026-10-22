@@ -12,6 +12,9 @@ pub struct ForkSchedule {
     ///
     /// Kept as a string so clients can read schedules containing unknown hardforks.
     pub active: String,
+    /// Name of the latest active NVNM fork at the chain head; absent from a node without the lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvnm_active: Option<String>,
 }
 
 impl ForkSchedule {

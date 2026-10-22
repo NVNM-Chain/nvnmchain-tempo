@@ -1,0 +1,31 @@
+[package]
+name = "tempo-nvnm-hardfork"
+description = "NVNM's hardfork lane, scheduled apart from Tempo's"
+
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tempo-hardfork.workspace = true
+alloy-hardforks.workspace = true
+paste.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[features]
+default = ["std", "serde"]
+std = ["tempo-hardfork/std", "serde?/std", "serde_json/std"]
+serde = ["dep:serde", "tempo-hardfork/serde", "alloy-hardforks/serde"]

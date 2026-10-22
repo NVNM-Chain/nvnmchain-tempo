@@ -17,7 +17,7 @@ use reth_provider::{CanonStateNotification, CanonStateSubscriptions, Chain, Head
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{AllPoolTransactions, TransactionPool};
 use std::time::Instant;
-use tempo_chainspec::hardfork::TempoHardforks;
+use tempo_chainspec::hardfork::NvnmHardforks;
 use tempo_contracts::precompiles::{IAccountKeychain, IFeeManager, ITIP20, ITIP403Registry};
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP403_REGISTRY_ADDRESS,
@@ -478,7 +478,7 @@ where
     EvmConfig: ConfigureTempoPoolEvm,
     Client: StateProviderFactory
         + HeaderProvider<Header = TempoHeader>
-        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + TempoHardforks>
+        + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + NvnmHardforks>
         + CanonStateSubscriptions<Primitives = TempoPrimitives>
         + 'static,
 {

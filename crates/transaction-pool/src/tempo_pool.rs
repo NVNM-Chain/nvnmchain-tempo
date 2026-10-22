@@ -32,7 +32,7 @@ use reth_transaction_pool::{
 };
 use revm::database::BundleAccount;
 use std::{sync::Arc, time::Instant};
-use tempo_chainspec::hardfork::{TempoHardfork, TempoHardforks};
+use tempo_chainspec::hardfork::{Forks, TempoHardforks};
 use tempo_evm::TempoEvmConfig;
 use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS,
@@ -190,7 +190,7 @@ where
             .inner
             .fork_tracker()
             .tip_timestamp();
-        let spec = self.protocol_pool.validator().validator().active_hardfork();
+        let forks = self.protocol_pool.validator().validator().active_forks();
 
         // Cache policy lookups per fee token to avoid redundant storage reads.
         // For compound policies (TIP-1015), the cache stores all sub-policy IDs
@@ -200,7 +200,7 @@ where
         // Pre-T8 fee collection checked TIP_FEE_MANAGER_ADDRESS as the fee-token recipient.
         // TIP-1042 exempts that recipient side, so T8+ invalidation only tracks fee-payer sender
         // authorization.
-        let is_t8 = spec.is_t8();
+        let is_t8 = forks.tempo.is_t8();
         // NOTE: We can remove this logic after T8 activation
         let (fee_manager_blacklisted, fee_manager_unwhitelisted): (Vec<u64>, Vec<u64>) = if !is_t8 {
             (
@@ -334,7 +334,7 @@ where
                         subject,
                         tx.transaction.fee_token_cost(),
                         tip_timestamp,
-                        spec,
+                        forks,
                     )
                 {
                     to_remove.push(*tx.hash());
@@ -395,7 +395,7 @@ where
                                 let Ok(balance) = provider.get_token_balance(
                                     fee_token,
                                     fee_payer,
-                                    spec,
+                                    forks,
                                     StorageActions::disabled(),
                                 ) else {
                                     continue;
@@ -432,7 +432,7 @@ where
                     }
 
                     let token_policies =
-                        get_sender_policy_ids(provider, fee_token, spec, &mut policy_cache);
+                        get_sender_policy_ids(provider, fee_token, forks, &mut policy_cache);
 
                     if token_policies
                         .as_ref()
@@ -448,7 +448,7 @@ where
                 // transfer to TIP_FEE_MANAGER_ADDRESS would be rejected.
                 let recipient_evicted = !sender_evicted
                     && !fee_manager_blacklisted.is_empty()
-                    && get_recipient_policy_ids(provider, fee_token, spec)
+                    && get_recipient_policy_ids(provider, fee_token, forks)
                         .is_some_and(|ids| fee_manager_blacklisted.iter().any(|p| ids.contains(p)));
 
                 if sender_evicted || recipient_evicted {
@@ -476,7 +476,7 @@ where
                     }
 
                     let token_policies =
-                        get_sender_policy_ids(provider, fee_token, spec, &mut policy_cache);
+                        get_sender_policy_ids(provider, fee_token, forks, &mut policy_cache);
 
                     if token_policies
                         .as_ref()
@@ -491,7 +491,7 @@ where
                 // token's recipient policy.
                 let recipient_evicted = !sender_evicted
                     && !fee_manager_unwhitelisted.is_empty()
-                    && get_recipient_policy_ids(provider, fee_token, spec).is_some_and(|ids| {
+                    && get_recipient_policy_ids(provider, fee_token, forks).is_some_and(|ids| {
                         fee_manager_unwhitelisted.iter().any(|p| ids.contains(p))
                     });
 
@@ -1356,11 +1356,11 @@ pub(crate) fn exceeds_spending_limit(
     subject: &crate::transaction::KeychainSubject,
     fee_token_cost: alloy_primitives::U256,
     current_timestamp: u64,
-    spec: TempoHardfork,
+    forks: Forks,
 ) -> bool {
     provider
         .with_read_only_storage_ctx(
-            spec,
+            forks,
             StorageActions::disabled(),
             || -> TempoPrecompileResult<bool> {
                 let keychain = AccountKeychain::new();
@@ -1392,14 +1392,14 @@ pub(crate) fn exceeds_spending_limit(
 fn get_sender_policy_ids(
     provider: &mut impl StateProvider,
     fee_token: Address,
-    spec: TempoHardfork,
+    forks: Forks,
     cache: &mut AddressMap<Vec<u64>>,
 ) -> Option<Vec<u64>> {
     if let Some(cached) = cache.get(&fee_token) {
         return Some(cached.clone());
     }
 
-    provider.with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+    provider.with_read_only_storage_ctx(forks, StorageActions::disabled(), || {
         let policy_id = TIP20Token::from_address(fee_token)
             .and_then(|t| t.transfer_policy_id())
             .ok()
@@ -1437,13 +1437,13 @@ fn get_sender_policy_ids(
 fn get_recipient_policy_ids(
     provider: &mut impl StateProvider,
     fee_token: Address,
-    spec: TempoHardfork,
+    forks: Forks,
 ) -> Option<Vec<u64>> {
-    if spec.is_t8() {
+    if forks.tempo.is_t8() {
         return None;
     }
 
-    provider.with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+    provider.with_read_only_storage_ctx(forks, StorageActions::disabled(), || {
         let policy_id = TIP20Token::from_address(fee_token)
             .and_then(|t| t.transfer_policy_id())
             .ok()
@@ -2578,9 +2578,13 @@ mod tests {
         let mut state = provider.latest().unwrap();
         let mut cache: AddressMap<Vec<u64>> = AddressMap::default();
 
-        let ids =
-            get_sender_policy_ids(&mut state, fee_token, TempoHardfork::default(), &mut cache)
-                .expect("should resolve policy IDs");
+        let ids = get_sender_policy_ids(
+            &mut state,
+            fee_token,
+            TempoHardfork::default().into(),
+            &mut cache,
+        )
+        .expect("should resolve policy IDs");
 
         assert!(
             ids.contains(&compound_policy_id),
@@ -2637,9 +2641,13 @@ mod tests {
         let mut state = provider.latest().unwrap();
         let mut cache: AddressMap<Vec<u64>> = AddressMap::default();
 
-        let ids =
-            get_sender_policy_ids(&mut state, fee_token, TempoHardfork::default(), &mut cache)
-                .expect("should resolve policy IDs");
+        let ids = get_sender_policy_ids(
+            &mut state,
+            fee_token,
+            TempoHardfork::default().into(),
+            &mut cache,
+        )
+        .expect("should resolve policy IDs");
 
         assert!(ids.contains(&compound_policy_id));
         assert!(ids.contains(&sender_sub_policy));
@@ -2695,9 +2703,13 @@ mod tests {
         let mut state = provider.latest().unwrap();
         let mut cache: AddressMap<Vec<u64>> = AddressMap::default();
 
-        let ids =
-            get_sender_policy_ids(&mut state, fee_token, TempoHardfork::default(), &mut cache)
-                .expect("should resolve policy IDs");
+        let ids = get_sender_policy_ids(
+            &mut state,
+            fee_token,
+            TempoHardfork::default().into(),
+            &mut cache,
+        )
+        .expect("should resolve policy IDs");
 
         assert!(
             !ids.contains(&mint_recipient_sub),
@@ -2747,7 +2759,7 @@ mod tests {
             .unwrap();
 
         let mut state = provider.latest().unwrap();
-        let ids = get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T7)
+        let ids = get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T7.into())
             .expect("should resolve policy IDs");
 
         assert!(
@@ -2797,7 +2809,7 @@ mod tests {
             .unwrap();
 
         let mut state = provider.latest().unwrap();
-        let ids = get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T7)
+        let ids = get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T7.into())
             .expect("should resolve policy IDs");
 
         assert_eq!(ids, vec![simple_policy_id]);
@@ -2823,7 +2835,9 @@ mod tests {
         );
 
         let mut state = provider.latest().unwrap();
-        assert!(get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T8).is_none());
+        assert!(
+            get_recipient_policy_ids(&mut state, fee_token, TempoHardfork::T8.into()).is_none()
+        );
     }
 
     #[test]
@@ -2849,7 +2863,7 @@ mod tests {
             &subject,
             alloy_primitives::U256::from(200),
             0,
-            TempoHardfork::default(),
+            TempoHardfork::default().into(),
         ));
     }
 
@@ -2876,7 +2890,7 @@ mod tests {
             &subject,
             alloy_primitives::U256::from(200),
             0,
-            TempoHardfork::default(),
+            TempoHardfork::default().into(),
         ));
     }
 
@@ -2912,7 +2926,7 @@ mod tests {
             &subject,
             alloy_primitives::U256::from(1),
             0,
-            TempoHardfork::default(),
+            TempoHardfork::default().into(),
         ));
     }
 
@@ -2948,7 +2962,7 @@ mod tests {
             &subject,
             alloy_primitives::U256::from(1),
             0,
-            TempoHardfork::default(),
+            TempoHardfork::default().into(),
         ));
     }
 
@@ -2981,14 +2995,14 @@ mod tests {
             &subject,
             alloy_primitives::U256::from(50),
             10,
-            TempoHardfork::T3,
+            TempoHardfork::T3.into(),
         ));
         assert!(exceeds_spending_limit(
             &mut state,
             &subject,
             alloy_primitives::U256::from(150),
             10,
-            TempoHardfork::T3,
+            TempoHardfork::T3.into(),
         ));
     }
 }

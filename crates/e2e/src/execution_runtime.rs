@@ -45,7 +45,7 @@ use reth_node_core::{
 };
 use reth_rpc_builder::RpcModuleSelection;
 use tempfile::TempDir;
-use tempo_chainspec::{TempoChainSpec, TempoHardfork};
+use tempo_chainspec::{NvnmHardfork, TempoChainSpec, TempoHardfork};
 use tempo_consensus::feed::FeedStateHandle;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
 use tempo_node::{
@@ -74,6 +74,7 @@ pub const TEST_MNEMONIC: &str = "test test test test test test test test test te
 #[derive(Default, Debug)]
 pub struct Builder {
     t12_time: Option<u64>,
+    nvnm_forks: Vec<(NvnmHardfork, u64)>,
     epoch_length: Option<u64>,
     initial_dkg_outcome: Option<OnchainDkgOutcome>,
     validators: Option<ordered::Map<PublicKey, ConsensusNodeConfig>>,
@@ -83,6 +84,7 @@ impl Builder {
     pub fn new() -> Self {
         Self {
             t12_time: None,
+            nvnm_forks: Vec::new(),
             epoch_length: None,
             initial_dkg_outcome: None,
             validators: None,
@@ -91,6 +93,12 @@ impl Builder {
 
     pub fn with_t12_time(self, t12_time: Option<u64>) -> Self {
         Self { t12_time, ..self }
+    }
+
+    /// Schedules an NVNM fork at `time`.
+    pub fn with_nvnm_fork(mut self, fork: NvnmHardfork, time: u64) -> Self {
+        self.nvnm_forks.push((fork, time));
+        self
     }
 
     pub fn with_epoch_length(self, epoch_length: u64) -> Self {
@@ -117,6 +125,7 @@ impl Builder {
     pub fn launch(self) -> eyre::Result<ExecutionRuntime> {
         let Self {
             t12_time,
+            nvnm_forks,
             epoch_length,
             initial_dkg_outcome,
             validators,
@@ -159,6 +168,15 @@ impl Builder {
                         .remove(&format!("{}Time", fork.name().to_lowercase()));
                 }
             }
+        }
+
+        for (fork, time) in nvnm_forks {
+            let key = fork.genesis_key().expect("Baseline has no activation time");
+            genesis
+                .config
+                .extra_fields
+                .insert_value(key.to_string(), time)
+                .unwrap();
         }
 
         genesis.extra_data = initial_dkg_outcome.encode().into();

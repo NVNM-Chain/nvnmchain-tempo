@@ -4,6 +4,7 @@ use eyre::{Context as _, ensure};
 use serde::Serialize;
 
 const HARDFORK_SOURCE: &str = "crates/hardfork/src/lib.rs";
+const NVNM_HARDFORK_SOURCE: &str = "crates/nvnm-hardfork/src/lib.rs";
 const CHAINSPEC_SOURCE: &str = "crates/chainspec/src/spec.rs";
 const GENESIS_ARGS_SOURCE: &str = "xtask/src/genesis_args.rs";
 const FOUNDRY_CONFIG: &str = "tips/verify/foundry.toml";
@@ -34,16 +35,33 @@ struct HardforkMetadata {
 /// that follow the generated plumbing PR.
 #[derive(clap::Args, Debug)]
 pub(crate) struct AddHardfork {
-    /// New hardfork identifier, for example `T11` or `T1A`.
+    /// New hardfork identifier, for example `T11` or `T1A`, or `N1` with `--lane nvnm`.
     #[arg(long, value_name = "HARDFORK")]
     hardfork: String,
+    /// Which fork line the new fork joins.
+    #[arg(long, value_enum, default_value_t = Lane::Tempo)]
+    lane: Lane,
     /// Emit machine-readable transition metadata instead of a summary.
     #[arg(long)]
     json: bool,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum Lane {
+    /// Tempo's `T*` forks.
+    Tempo,
+    /// NVNM's `N*` forks, scheduled apart from Tempo's.
+    Nvnm,
+}
+
 impl AddHardfork {
     pub(crate) fn run(self) -> eyre::Result<()> {
+        if let Lane::Nvnm = self.lane {
+            ensure!(!self.json, "--json describes the Tempo lane's CI matrix");
+            add_nvnm_hardfork(Path::new("."), &self.hardfork)?;
+            println!("Added {} to the NVNM lane", self.hardfork);
+            return Ok(());
+        }
         let metadata = add_hardfork(Path::new("."), &self.hardfork)?;
         if self.json {
             println!("{}", serde_json::to_string(&metadata)?);
@@ -62,7 +80,7 @@ fn add_hardfork(root: &Path, hardfork: &str) -> eyre::Result<HardforkMetadata> {
 
     let hardfork_path = root.join(HARDFORK_SOURCE);
     let hardfork_source = read(&hardfork_path)?;
-    let variants = parse_variants(&hardfork_source)?;
+    let variants = parse_variants(&hardfork_source, "TempoHardfork {")?;
     ensure!(
         !variants.iter().any(|variant| variant == hardfork),
         "hardfork `{hardfork}` already exists"
@@ -174,15 +192,15 @@ fn validate_name(hardfork: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-fn parse_variants(source: &str) -> eyre::Result<Vec<String>> {
+fn parse_variants(source: &str, header: &str) -> eyre::Result<Vec<String>> {
     let enum_start = source
-        .find("TempoHardfork {")
-        .ok_or_else(|| eyre::eyre!("could not find TempoHardfork definition"))?
-        + "TempoHardfork {".len();
+        .find(header)
+        .ok_or_else(|| eyre::eyre!("could not find `{header}`"))?
+        + header.len();
     let enum_end = source[enum_start..]
         .find("\n    }\n);")
         .map(|offset| enum_start + offset)
-        .ok_or_else(|| eyre::eyre!("could not find end of TempoHardfork definition"))?;
+        .ok_or_else(|| eyre::eyre!("could not find the end of `{header}`"))?;
 
     let variants = source[enum_start..enum_end]
         .lines()
@@ -194,10 +212,7 @@ fn parse_variants(source: &str) -> eyre::Result<Vec<String>> {
         })
         .collect::<Vec<_>>();
 
-    ensure!(
-        !variants.is_empty(),
-        "TempoHardfork definition has no variants"
-    );
+    ensure!(!variants.is_empty(), "`{header}` has no variants");
     Ok(variants)
 }
 
@@ -357,6 +372,112 @@ fn copy_snapshot(root: &Path, previous: &str, hardfork: &str) -> eyre::Result<()
     Ok(())
 }
 
+/// Adds an NVNM fork: its variant, its `TempoGenesisInfo` field and its genesis generator flag.
+/// The lane has no compiled schedule, Foundry profile, genesis seed or CI matrix to update.
+fn add_nvnm_hardfork(root: &Path, hardfork: &str) -> eyre::Result<()> {
+    let variants_path = root.join(NVNM_HARDFORK_SOURCE);
+    let variants_source = read(&variants_path)?;
+    let invocation = variants_source
+        .find("\nnvnm_hardfork!(")
+        .ok_or_else(|| eyre::eyre!("could not find the nvnm_hardfork! invocation"))?;
+    let variants = parse_variants(&variants_source[invocation..], "NvnmHardfork {")?;
+    let previous = variants.last().expect("NvnmHardfork always has Baseline");
+    let expected = format!("N{}", variants.len());
+    ensure!(
+        hardfork == expected,
+        "the next NVNM fork is `{expected}`, not `{hardfork}`"
+    );
+    let marker = format!("        {previous},\n");
+    let at = invocation
+        + variants_source[invocation..]
+            .find(&marker)
+            .ok_or_else(|| eyre::eyre!("could not find `{previous}` in NvnmHardfork"))?
+        + marker.len();
+    let mut source = variants_source;
+    source.insert_str(
+        at,
+        &format!("        /// {hardfork} hardfork.\n        {hardfork},\n"),
+    );
+    write(&variants_path, &source)?;
+
+    let lower = hardfork.to_ascii_lowercase();
+    let chainspec_path = root.join(CHAINSPEC_SOURCE);
+    let chainspec = read(&chainspec_path)?;
+    let field = format!(
+        "\n    /// Activation timestamp for {hardfork} hardfork.\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    {lower}_time: Option<u64>,"
+    );
+    write(
+        &chainspec_path,
+        &insert_before_end(&chainspec, "pub struct TempoGenesisInfo {", "\n}\n", &field)?,
+    )?;
+
+    let genesis_args_path = root.join(GENESIS_ARGS_SOURCE);
+    let genesis_args = read(&genesis_args_path)?;
+    let flag = format!(
+        "\n    /// {hardfork} hardfork activation time.\n    #[arg(long)]\n    {lower}_time: Option<u64>,\n"
+    );
+    let genesis_args = insert_after_last_fork_flag(&genesis_args, &flag)?;
+    let entry = format!("            (\"{lower}Time\", self.{lower}_time),\n");
+    write(
+        &genesis_args_path,
+        &insert_before_end(
+            &genesis_args,
+            "        for (key, time) in [\n",
+            "        ] {",
+            &entry,
+        )?,
+    )
+}
+
+/// Inserts `insertion` just before the first `end` after `start`.
+fn insert_before_end(
+    source: &str,
+    start: &str,
+    end: &str,
+    insertion: &str,
+) -> eyre::Result<String> {
+    let from = source
+        .find(start)
+        .ok_or_else(|| eyre::eyre!("could not find `{start}`"))?;
+    let at = from
+        + source[from..]
+            .find(end)
+            .ok_or_else(|| eyre::eyre!("could not find the end of `{start}`"))?;
+    let mut output = source.to_owned();
+    output.insert_str(at, insertion);
+    Ok(output)
+}
+
+/// Inserts `flag` after the last `--<fork>-time` field of `GenesisArgs`.
+fn insert_after_last_fork_flag(source: &str, flag: &str) -> eyre::Result<String> {
+    let start = source
+        .find("struct GenesisArgs {")
+        .ok_or_else(|| eyre::eyre!("could not find GenesisArgs"))?;
+    let end = start
+        + source[start..]
+            .find("\n}\n")
+            .unwrap_or(source.len() - start);
+    let is_fork_time = |line: &str| {
+        let line = line.trim();
+        let name = line.split(':').next().unwrap_or_default();
+        name.ends_with("_time")
+            && (name.starts_with('t') || name.starts_with('n'))
+            && name[1..].starts_with(|c: char| c.is_ascii_digit())
+    };
+    let mut at = None;
+    let mut offset = start;
+    for line in source[start..end].split_inclusive('\n') {
+        offset += line.len();
+        if is_fork_time(line) {
+            at = Some(offset);
+        }
+    }
+    let at = at.ok_or_else(|| eyre::eyre!("GenesisArgs has no fork time flag"))?;
+    let mut output = source.to_owned();
+    output.insert_str(at, flag);
+    Ok(output)
+}
+
 fn insert_once(source: &str, marker: &str, replacement: &str) -> eyre::Result<String> {
     let count = source.matches(marker).count();
     ensure!(
@@ -382,7 +503,7 @@ mod tests {
     fn parses_hardfork_variants_without_comments() {
         let source = "TempoHardfork {\n        Genesis,\n        /// T0\n        T0,\n    }\n);";
         assert_eq!(
-            parse_variants(source).unwrap(),
+            parse_variants(source, "TempoHardfork {").unwrap(),
             vec!["Genesis".to_owned(), "T0".to_owned()]
         );
     }
@@ -435,5 +556,38 @@ mod tests {
         let updated = append_hardfork_source(&source, "T10", "T11").unwrap();
         assert_eq!(updated.matches("Self::T11 => None").count(), 4);
         assert!(updated.contains("        T11,\n"));
+    }
+
+    /// On a copy of what it edits, so a change that moves one of its markers fails here.
+    #[test]
+    fn the_current_tree_takes_the_next_nvnm_fork() {
+        use tempo_chainspec::NvnmHardfork;
+
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let root = tempfile::tempdir().unwrap();
+        for path in [NVNM_HARDFORK_SOURCE, CHAINSPEC_SOURCE, GENESIS_ARGS_SOURCE] {
+            let target = root.path().join(path);
+            fs::create_dir_all(target.parent().unwrap()).unwrap();
+            fs::copy(repo.join(path), target).unwrap();
+        }
+        let previous = NvnmHardfork::VARIANTS.last().unwrap().name();
+        let next = format!("N{}", NvnmHardfork::VARIANTS.len());
+        let lower = next.to_lowercase();
+
+        assert!(add_nvnm_hardfork(root.path(), "N99").is_err());
+        add_nvnm_hardfork(root.path(), &next).unwrap();
+
+        let read = |path| fs::read_to_string(root.path().join(path)).unwrap();
+        assert!(read(NVNM_HARDFORK_SOURCE).contains(&format!(
+            "        {previous},\n        /// {next} hardfork.\n        {next},\n"
+        )));
+        assert!(read(CHAINSPEC_SOURCE).contains(&format!("    {lower}_time: Option<u64>,\n}}\n")));
+        let genesis_args = read(GENESIS_ARGS_SOURCE);
+        assert!(genesis_args.contains(&format!(
+            "    #[arg(long)]\n    {lower}_time: Option<u64>,\n"
+        )));
+        assert!(genesis_args.contains(&format!(
+            "            (\"{lower}Time\", self.{lower}_time),\n        ] {{"
+        )));
     }
 }

@@ -24,7 +24,7 @@ use reth_revm::{
 };
 use tempo_chainspec::{
     TempoChainSpec,
-    hardfork::{TempoHardfork, TempoHardforks},
+    hardfork::{Forks, TempoHardforks},
 };
 use tempo_contracts::{
     anchoring::{
@@ -326,7 +326,7 @@ where
     /// owner, or none if the registry has none. Every block past T12 looks until then; the launch
     /// build's hash is the gate, so this runs once and an owner transferred to zero stays zero.
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
-        let spec = self.evm().cfg.spec;
+        let forks = self.evm().forks();
         let db = self.inner.evm.db_mut();
         let info = db
             .basic(ANCHORING_ADDRESS)
@@ -342,7 +342,7 @@ where
         if implementation.code_hash != T12_ANCHORING_IMPLEMENTATION_HASH {
             return Ok(());
         }
-        let owner = Self::registry_owner(db, spec)?;
+        let owner = Self::registry_owner(db, forks)?;
         let mut account = Account::from(info);
         account
             .info
@@ -368,7 +368,7 @@ where
     /// registry's owner, if it has one, its zone count kept. Nothing records a hand-over: a
     /// factory given back to upstream's key is taken again.
     fn hand_over_zone_factory_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
-        let spec = self.evm().cfg.spec;
+        let forks = self.evm().forks();
         let db = self.inner.evm.db_mut();
         let config = db
             .storage(ZONE_FACTORY_ADDRESS, U256::ZERO)
@@ -377,7 +377,7 @@ where
         if factory_owner != INITIAL_FACTORY_OWNER {
             return Ok(());
         }
-        let owner = Self::registry_owner(db, spec)?;
+        let owner = Self::registry_owner(db, forks)?;
         if owner.is_zero() {
             return Ok(());
         }
@@ -400,8 +400,8 @@ where
     }
 
     /// The validator registry's owner, zero where it has none.
-    fn registry_owner(db: &mut DB, spec: TempoHardfork) -> Result<Address, BlockExecutionError> {
-        db.with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+    fn registry_owner(db: &mut DB, forks: Forks) -> Result<Address, BlockExecutionError> {
+        db.with_read_only_storage_ctx(forks, StorageActions::disabled(), || {
             ValidatorConfigV2::default().owner()
         })
         .map_err(BlockExecutionError::other)

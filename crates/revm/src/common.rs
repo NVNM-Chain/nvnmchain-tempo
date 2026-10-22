@@ -8,7 +8,7 @@ use revm::{
     context::{JournalTr, result::EVMError},
     state::{AccountInfo, Bytecode},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{Forks, NvnmHardfork, TempoHardfork};
 use tempo_precompiles::{
     error::{Result as TempoResult, TempoPrecompileError},
     storage::{Handler, PrecompileStorageProvider, StorageAction, StorageActions, StorageCtx},
@@ -99,10 +99,10 @@ pub trait TempoStateAccess<M = ()> {
     /// Returns the storage value for the given address and key.
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, Self::Error>;
 
-    /// Returns a read-only storage provider for the given spec.
+    /// Returns a read-only storage provider for the given forks.
     fn with_read_only_storage_ctx<R>(
         &mut self,
-        spec: TempoHardfork,
+        forks: Forks,
         actions: StorageActions,
         f: impl FnOnce() -> R,
     ) -> R
@@ -110,7 +110,7 @@ pub trait TempoStateAccess<M = ()> {
         Self: Sized,
     {
         StorageCtx::enter(
-            &mut ReadOnlyStorageProvider::new(self, spec).with_actions(actions),
+            &mut ReadOnlyStorageProvider::new(self, forks).with_actions(actions),
             f,
         )
     }
@@ -120,14 +120,14 @@ pub trait TempoStateAccess<M = ()> {
     /// IMPORTANT: Caller must ensure `fee_token` has a valid TIP20 prefix.
     fn is_tip20_usd(
         &mut self,
-        spec: TempoHardfork,
+        forks: Forks,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(forks, actions, || {
             // SAFETY: caller must ensure prefix is already checked
             let token = TIP20Token::from_address_unchecked(fee_token);
             Ok(token.currency.len()? == 3 && token.currency.read()?.as_str() == "USD")
@@ -139,14 +139,14 @@ pub trait TempoStateAccess<M = ()> {
     /// IMPORTANT: Caller must ensure `fee_token` has a valid TIP20 prefix.
     fn ensure_tip20_usd(
         &mut self,
-        spec: TempoHardfork,
+        forks: Forks,
         fee_token: Address,
         actions: StorageActions,
     ) -> Result<(), EVMError<Self::Error, TempoInvalidTransaction>>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(forks, actions, || {
             // SAFETY: caller must ensure prefix is already checked
             let token = TIP20Token::from_address_unchecked(fee_token);
             let len = token.currency.len()?;
@@ -174,7 +174,7 @@ pub trait TempoStateAccess<M = ()> {
     /// Checks if the given token can be used as a fee token.
     fn is_valid_fee_token(
         &mut self,
-        spec: TempoHardfork,
+        forks: Forks,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
@@ -187,20 +187,20 @@ pub trait TempoStateAccess<M = ()> {
         }
 
         // Ensure the currency is USD
-        self.is_tip20_usd(spec, fee_token, actions)
+        self.is_tip20_usd(forks, fee_token, actions)
     }
 
     /// Checks if a fee token is paused.
     fn is_fee_token_paused(
         &mut self,
-        spec: TempoHardfork,
+        forks: Forks,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(forks, actions, || {
             let token = TIP20Token::from_address(fee_token)?;
             token.paused()
         })
@@ -213,13 +213,13 @@ pub trait TempoStateAccess<M = ()> {
         &mut self,
         token: Address,
         account: Address,
-        spec: TempoHardfork,
+        forks: Forks,
         actions: StorageActions,
     ) -> TempoResult<U256>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(forks, actions, || {
             // Load the token balance for the given account.
             TIP20Token::from_address(token)?.balances[account].read()
         })
@@ -274,7 +274,7 @@ impl<T: reth_storage_api::StateProvider> TempoStateAccess<((), (), ())> for T {
 /// The marker generic `M` selects which `TempoStateAccess<M>` impl to use for the backend.
 struct ReadOnlyStorageProvider<'a, S, M = ()> {
     state: &'a mut S,
-    spec: TempoHardfork,
+    forks: Forks,
     actions: Option<StorageActions>,
     _marker: PhantomData<M>,
 }
@@ -284,10 +284,10 @@ where
     S: TempoStateAccess<M>,
 {
     /// Creates a new read-only storage provider.
-    fn new(state: &'a mut S, spec: TempoHardfork) -> Self {
+    fn new(state: &'a mut S, forks: Forks) -> Self {
         Self {
             state,
-            spec,
+            forks,
             actions: None,
             _marker: PhantomData,
         }
@@ -304,7 +304,11 @@ where
     S: TempoStateAccess<M>,
 {
     fn spec(&self) -> TempoHardfork {
-        self.spec
+        self.forks.tempo
+    }
+
+    fn nvnm_hardfork(&self) -> NvnmHardfork {
+        self.forks.nvnm
     }
 
     fn storage_actions(&self) -> StorageActions {
@@ -473,7 +477,7 @@ mod tests {
             &mut EmptyDB::default(),
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(token, fee_token);
@@ -501,7 +505,7 @@ mod tests {
             &mut EmptyDB::default(),
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, token);
@@ -523,7 +527,7 @@ mod tests {
             &mut db,
             &TempoTxEnv::default(),
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, user_token);
@@ -550,7 +554,7 @@ mod tests {
             &mut EmptyDB::default(),
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, DEFAULT_FEE_TOKEN);
@@ -573,7 +577,7 @@ mod tests {
             &mut EmptyDB::default(),
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         // Should fallback to DEFAULT_FEE_TOKEN when no preferences are found
@@ -612,7 +616,7 @@ mod tests {
             &mut db,
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(token, token_in);
@@ -641,7 +645,7 @@ mod tests {
             &mut db,
             &tx,
             caller,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(token, token_in);
@@ -664,7 +668,7 @@ mod tests {
         let balance = db.get_token_balance(
             token_address,
             account,
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             StorageActions::disabled(),
         )?;
         assert_eq!(balance, expected_balance);
@@ -705,7 +709,7 @@ mod tests {
 
         // Default (unpaused) returns false
         assert!(!db.is_fee_token_paused(
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             token_address,
             StorageActions::disabled()
         )?);
@@ -713,7 +717,7 @@ mod tests {
         // Set paused=true
         db.insert_account_storage(token_address, tip20_slots::PAUSED, U256::from(1))?;
         assert!(db.is_fee_token_paused(
-            TempoHardfork::Genesis,
+            TempoHardfork::Genesis.into(),
             token_address,
             StorageActions::disabled()
         )?);
@@ -754,7 +758,7 @@ mod tests {
             db.insert_account_storage(fee_token, tip20_slots::CURRENCY, *currency_value)?;
 
             let is_usd = db.is_tip20_usd(
-                TempoHardfork::Genesis,
+                TempoHardfork::Genesis.into(),
                 fee_token,
                 StorageActions::disabled(),
             )?;
@@ -774,7 +778,7 @@ mod tests {
 
         let err = db
             .ensure_tip20_usd(
-                TempoHardfork::Genesis,
+                TempoHardfork::Genesis.into(),
                 fee_token,
                 StorageActions::disabled(),
             )

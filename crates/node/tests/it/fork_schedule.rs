@@ -2,7 +2,7 @@ use crate::utils::TestNodeBuilder;
 use alloy::providers::{Provider, ProviderBuilder};
 use reth_chainspec::Hardfork;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_fork_schedule() -> eyre::Result<()> {
@@ -13,6 +13,7 @@ async fn test_fork_schedule() -> eyre::Result<()> {
 
     let schedule = provider.get_fork_schedule().await?;
     assert_eq!(schedule.next_activation(), None);
+    assert_eq!(schedule.nvnm_active.as_deref(), Some("Baseline"));
 
     // Every TempoHardfork variant except Genesis must appear.
     let names: Vec<&str> = schedule.schedule.iter().map(|f| f.name.as_str()).collect();
@@ -80,6 +81,11 @@ async fn test_is_hardfork_active() -> eyre::Result<()> {
             "{fork:?} should be active on devnet",
         );
     }
+    // The devnet schedules no NVNM fork.
+    assert_eq!(
+        provider.get_active_nvnm_hardfork().await?,
+        NvnmHardfork::Baseline
+    );
 
     Ok(())
 }

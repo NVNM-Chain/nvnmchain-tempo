@@ -54,7 +54,7 @@ use crate::{
     zone_verifier::ZoneVerifier,
 };
 use std::{cell::RefCell, rc::Rc};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{Forks, NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoAddressExt;
 
 #[cfg(test)]
@@ -160,6 +160,7 @@ pub trait Precompile {
 #[derive(Clone)]
 pub struct PrecompileEnv {
     cfg: CfgEnv<TempoHardfork>,
+    forks: Forks,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
@@ -167,18 +168,23 @@ pub struct PrecompileEnv {
 impl PrecompileEnv {
     pub fn new(
         cfg: &CfgEnv<TempoHardfork>,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
             cfg: cfg.clone(),
+            forks: Forks {
+                tempo: cfg.spec,
+                nvnm,
+            },
             actions,
             non_creditable_slots,
         }
     }
 }
 
-/// Returns the full Tempo precompile set for the given EVM config.
+/// Returns the full Tempo precompile set for the given EVM config and NVNM fork.
 ///
 /// Pre-T1C hardforks use Prague built-in precompiles; T1C+ uses Osaka built-ins. Tempo-specific
 /// precompiles are then registered via [`extend_tempo_precompiles`].
@@ -193,6 +199,7 @@ impl PrecompileEnv {
 /// values derived from the real transaction context rather than mocks.
 pub fn tempo_precompiles(
     cfg: &CfgEnv<TempoHardfork>,
+    nvnm: NvnmHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 ) -> PrecompilesMap {
@@ -202,7 +209,7 @@ pub fn tempo_precompiles(
         SpecId::PRAGUE
     };
     let mut precompiles = PrecompilesMap::from_static(EthPrecompiles::new(spec).precompiles);
-    extend_tempo_precompiles(&mut precompiles, cfg, actions, non_creditable_slots);
+    extend_tempo_precompiles(&mut precompiles, cfg, nvnm, actions, non_creditable_slots);
     precompiles
 }
 
@@ -217,10 +224,11 @@ pub fn tempo_precompiles(
 pub fn extend_tempo_precompiles(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
+    nvnm: NvnmHardfork,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 ) {
-    let env = PrecompileEnv::new(cfg, actions, non_creditable_slots);
+    let env = PrecompileEnv::new(cfg, nvnm, actions, non_creditable_slots);
 
     precompiles.set_precompile_lookup(move |address: &Address| {
         if address.is_tip20() {
@@ -274,6 +282,7 @@ macro_rules! tempo_precompile {
         #[cfg(test)]
         let env = PrecompileEnv::new(
             $cfg,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
@@ -281,7 +290,7 @@ macro_rules! tempo_precompile {
     }};
     ($id:expr, env: $env:expr, |$input:ident| $impl:expr) => {{
         let env: &PrecompileEnv = $env;
-        let spec = env.cfg.spec;
+        let forks = env.forks;
         let amsterdam_eip8037_enabled = env.cfg.enable_amsterdam_eip8037;
         let gas_params = env.cfg.gas_params.clone();
         let actions = env.actions.clone();
@@ -298,7 +307,7 @@ macro_rules! tempo_precompile {
                 $input.internals,
                 $input.gas,
                 $input.reservoir,
-                spec,
+                forks,
                 amsterdam_eip8037_enabled,
                 $input.is_static,
                 gas_params.clone(),
@@ -481,6 +490,7 @@ mod tests {
     fn test_tempo_precompiles(cfg_env: &CfgEnv<TempoHardfork>) -> PrecompilesMap {
         tempo_precompiles(
             cfg_env,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         )

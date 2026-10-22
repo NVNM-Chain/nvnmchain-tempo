@@ -987,6 +987,7 @@ where
 
         let actions = evm.actions.clone();
         let fee_manager = evm.fee_manager.clone();
+        let forks = evm.forks();
         let block = &evm.inner.ctx.block;
         let tx = &evm.inner.ctx.tx;
         let cfg = &evm.inner.ctx.cfg;
@@ -994,7 +995,7 @@ where
 
         let fee_payer = tx.fee_payer().expect("pre-validated in `validate_env`");
         let fee_token = fee_manager
-            .get_fee_token(journal, tx, fee_payer, cfg.spec, actions.clone())
+            .get_fee_token(journal, tx, fee_payer, forks, actions.clone())
             .map_err(|err| EVMError::Custom(err.to_string()))?;
 
         evm.fee_token = Some(fee_token);
@@ -1008,7 +1009,7 @@ where
         // Skip fee token validation when the transaction is free.
         // The TIP20 prefix is already validated above.
         if !tx.max_balance_spending()?.is_zero() {
-            fee_manager.validate_fee_token(journal, fee_token, cfg.spec, actions.clone())?;
+            fee_manager.validate_fee_token(journal, fee_token, forks, actions.clone())?;
         }
 
         // Load the fee payer balance
@@ -1434,7 +1435,7 @@ where
                             .get_validator_token(
                                 journal,
                                 block.beneficiary(),
-                                cfg.spec,
+                                forks,
                                 StorageActions::disabled(),
                             )
                             .ok();
@@ -1533,7 +1534,7 @@ where
                 internals,
                 gas_limit,
                 0,
-                cfg.spec,
+                forks,
                 amsterdam_eip8037_enabled,
                 false,
                 gas_params,

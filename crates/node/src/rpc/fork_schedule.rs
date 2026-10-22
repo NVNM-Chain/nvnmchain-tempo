@@ -4,7 +4,7 @@ use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_chainspec::{EthereumHardfork, ForkCondition, Hardforks, Head};
 use reth_primitives_traits::AlloyBlockHeader as _;
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
-use tempo_chainspec::hardfork::TempoHardforks;
+use tempo_chainspec::hardfork::{NvnmHardforks, TempoHardforks};
 
 pub use tempo_alloy::rpc::{ForkInfo, ForkSchedule};
 
@@ -35,7 +35,7 @@ fn internal_err(msg: impl ToString) -> jsonrpsee::types::ErrorObject<'static> {
 #[async_trait::async_trait]
 impl<P> TempoForkScheduleApiServer for TempoForkScheduleRpc<P>
 where
-    P: ChainSpecProvider<ChainSpec: Hardforks + TempoHardforks>
+    P: ChainSpecProvider<ChainSpec: Hardforks + NvnmHardforks>
         + BlockNumReader
         + HeaderProvider
         + Send
@@ -94,6 +94,17 @@ where
             .name()
             .to_string();
 
-        Ok(ForkSchedule { schedule, active })
+        let nvnm_active = Some(
+            chain_spec
+                .nvnm_hardfork_at(head_timestamp)
+                .name()
+                .to_string(),
+        );
+
+        Ok(ForkSchedule {
+            schedule,
+            active,
+            nvnm_active,
+        })
     }
 }

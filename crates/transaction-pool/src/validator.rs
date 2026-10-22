@@ -5,7 +5,7 @@ use crate::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
 };
 
-use alloy_consensus::{Transaction, constants::KECCAK_EMPTY};
+use alloy_consensus::{BlockHeader as _, Transaction, constants::KECCAK_EMPTY};
 use alloy_evm::{Database, EvmEnv};
 use alloy_primitives::{Address, B256};
 use parking_lot::RwLock;
@@ -31,13 +31,13 @@ use revm::{
 };
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU16, Ordering},
 };
 use tempo_chainspec::{
-    hardfork::{TempoHardfork, TempoHardforks},
+    hardfork::{Forks, TempoHardfork, TempoHardforks},
     spec::TEMPO_T7_BASE_FEE_FLOOR,
 };
-use tempo_evm::{TempoEvmConfig, TempoPoolValidationEvm};
+use tempo_evm::{TempoEvmConfig, TempoPoolValidationEvm, env_forks};
 use tempo_precompiles::{
     nonce::{INonce, NonceManager},
     storage::StorageActions,
@@ -111,12 +111,12 @@ pub struct TempoTransactionValidator<Client, EvmConfig = TempoEvmConfig> {
     /// Tip hash and cache of state reads shared across validation calls, replaced on each
     /// `on_new_head_block`.
     cached_state: RwLock<(B256, Arc<StateCache>)>,
-    /// The Tempo hardfork active at the current tip, stored as an index into
-    /// [`TempoHardfork::VARIANTS`] and updated on each `on_new_head_block`.
+    /// The forks active at the current tip, stored as [`Forks::packed`] and updated on each
+    /// `on_new_head_block`.
     ///
-    /// Cached here so hot paths can resolve the active hardfork with a single atomic load
+    /// Cached here so hot paths can resolve the active forks with a single atomic load
     /// instead of walking the chain spec's fork schedule.
-    active_hardfork: AtomicU8,
+    active_forks: AtomicU16,
 }
 
 impl<Client, EvmConfig> TempoTransactionValidator<Client, EvmConfig>
@@ -143,7 +143,7 @@ where
             .evm_config()
             .evm_env(latest_header.header())
             .expect("failed constructing EvmEnv from latest header");
-        let active_hardfork = AtomicU8::new(evm_env.cfg_env.spec.variant_index());
+        let active_forks = AtomicU16::new(env_forks(&evm_env).packed());
         Self {
             inner,
             aa_valid_after_max_secs,
@@ -154,7 +154,7 @@ where
             address_filter: AddressFilter::default(),
             cached_evm_env: parking_lot::RwLock::new(evm_env),
             cached_state: RwLock::new((latest_header.hash(), Arc::new(StateCache::default()))),
-            active_hardfork,
+            active_forks,
         }
     }
 
@@ -183,8 +183,15 @@ where
     ///
     /// Updated on each `on_new_head_block`.
     pub fn active_hardfork(&self) -> TempoHardfork {
-        TempoHardfork::from_variant_index(self.active_hardfork.load(Ordering::Relaxed))
-            .expect("stored hardfork index is valid")
+        self.active_forks().tempo
+    }
+
+    /// Returns the forks active at the current tip.
+    ///
+    /// Updated on each `on_new_head_block`.
+    pub fn active_forks(&self) -> Forks {
+        Forks::from_packed(self.active_forks.load(Ordering::Relaxed))
+            .expect("stored forks are valid")
     }
 
     /// Obtains a clone of the shared [`AmmLiquidityCache`].
@@ -418,7 +425,8 @@ where
         EV::DB: Database<Error = ProviderError> + DatabaseRef<Error = ProviderError>,
     {
         // Get the hardfork active at the current tip
-        let spec = self.active_hardfork();
+        let forks = self.active_forks();
+        let spec = forks.tempo;
 
         // Reject system transactions, those are never allowed in the pool.
         if transaction.inner().is_system_tx() {
@@ -640,7 +648,7 @@ where
                     } else {
                         // This is a 2D nonce transaction - validate against 2D nonce
                         state_nonce = match evm.db_mut().with_read_only_storage_ctx(
-                            spec,
+                            forks,
                             StorageActions::disabled(),
                             || {
                                 NonceManager::new().get_nonce(INonce::getNonceCall {
@@ -778,8 +786,18 @@ where
             .evm_config()
             .evm_env(new_tip_block.header())
             .expect("invalid block in on_new_head_block");
-        self.active_hardfork
-            .store(evm_env.cfg_env.spec.variant_index(), Ordering::Relaxed);
+        let forks = env_forks(&evm_env);
+        if self.active_forks.swap(forks.packed(), Ordering::Relaxed) != forks.packed() {
+            tracing::info!(
+                target: "txpool",
+                block = new_tip_block.number(),
+                timestamp = new_tip_block.timestamp(),
+                tempo = %forks.tempo,
+                nvnm = %forks.nvnm,
+                chain_id = evm_env.cfg_env.chain_id,
+                "Crossed a hardfork boundary"
+            );
+        }
         *self.cached_evm_env.write() = evm_env;
 
         // State changed, drop all cached reads and anchor the new cache to this tip.
@@ -2680,7 +2698,7 @@ mod tests {
         let spec = provider.chain_spec().tempo_hardfork_at(0);
 
         // Test that is_fee_token_paused returns true for paused tokens
-        let result = state.is_fee_token_paused(spec, fee_token, StorageActions::disabled());
+        let result = state.is_fee_token_paused(spec.into(), fee_token, StorageActions::disabled());
         assert!(result.is_ok());
         assert!(
             result.unwrap(),
@@ -2831,8 +2849,11 @@ mod tests {
         );
 
         // BUT the pause check in is_fee_token_paused should catch it BEFORE the bypass
-        let is_paused =
-            state.is_fee_token_paused(spec, paused_validator_token, StorageActions::disabled());
+        let is_paused = state.is_fee_token_paused(
+            spec.into(),
+            paused_validator_token,
+            StorageActions::disabled(),
+        );
         assert!(is_paused.is_ok());
         assert!(
             is_paused.unwrap(),

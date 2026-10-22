@@ -1216,6 +1216,7 @@ fn maybe_override_fee_recipient<DB: Database>(
     let Some(public_key) = attributes.proposer_public_key() else {
         return;
     };
+    let forks = executor.evm().forks();
     let ctx = executor.evm_mut().ctx_mut();
     if !ctx.cfg.spec.is_t2() {
         return;
@@ -1224,7 +1225,7 @@ fn maybe_override_fee_recipient<DB: Database>(
     // We are using the database as a read-only storage context to avoid modifying the journal state.
     // Reading slots here might be dangerous because they would end up being warmed and might affect gas accounting.
     match ctx.journaled_state.database.with_read_only_storage_ctx(
-        ctx.cfg.spec,
+        forks,
         StorageActions::disabled(),
         || -> Result<Option<Address>, PayloadBuilderError> {
             let parent_number = ctx.block.number.saturating_to::<u64>() - 1;
