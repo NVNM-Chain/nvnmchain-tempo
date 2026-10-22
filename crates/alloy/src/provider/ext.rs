@@ -189,6 +189,14 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
             .map_err(TransportErrorKind::custom)
     }
 
+    /// Returns `true` if the given NVNM fork is active on the connected chain.
+    async fn is_nvnm_hardfork_active(&self, hardfork: NvnmHardfork) -> Result<bool, TransportError>
+    where
+        Self: Sized,
+    {
+        Ok(self.get_active_nvnm_hardfork().await? >= hardfork)
+    }
+
     /// Returns the Tempo fork schedule and active fork at the connected chain's head.
     ///
     /// Calls `tempo_forkSchedule` on every invocation, preserving unknown fork names.
