@@ -255,20 +255,14 @@ impl Reader {
         )))
     }
 
-    /// The ids matching `name` under `mode`, in id order, `limit` of them from `offset`.
-    pub fn search(
-        &self,
-        mode: Mode,
-        name: &str,
-        offset: u64,
-        limit: u64,
-    ) -> eyre::Result<Vec<u64>> {
+    /// Up to `want` ids matching `name` under `mode`, in id order from the id `from`.
+    pub fn search(&self, mode: Mode, name: &str, from: u64, want: usize) -> eyre::Result<Vec<u64>> {
         let lower = name.to_lowercase();
         let (family, seek) = match mode {
             Mode::Exact => (CF_NAME, name_prefix(&lower)),
             Mode::Prefix => (CF_NAME, lower.as_bytes().to_vec()),
             Mode::Suffix => (CF_REV, reversed(&lower).into_bytes()),
-            Mode::Contains => return self.contains(&lower, offset, limit),
+            Mode::Contains => return self.contains(&lower, from, want),
         };
 
         let mut ids = Vec::new();
@@ -282,17 +276,20 @@ impl Reader {
             }
             ids.push(id_of(&key)?);
         }
+        // Keys run by name, so these come out of id order: every match is read and sorted.
+        ids.retain(|id| *id >= from);
         ids.sort_unstable();
-        Ok(page(ids, offset, limit))
+        ids.truncate(want);
+        Ok(ids)
     }
 
     /// Through the postings when the query has a trigram to seek; a shorter one reads the
     /// names, which the chain's own index refused to do.
-    fn contains(&self, lower: &str, offset: u64, limit: u64) -> eyre::Result<Vec<u64>> {
+    fn contains(&self, lower: &str, from: u64, want: usize) -> eyre::Result<Vec<u64>> {
         let probes = probes(lower);
         match probes.is_empty() {
-            true => self.scan(lower, offset, limit),
-            false => self.postings(&probes, lower, offset, limit),
+            true => self.scan(lower, from, want),
+            false => self.postings(&probes, lower, from, want),
         }
     }
 
@@ -302,8 +299,8 @@ impl Reader {
         &self,
         probes: &[String],
         lower: &str,
-        offset: u64,
-        limit: u64,
+        mut from: u64,
+        want: usize,
     ) -> eyre::Result<Vec<u64>> {
         let prefixes: Vec<Vec<u8>> = probes.iter().map(|gram| name_prefix(gram)).collect();
         let tri = cf(&self.db, CF_TRI);
@@ -312,16 +309,13 @@ impl Reader {
             .map(|_| self.db.raw_iterator_cf(tri))
             .collect();
 
-        let (mut ids, mut skipped, mut from) = (Vec::new(), 0, 0);
-        while (ids.len() as u64) < limit {
+        let mut ids = Vec::new();
+        while ids.len() < want {
             let Some(id) = next_common(&mut cursors, &prefixes, from)? else {
                 break;
             };
             if self.holds(id, lower)? {
-                match skipped < offset {
-                    true => skipped += 1,
-                    false => ids.push(id),
-                }
+                ids.push(id);
             }
             from = id + 1;
         }
@@ -335,24 +329,20 @@ impl Reader {
         Ok(String::from_utf8_lossy(&name).contains(lower))
     }
 
-    /// Every name in id order, stopping once the page is full.
-    fn scan(&self, lower: &str, offset: u64, limit: u64) -> eyre::Result<Vec<u64>> {
+    /// The names from `from` on, in id order.
+    fn scan(&self, lower: &str, from: u64, want: usize) -> eyre::Result<Vec<u64>> {
         let mut ids = Vec::new();
-        let mut skipped = 0;
-        for row in self
-            .db
-            .iterator_cf(cf(&self.db, CF_ID), IteratorMode::Start)
-        {
-            if ids.len() as u64 >= limit {
+        let start = from.to_be_bytes();
+        for row in self.db.iterator_cf(
+            cf(&self.db, CF_ID),
+            IteratorMode::From(&start, Direction::Forward),
+        ) {
+            if ids.len() >= want {
                 break;
             }
             let (key, name) = row?;
-            if !String::from_utf8_lossy(&name).contains(lower) {
-                continue;
-            }
-            match skipped < offset {
-                true => skipped += 1,
-                false => ids.push(id_of(&key)?),
+            if String::from_utf8_lossy(&name).contains(lower) {
+                ids.push(id_of(&key)?);
             }
         }
         Ok(ids)
@@ -416,16 +406,7 @@ fn next_common(
     loop {
         let mut moved = false;
         for (cursor, prefix) in cursors.iter_mut().zip(prefixes) {
-            let mut key = prefix.clone();
-            key.extend_from_slice(&wanted.to_be_bytes());
-            cursor.seek(&key);
-            cursor.status()?;
-            let posted = cursor
-                .key()
-                .filter(|key| key.starts_with(prefix))
-                .map(id_of)
-                .transpose()?;
-            let Some(posted) = posted else {
+            let Some(posted) = reach(cursor, prefix, wanted)? else {
                 return Ok(None);
             };
             if posted != wanted {
@@ -437,6 +418,39 @@ fn next_common(
             return Ok(Some(wanted));
         }
     }
+}
+
+/// How many postings a cursor steps over before it seeks instead. The round before left it a
+/// few short of `wanted` when the trigrams are about as common; a seek is for a rarer one.
+const STEPS: usize = 8;
+
+/// The first id posted under `prefix` at or after `wanted`, or `None` once there is none.
+fn reach(
+    cursor: &mut rocksdb::DBRawIterator<'_>,
+    prefix: &[u8],
+    wanted: u64,
+) -> eyre::Result<Option<u64>> {
+    for _ in 0..STEPS {
+        match posted(cursor, prefix)? {
+            Some(id) if id >= wanted => return Ok(Some(id)),
+            Some(_) => cursor.next(),
+            None => break,
+        }
+    }
+    let mut key = prefix.to_vec();
+    key.extend_from_slice(&wanted.to_be_bytes());
+    cursor.seek(&key);
+    posted(cursor, prefix)
+}
+
+/// The id under the cursor, while it is still within `prefix`.
+fn posted(cursor: &rocksdb::DBRawIterator<'_>, prefix: &[u8]) -> eyre::Result<Option<u64>> {
+    cursor.status()?;
+    cursor
+        .key()
+        .filter(|key| key.starts_with(prefix))
+        .map(id_of)
+        .transpose()
 }
 
 /// `name . 0`: the prefix of every key for that exact name.
@@ -465,13 +479,6 @@ fn id_of(key: &[u8]) -> eyre::Result<u64> {
         .checked_sub(8)
         .ok_or_else(|| eyre::eyre!("index key: shorter than the id it ends with"))?;
     Ok(u64::from_be_bytes(key[tail..].try_into().expect("8 bytes")))
-}
-
-fn page(ids: Vec<u64>, offset: u64, limit: u64) -> Vec<u64> {
-    ids.into_iter()
-        .skip(usize::try_from(offset).unwrap_or(usize::MAX))
-        .take(usize::try_from(limit).unwrap_or(usize::MAX))
-        .collect()
 }
 
 #[cfg(test)]
@@ -515,39 +522,19 @@ mod tests {
         assert!(found(&reader, Mode::Exact, "fund").is_empty());
     }
 
+    /// Through the postings, a scan and the seek families alike.
     #[test]
-    fn offset_and_limit_cut_the_same_page_in_every_mode() {
+    fn a_search_starts_at_an_id_and_stops_once_it_has_enough() {
         let (_dir, store) = store(&NAMES);
         let reader = store.reader();
 
-        assert_eq!(
-            reader.search(Mode::Contains, "alpha", 1, 2).unwrap(),
-            vec![2, 3]
-        );
-        assert_eq!(reader.search(Mode::Prefix, "alpha", 1, 5).unwrap(), vec![3]);
-        assert_eq!(
-            reader.search(Mode::Suffix, "fund", 0, 2).unwrap(),
-            vec![2, 4]
-        );
-        assert!(
-            reader
-                .search(Mode::Contains, "alpha", 99, 5)
-                .unwrap()
-                .is_empty()
-        );
-        // A zero limit is an empty page, not an unbounded read.
-        assert!(
-            reader
-                .search(Mode::Contains, "alpha", 0, 0)
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            reader
-                .search(Mode::Prefix, "alpha", 0, 0)
-                .unwrap()
-                .is_empty()
-        );
+        let search = |mode, name, from, want| reader.search(mode, name, from, want).unwrap();
+        assert_eq!(search(Mode::Contains, "alpha", 2, 2), vec![2, 3]);
+        assert_eq!(search(Mode::Contains, "al", 2, 2), vec![2, 3]);
+        assert_eq!(search(Mode::Prefix, "alpha", 3, 5), vec![3]);
+        assert_eq!(search(Mode::Suffix, "fund", 0, 2), vec![2, 4]);
+        assert!(search(Mode::Contains, "alpha", 6, 5).is_empty());
+        assert!(search(Mode::Contains, "alpha", 0, 0).is_empty());
     }
 
     /// The seek families too, or their keys still name an id that is gone.
@@ -656,10 +643,6 @@ mod tests {
         assert!(probes("al").is_empty());
         assert_eq!(found(&reader, Mode::Contains, "al"), vec![1, 2, 3, 5]);
         assert_eq!(found(&reader, Mode::Contains, "a"), vec![1, 2, 3, 4, 5]);
-        assert_eq!(
-            reader.search(Mode::Contains, "al", 1, 2).unwrap(),
-            vec![2, 3]
-        );
     }
 
     #[test]
