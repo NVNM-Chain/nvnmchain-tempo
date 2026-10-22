@@ -23,7 +23,7 @@ use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
 };
-use tempo_chainspec::hardfork::{Forks, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{storage::StorageAction, storage_credits::NonCreditableSlots};
 use tempo_revm::{
     ProtocolFeeManager, TempoInvalidTransaction, TempoTxEnv, ValidationContext, evm::TempoContext,
@@ -127,11 +127,6 @@ impl<DB: Database, I> TempoEvm<DB, I> {
     /// Provides a mutable reference to the inner [`tempo_revm::TempoEvm`].
     pub fn inner_mut(&mut self) -> &mut tempo_revm::TempoEvm<DB, I> {
         &mut self.inner
-    }
-
-    /// Returns the forks this EVM executes under.
-    pub fn forks(&self) -> Forks {
-        self.inner.forks()
     }
 
     /// Returns the validator-credited fee amount (post-feeAMM haircut) recorded by the most

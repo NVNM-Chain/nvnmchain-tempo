@@ -13,7 +13,7 @@ use reth_provider::{
     ChainSpecProvider, ExecutionOutcome, HeaderProvider, ProviderError, ProviderResult,
     StateProviderFactory,
 };
-use tempo_chainspec::hardfork::{Forks, NvnmHardforks};
+use tempo_chainspec::hardfork::{TempoHardfork, TempoHardforks};
 use tempo_evm::TempoStateAccess;
 use tempo_precompiles::{
     DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
@@ -43,7 +43,7 @@ impl AmmLiquidityCache {
     where
         Client: StateProviderFactory
             + HeaderProvider<Header = TempoHeader>
-            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + NvnmHardforks>,
+            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + TempoHardforks>,
     {
         let this = Self {
             inner: Default::default(),
@@ -68,13 +68,13 @@ impl AmmLiquidityCache {
         S: TempoStateAccess<M>,
     {
         let mut missing_in_cache = Vec::new();
-        let forks;
+        let hardfork;
         let generation;
 
         // Hot path: decide each `(user, validator)` pair entirely from the primitive cache.
         {
             let inner = self.inner.read();
-            forks = inner.forks;
+            hardfork = inner.hardfork;
             generation = inner.generation;
 
             // Validators always accept fees in their own token, and this is the common case, so
@@ -85,7 +85,7 @@ impl AmmLiquidityCache {
 
             let calc_swap = |input| compute_amount_out(input).map_err(ProviderError::other);
             let out1 = calc_swap(fee)?;
-            let out2 = forks.tempo.is_t5().then(|| calc_swap(out1)).transpose()?;
+            let out2 = hardfork.is_t5().then(|| calc_swap(out1)).transpose()?;
 
             for &validator_token in &inner.unique_tokens {
                 let direct = inner
@@ -130,7 +130,7 @@ impl AmmLiquidityCache {
         // Slow path: ask the planner and warm the cache with the pools it reports.
         state_provider
             .with_read_only_storage_ctx(
-                forks,
+                hardfork,
                 StorageActions::disabled(),
                 || -> TempoResult<bool> {
                     let manager = TipFeeManager::new();
@@ -185,7 +185,7 @@ impl AmmLiquidityCache {
     where
         Client: StateProviderFactory
             + HeaderProvider<Header = TempoHeader>
-            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + NvnmHardforks>,
+            + ChainSpecProvider<ChainSpec: EthChainSpec<Header = TempoHeader> + TempoHardforks>,
     {
         self.clear();
         let tip = client.best_block_number()?;
@@ -240,7 +240,7 @@ impl AmmLiquidityCache {
         client: P,
     ) -> ProviderResult<()>
     where
-        P: StateProviderFactory + ChainSpecProvider<ChainSpec: NvnmHardforks>,
+        P: StateProviderFactory + ChainSpecProvider<ChainSpec: TempoHardforks>,
     {
         let headers = headers.into_iter().collect::<Vec<_>>();
         let (latest_hash, latest_timestamp) = if let Some(header) = headers.last() {
@@ -317,8 +317,8 @@ impl AmmLiquidityCache {
                 .collect();
         }
 
-        // Refresh the cached active forks from the latest seen header.
-        self.inner.write().forks = client.chain_spec().forks_at(latest_timestamp);
+        // Refresh the cached active hardfork from the latest seen header.
+        self.inner.write().hardfork = client.chain_spec().tempo_hardfork_at(latest_timestamp);
 
         Ok(())
     }
@@ -326,8 +326,8 @@ impl AmmLiquidityCache {
 
 #[derive(Debug, Default)]
 struct AmmLiquidityCacheInner {
-    /// Forks active at the most recently observed canonical header.
-    forks: Forks,
+    /// Hardfork active at the most recently observed canonical header.
+    hardfork: TempoHardfork,
 
     /// Cache for (user_token, validator_token) -> liquidity
     pool_cache: HashMap<(Address, Address), U256>,
@@ -427,7 +427,6 @@ mod tests {
     use super::*;
     use crate::test_utils::create_mock_provider;
     use alloy_primitives::address;
-    use tempo_chainspec::hardfork::TempoHardfork;
 
     // ============================================
     // has_enough_liquidity tests (using MockEthProvider)
@@ -466,7 +465,7 @@ mod tests {
             for validator_token in [user_token, other_token] {
                 let cache = AmmLiquidityCache {
                     inner: Arc::new(RwLock::new(AmmLiquidityCacheInner {
-                        forks: hardfork.into(),
+                        hardfork,
                         unique_tokens: vec![validator_token],
                         ..Default::default()
                     })),
@@ -567,10 +566,7 @@ mod tests {
 
         let cache = AmmLiquidityCache {
             inner: Arc::new(RwLock::new(AmmLiquidityCacheInner {
-                forks: Forks {
-                    tempo: TempoHardfork::T5,
-                    ..Default::default()
-                },
+                hardfork: TempoHardfork::T5,
                 unique_tokens: vec![validator],
                 pool_cache: {
                     let mut m = HashMap::default();
@@ -649,10 +645,7 @@ mod tests {
         // lookup falls through to the slow path, where the provider returns zero reserves.
         let cache = AmmLiquidityCache {
             inner: Arc::new(RwLock::new(AmmLiquidityCacheInner {
-                forks: Forks {
-                    tempo: TempoHardfork::T5,
-                    ..Default::default()
-                },
+                hardfork: TempoHardfork::T5,
                 unique_tokens: vec![validator_token],
                 pool_cache: {
                     let mut m = HashMap::default();

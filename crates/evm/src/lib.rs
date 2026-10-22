@@ -45,7 +45,7 @@ use crate::evm::TempoEvm;
 use reth_evm_ethereum::EthEvmConfig;
 use tempo_chainspec::{
     TempoChainSpec,
-    hardfork::{Forks, NvnmHardforks, TempoHardfork, TempoHardforks},
+    hardfork::{NvnmHardforks, TempoHardfork, TempoHardforks},
 };
 use tempo_precompiles::{error::Result as TempoResult, storage::StorageActions};
 use tempo_revm::{TempoTxEnv, evm::TempoContext, gas_params::tempo_gas_params_with_amsterdam};
@@ -57,14 +57,6 @@ pub use tempo_revm::{
 
 #[cfg(test)]
 mod test_utils;
-
-/// The forks of the block `evm_env` was built for.
-pub fn env_forks(evm_env: &EvmEnv<TempoHardfork, TempoBlockEnv>) -> Forks {
-    Forks {
-        tempo: evm_env.cfg_env.spec,
-        nvnm: evm_env.block_env.nvnm_hardfork,
-    }
-}
 
 /// Tempo-related EVM configuration.
 #[derive(Debug, Clone)]
@@ -82,13 +74,13 @@ impl FeeTokenResolver for TempoEvmConfig {
         state: &mut S,
         tx: &TempoTxEnv,
         fee_payer: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
         S: TempoStateAccess<M>,
     {
-        TempoFeeManager::new().resolve_fee_token(state, tx, fee_payer, forks, actions)
+        TempoFeeManager::new().resolve_fee_token(state, tx, fee_payer, spec, actions)
     }
 }
 

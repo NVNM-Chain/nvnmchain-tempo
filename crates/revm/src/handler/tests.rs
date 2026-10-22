@@ -18,7 +18,7 @@ use revm::{
     },
     primitives::hardfork::SpecId,
 };
-use tempo_chainspec::hardfork::{Forks, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, ITIPFeeAMM};
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, storage::ContractStorage, test_util::TIP20Setup,
@@ -145,7 +145,7 @@ impl<DB: Database> ProtocolFeeManager<DB> for ValidatorTokenLookupFailsFeeManage
         _journal: &mut Journal<DB>,
         tx: &TempoTxEnv,
         _fee_payer: Address,
-        _forks: Forks,
+        _spec: TempoHardfork,
         _actions: StorageActions,
     ) -> tempo_precompiles::error::Result<Address> {
         Ok(tx.fee_token.unwrap_or(DEFAULT_FEE_TOKEN))
@@ -155,7 +155,7 @@ impl<DB: Database> ProtocolFeeManager<DB> for ValidatorTokenLookupFailsFeeManage
         &self,
         _journal: &mut Journal<DB>,
         _beneficiary: Address,
-        _forks: Forks,
+        _spec: TempoHardfork,
         _actions: StorageActions,
     ) -> tempo_precompiles::error::Result<Address> {
         Err(TempoPrecompileError::Fatal(
@@ -522,7 +522,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
             &mut ctx.journaled_state,
             &ctx.tx,
             user,
-            ctx.cfg.spec.into(),
+            ctx.cfg.spec,
             tempo_precompiles::storage::StorageActions::disabled(),
         )?;
         assert_eq!(DEFAULT_FEE_TOKEN, fee_token);
@@ -543,7 +543,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
             &mut ctx.journaled_state,
             &ctx.tx,
             user,
-            ctx.cfg.spec.into(),
+            ctx.cfg.spec,
             tempo_precompiles::storage::StorageActions::disabled(),
         )?;
         assert_eq!(user_fee_token, fee_token);
@@ -555,7 +555,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
         &mut ctx.journaled_state,
         &ctx.tx,
         user,
-        ctx.cfg.spec.into(),
+        ctx.cfg.spec,
         tempo_precompiles::storage::StorageActions::disabled(),
     )?;
     assert_eq!(tx_fee_token, fee_token);

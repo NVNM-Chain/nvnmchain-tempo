@@ -13,7 +13,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use std::{cell::RefCell, rc::Rc};
-use tempo_chainspec::hardfork::{Forks, NvnmHardfork, TempoHardfork};
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 /// Production [`PrecompileStorageProvider`] backed by the live EVM journal.
@@ -22,7 +22,8 @@ use tempo_primitives::TempoBlockEnv;
 pub struct EvmPrecompileStorageProvider<'a> {
     internals: EvmInternals<'a>,
     gas_tracker: GasTracker,
-    forks: Forks,
+    spec: TempoHardfork,
+    nvnm_hardfork: NvnmHardfork,
     amsterdam_eip8037_enabled: bool,
     is_static: bool,
     gas_params: GasParams,
@@ -36,37 +37,30 @@ pub struct EvmPrecompileStorageProvider<'a> {
     actions: StorageActions,
 }
 
-/// The forks of the block `internals` executes: the Tempo one from `cfg`, the NVNM one from the
-/// block env.
-fn block_forks(internals: &EvmInternals<'_>, cfg: &CfgEnv<TempoHardfork>) -> Forks {
-    Forks {
-        tempo: cfg.spec,
-        nvnm: internals
-            .block_env_downcast_ref::<TempoBlockEnv>()
-            .map(|block| block.nvnm_hardfork)
-            .unwrap_or_default(),
-    }
-}
-
 impl<'a> EvmPrecompileStorageProvider<'a> {
-    /// Creates a new storage provider with the given gas limit, forks, and static flag.
+    /// Creates a new storage provider with the given gas limit, hardfork, and static flag.
     pub fn new(
         internals: EvmInternals<'a>,
         gas_limit: u64,
         reservoir: u64,
-        forks: Forks,
+        spec: TempoHardfork,
         amsterdam_eip8037_enabled: bool,
         is_static: bool,
         gas_params: GasParams,
     ) -> Self {
+        let nvnm_hardfork = internals
+            .block_env_downcast_ref::<TempoBlockEnv>()
+            .map(|block| block.nvnm_hardfork)
+            .unwrap_or_default();
         Self {
             internals,
             gas_tracker: GasTracker::new(gas_limit, gas_limit, reservoir),
-            forks,
+            spec,
+            nvnm_hardfork,
             amsterdam_eip8037_enabled,
             is_static,
             gas_params,
-            tip1060_storage_credits_enabled: forks.tempo.is_t7(),
+            tip1060_storage_credits_enabled: spec.is_t7(),
             tip1060_storage_credit_minting_enabled: true,
             non_creditable_slots: Rc::new(RefCell::new(NonCreditableSlots::empty())),
             #[cfg(debug_assertions)]
@@ -77,12 +71,11 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
 
     /// Creates a new storage provider with maximum gas limit and non-static context.
     pub fn new_max_gas(internals: EvmInternals<'a>, cfg: &CfgEnv<TempoHardfork>) -> Self {
-        let forks = block_forks(&internals, cfg);
         Self::new(
             internals,
             u64::MAX,
             0,
-            forks,
+            cfg.spec,
             cfg.enable_amsterdam_eip8037,
             false,
             cfg.gas_params.clone(),
@@ -96,12 +89,11 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         gas_limit: u64,
         reservoir: u64,
     ) -> Self {
-        let forks = block_forks(&internals, cfg);
         Self::new(
             internals,
             gas_limit,
             reservoir,
-            forks,
+            cfg.spec,
             cfg.enable_amsterdam_eip8037,
             false,
             cfg.gas_params.clone(),
@@ -186,7 +178,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         let additional_cost = self.gas_params.cold_storage_additional_cost();
 
         // T4+: pre-charge static gas to avoid cheap useless work.
-        let skip_cold_load = if self.forks.tempo.is_t4() {
+        let skip_cold_load = if self.spec.is_t4() {
             self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
             self.gas_tracker.remaining() < additional_cost
         } else {
@@ -199,7 +191,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
                 .record(StorageAction::Sload(address, key, result.data));
         }
 
-        if !self.forks.tempo.is_t4() {
+        if !self.spec.is_t4() {
             self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
         }
 
@@ -221,14 +213,12 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         action: impl FnOnce(&SStoreResult) -> StorageAction,
     ) -> Result<(), TempoPrecompileError> {
         // T12+: EIP-2200 sentry. SSTORE fails if the frame only has the call stipend remaining.
-        if self.forks.tempo.is_t12()
-            && self.gas_tracker.remaining() <= self.gas_params.call_stipend()
-        {
+        if self.spec.is_t12() && self.gas_tracker.remaining() <= self.gas_params.call_stipend() {
             return Err(TempoPrecompileError::OutOfGas);
         }
 
         // T4+: pre-charge static gas before loading storage to avoid cheap useless work.
-        let skip_cold_load = if self.forks.tempo.is_t4() {
+        let skip_cold_load = if self.spec.is_t4() {
             self.deduct_gas(self.gas_params.sstore_static_gas())?;
             self.gas_tracker.remaining() < self.gas_params.cold_storage_additional_cost()
         } else {
@@ -238,7 +228,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         let result = self.sstore_journal(address, key, value, skip_cold_load)?;
         self.actions.record(action(&result.data));
 
-        if !self.forks.tempo.is_t4() {
+        if !self.spec.is_t4() {
             self.deduct_gas(self.gas_params.sstore_static_gas())?;
         }
 
@@ -272,7 +262,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         let additional_cost = self.gas_params.cold_account_additional_cost();
 
         // T4+: pre-charge static gas to avoid cheap useless work.
-        let insufficient_gas_for_cold_load = if self.forks.tempo.is_t4() {
+        let insufficient_gas_for_cold_load = if self.spec.is_t4() {
             self.deduct_gas(self.gas_params.warm_storage_read_cost())?;
             self.gas_tracker.remaining() < additional_cost
         } else {
@@ -283,7 +273,7 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
             .internals
             .load_account_mut_skip_cold_load(address, insufficient_gas_for_cold_load)?;
 
-        if !self.forks.tempo.is_t4() {
+        if !self.spec.is_t4() {
             deduct_gas(
                 &mut self.gas_tracker,
                 self.gas_params.warm_storage_read_cost(),
@@ -583,12 +573,12 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
 
     #[inline]
     fn spec(&self) -> TempoHardfork {
-        self.forks.tempo
+        self.spec
     }
 
     #[inline]
     fn nvnm_hardfork(&self) -> NvnmHardfork {
-        self.forks.nvnm
+        self.nvnm_hardfork
     }
 
     #[inline]
@@ -630,7 +620,7 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
 
     #[inline]
     fn set_tip1060_storage_credits(&mut self, enabled: bool) {
-        self.tip1060_storage_credits_enabled = enabled && self.forks.tempo.is_t7();
+        self.tip1060_storage_credits_enabled = enabled && self.spec.is_t7();
     }
 
     #[inline]
@@ -843,7 +833,7 @@ mod tests {
                 evm_internals,
                 gas_limit,
                 reservoir,
-                spec.into(),
+                spec,
                 amsterdam_eip8037_enabled,
                 false,
                 gas_params,
@@ -892,7 +882,7 @@ mod tests {
             internals,
             u64::MAX,
             0,
-            ctx.cfg.spec.into(),
+            ctx.cfg.spec,
             ctx.cfg.enable_amsterdam_eip8037,
             true,
             ctx.cfg.gas_params.clone(),

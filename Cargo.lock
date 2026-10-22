@@ -14037,7 +14037,6 @@ dependencies = [
  "paste",
  "serde",
  "serde_json",
- "tempo-hardfork",
 ]
 
 [[package]]

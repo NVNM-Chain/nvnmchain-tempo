@@ -4,7 +4,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 use alloy_hardforks::hardfork;
-use tempo_hardfork::TempoHardfork;
 
 /// Defines [`NvnmHardfork`] the way `tempo_hardfork!` defines `TempoHardfork`: `is_<fork>()`
 /// helpers, [`nvnm_post_genesis_hardforks!`] for per-fork code downstream, and tests.
@@ -76,11 +75,11 @@ macro_rules! nvnm_hardfork {
 }
 
 nvnm_hardfork!(
-    /// NVNM's own forks; each implies no [`TempoHardfork`].
+    /// NVNM's own forks; each implies no Tempo fork.
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     #[derive(Default)]
     NvnmHardfork {
-        /// No lane fork; `Genesis` is taken by [`TempoHardfork`].
+        /// No lane fork; `Genesis` names Tempo's.
         #[default]
         Baseline,
     }
@@ -102,42 +101,6 @@ impl NvnmHardfork {
     }
 }
 
-/// The Tempo fork and the NVNM fork active at one block.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Forks {
-    pub tempo: TempoHardfork,
-    pub nvnm: NvnmHardfork,
-}
-
-/// A Tempo fork with the lane at `Baseline`.
-impl From<TempoHardfork> for Forks {
-    fn from(tempo: TempoHardfork) -> Self {
-        Self {
-            tempo,
-            nvnm: NvnmHardfork::Baseline,
-        }
-    }
-}
-
-impl Forks {
-    /// Both variant indices in one word, for an atomic.
-    pub fn packed(&self) -> u16 {
-        (u16::from(self.tempo.variant_index()) << 8) | u16::from(self.nvnm.variant_index())
-    }
-
-    /// Reverses [`Self::packed`]; `None` if either index is past its list.
-    pub const fn from_packed(packed: u16) -> Option<Self> {
-        let [tempo, nvnm] = packed.to_be_bytes();
-        match (
-            TempoHardfork::from_variant_index(tempo),
-            NvnmHardfork::from_variant_index(nvnm),
-        ) {
-            (Some(tempo), Some(nvnm)) => Some(Self { tempo, nvnm }),
-            _ => None,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,17 +112,6 @@ mod tests {
             let key = format!("{}Time", fork.name().to_lowercase());
             assert_eq!(fork.genesis_key(), Some(key.as_str()));
         }
-    }
-
-    #[test]
-    fn packed_forks_round_trip() {
-        for &tempo in TempoHardfork::VARIANTS {
-            for &nvnm in NvnmHardfork::VARIANTS {
-                let forks = Forks { tempo, nvnm };
-                assert_eq!(Forks::from_packed(forks.packed()), Some(forks));
-            }
-        }
-        assert_eq!(Forks::from_packed(u16::MAX), None);
     }
 
     #[test]

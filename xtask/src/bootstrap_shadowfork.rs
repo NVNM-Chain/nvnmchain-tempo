@@ -41,7 +41,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use serde::Deserialize;
-use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_consensus_config::{SigningKey, SigningKeyPassphrase, SigningShare};
 use tempo_contracts::precompiles::VALIDATOR_CONFIG_V2_ADDRESS;
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
@@ -578,10 +578,6 @@ where
 
     fn spec(&self) -> TempoHardfork {
         TempoHardfork::T2
-    }
-
-    fn nvnm_hardfork(&self) -> NvnmHardfork {
-        self.block_env.nvnm_hardfork
     }
 
     fn amsterdam_eip8037_enabled(&self) -> bool {

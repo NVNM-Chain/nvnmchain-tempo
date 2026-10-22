@@ -10,7 +10,7 @@ use revm::{
 };
 use scoped_tls::scoped_thread_local;
 use std::{cell::RefCell, fmt::Debug};
-use tempo_chainspec::hardfork::{Forks, TempoHardfork};
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 use crate::{
@@ -239,9 +239,9 @@ impl StorageCtx {
         Self::with_storage(|s| s.spec())
     }
 
-    /// Returns both currently active forks.
-    pub fn forks(&self) -> Forks {
-        Self::with_storage(|s| s.forks())
+    /// Returns the currently active NVNM fork.
+    pub fn nvnm_hardfork(&self) -> NvnmHardfork {
+        Self::with_storage(|s| s.nvnm_hardfork())
     }
 
     /// Returns the shared storage-actions recorder for the current storage context.

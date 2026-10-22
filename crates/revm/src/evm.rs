@@ -11,7 +11,7 @@ use revm::{
     interpreter::{InitialAndFloorGas, interpreter::EthInterpreter},
 };
 use std::{cell::RefCell, rc::Rc, sync::Arc};
-use tempo_chainspec::hardfork::{Forks, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{storage::StorageActions, storage_credits::NonCreditableSlots};
 
 /// The Tempo EVM context type.
@@ -76,7 +76,6 @@ impl<DB: Database, I> TempoEvm<DB, I> {
         let actions = StorageActions::disabled();
         let precompiles = tempo_precompiles::tempo_precompiles(
             &ctx.cfg,
-            ctx.block.nvnm_hardfork,
             actions.clone(),
             non_creditable_slots.clone(),
         );
@@ -205,7 +204,6 @@ impl<DB: Database, I> TempoEvm<DB, I> {
     pub fn with_actions(mut self, actions: StorageActions) -> Self {
         self.inner.precompiles = tempo_precompiles::tempo_precompiles(
             &self.inner.ctx.cfg,
-            self.inner.ctx.block.nvnm_hardfork,
             actions.clone(),
             self.non_creditable_slots.clone(),
         );
@@ -216,14 +214,6 @@ impl<DB: Database, I> TempoEvm<DB, I> {
     /// Consumes self and returns the inner Inspector.
     pub fn into_inspector(self) -> I {
         self.inner.into_inspector()
-    }
-
-    /// Returns the forks this EVM executes under.
-    pub fn forks(&self) -> Forks {
-        Forks {
-            tempo: self.inner.ctx.cfg.spec,
-            nvnm: self.inner.ctx.block.nvnm_hardfork,
-        }
     }
 
     /// Returns a reference to the recorded storage actions.

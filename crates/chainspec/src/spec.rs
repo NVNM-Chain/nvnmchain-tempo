@@ -4,12 +4,7 @@ use crate::{
     bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
-use alloc::{
-    boxed::Box,
-    string::{String, ToString},
-    sync::Arc,
-    vec::Vec,
-};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
@@ -27,7 +22,7 @@ use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
 use tempo_hardfork::TempoHardfork;
-use tempo_nvnm_hardfork::{Forks, NvnmHardfork};
+use tempo_nvnm_hardfork::NvnmHardfork;
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -100,112 +95,14 @@ pub struct TempoGenesisInfo {
     t14_time: Option<u64>,
 }
 
-/// Why a genesis cannot become a [`TempoChainSpec`].
-#[derive(Debug)]
-pub enum TempoGenesisError {
-    /// A Tempo field holds a value of the wrong shape.
-    Malformed(serde_json::Error),
-    /// Tempo's own networks, by chain id, carry an NVNM fork time.
-    NvnmForkOnTempoChain(u64),
-    /// An `n<k>Time` key this node has no fork for, as from a newer NVNM.
-    UnknownNvnmFork(String),
-    /// The second fork is scheduled no later than the first, or without it.
-    NvnmForksOutOfOrder(&'static str, &'static str),
-    /// An NVNM fork and a Tempo fork share one time after genesis.
-    NvnmForkAtTempoTime(&'static str, &'static str),
-}
-
-impl core::fmt::Display for TempoGenesisError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Malformed(err) => write!(f, "malformed Tempo genesis field: {err}"),
-            Self::NvnmForkOnTempoChain(id) => write!(f, "chain {id} is Tempo's: no NVNM fork"),
-            Self::UnknownNvnmFork(key) => write!(f, "unknown NVNM fork time `{key}`"),
-            Self::NvnmForksOutOfOrder(earlier, later) => {
-                write!(f, "{later} must be scheduled after {earlier}")
-            }
-            Self::NvnmForkAtTempoTime(nvnm, tempo) => {
-                write!(f, "{nvnm} must not share its activation time with {tempo}")
-            }
-        }
-    }
-}
-
-impl core::error::Error for TempoGenesisError {}
-
-/// `n<k>Time`, the genesis key of an NVNM fork.
-fn is_nvnm_fork_key(key: &str) -> bool {
-    key.strip_prefix('n')
-        .and_then(|key| key.strip_suffix("Time"))
-        .is_some_and(|k| !k.is_empty() && k.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// Checks the NVNM forks, in variant order, against the Tempo forks: a scheduled fork needs the
-/// one before it scheduled and, unless both are at genesis, strictly earlier; and no time after
-/// genesis is a Tempo fork's. Fork id leaves genesis times out, so sharing one there is harmless.
-fn check_nvnm_schedule(
-    nvnm: &[(&'static str, Option<u64>)],
-    tempo: &[(&'static str, u64)],
-    genesis_time: u64,
-) -> Result<(), TempoGenesisError> {
-    for pair in nvnm.windows(2) {
-        let &[(earlier, earlier_time), (later, Some(later_time))] = pair else {
-            continue;
-        };
-        let in_order = earlier_time.is_some_and(|time| {
-            later_time > time || (later_time <= genesis_time && time <= genesis_time)
-        });
-        if !in_order {
-            return Err(TempoGenesisError::NvnmForksOutOfOrder(earlier, later));
-        }
-    }
-    for &(nvnm, time) in nvnm {
-        let Some(time) = time.filter(|&time| time > genesis_time) else {
-            continue;
-        };
-        if let Some(&(tempo, _)) = tempo.iter().find(|&&(_, tempo_time)| tempo_time == time) {
-            return Err(TempoGenesisError::NvnmForkAtTempoTime(nvnm, tempo));
-        }
-    }
-    Ok(())
-}
-
 impl TempoGenesisInfo {
     /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Result<Self, TempoGenesisError> {
-        let fields = &genesis.config.extra_fields;
-        let nvnm_keys: Vec<&str> = fields
-            .keys()
-            .filter(|key| is_nvnm_fork_key(key))
-            .map(String::as_str)
-            .collect();
-        if !nvnm_keys.is_empty() && matches!(genesis.config.chain_id, 4217 | 42431) {
-            return Err(TempoGenesisError::NvnmForkOnTempoChain(
-                genesis.config.chain_id,
-            ));
-        }
-        // serde drops an unknown key: an older node would run the chain without that fork.
-        let known = |key| {
-            NvnmHardfork::VARIANTS
-                .iter()
-                .any(|f| f.genesis_key() == Some(key))
-        };
-        if let Some(key) = nvnm_keys.into_iter().find(|&key| !known(key)) {
-            return Err(TempoGenesisError::UnknownNvnmFork(key.to_string()));
-        }
-        let info: Self = fields
-            .deserialize_as()
-            .map_err(TempoGenesisError::Malformed)?;
-        let nvnm: Vec<_> = NvnmHardfork::VARIANTS[1..]
-            .iter()
-            .map(|&fork| (fork.name(), info.nvnm_fork_time(fork)))
-            .collect();
-        let tempo: Vec<_> = TempoHardfork::VARIANTS[1..]
-            .iter()
-            .filter_map(|&fork| Some((fork.name(), info.fork_time(fork)?)))
-            .collect();
-        check_nvnm_schedule(&nvnm, &tempo, genesis.timestamp)?;
-        Ok(info)
+    fn extract_from(genesis: &Genesis) -> Self {
+        genesis
+            .config
+            .extra_fields
+            .deserialize_as::<Self>()
+            .unwrap_or_default()
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -274,7 +171,7 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)?.into(),
+        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
     })
 }
 
@@ -391,16 +288,10 @@ impl TempoChainSpec {
         TempoConsensusSpec::general_gas_limit_at(self, timestamp, gas_limit, shared_gas_limit)
     }
 
-    /// Converts the given [`Genesis`] into a [`TempoChainSpec`], panicking where
-    /// [`Self::try_from_genesis`] returns an error.
-    pub fn from_genesis(genesis: Genesis) -> Self {
-        Self::try_from_genesis(genesis).unwrap_or_else(|err| panic!("{err}"))
-    }
-
     /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
-    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, TempoGenesisError> {
+    pub fn from_genesis(genesis: Genesis) -> Self {
         // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis)?;
+        let info = TempoGenesisInfo::extract_from(&genesis);
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -433,12 +324,12 @@ impl TempoChainSpec {
         let network_identity =
             NetworkIdentity::from_extra_data(inner.genesis_header().inner.extra_data.as_ref()).ok();
 
-        Ok(Self {
+        Self {
             inner,
             info,
             network_identity,
             default_follow_url: None,
-        })
+        }
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -661,14 +552,6 @@ pub trait NvnmHardforks: TempoHardforks {
                     .active_at_timestamp(timestamp)
             })
             .unwrap_or_default()
-    }
-
-    /// Retrieves both forks active at a given timestamp.
-    fn forks_at(&self, timestamp: u64) -> Forks {
-        Forks {
-            tempo: self.tempo_hardfork_at(timestamp),
-            nvnm: self.nvnm_hardfork_at(timestamp),
-        }
     }
 }
 
@@ -1350,67 +1233,6 @@ mod tests {
         }
     }
 
-    fn lane_genesis(config: serde_json::Value) -> alloy_genesis::Genesis {
-        serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} })).unwrap()
-    }
-
-    #[test]
-    #[cfg(feature = "cli")]
-    fn an_unknown_nvnm_fork_stops_startup() {
-        let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, "n999Time": 5 }));
-        let err = super::TempoChainSpec::try_from_genesis(genesis.clone()).unwrap_err();
-        assert!(matches!(err, super::TempoGenesisError::UnknownNvnmFork(key) if key == "n999Time"));
-
-        let err = super::chain_value_parser(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("unknown NVNM fork time `n999Time`")
-        );
-    }
-
-    #[test]
-    fn a_tempo_chain_carries_no_nvnm_fork() {
-        for id in [4217, 42431] {
-            let genesis = lane_genesis(serde_json::json!({ "chainId": id, "n999Time": 5 }));
-            let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
-            assert!(
-                matches!(err, super::TempoGenesisError::NvnmForkOnTempoChain(found) if found == id)
-            );
-        }
-    }
-
-    #[test]
-    fn a_malformed_field_stops_startup() {
-        let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, "epochLength": "x" }));
-        let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
-        assert!(matches!(err, super::TempoGenesisError::Malformed(_)));
-    }
-
-    #[test]
-    fn nvnm_forks_follow_each_other_and_avoid_tempo_times() {
-        use super::{TempoGenesisError::*, check_nvnm_schedule as check};
-
-        let t12 = [("T12", 100)];
-        assert!(check(&[("N1", Some(50)), ("N2", Some(60))], &t12, 0).is_ok());
-        assert!(matches!(
-            check(&[("N1", Some(60)), ("N2", Some(60))], &t12, 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", None), ("N2", Some(60))], &t12, 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", Some(100)), ("N2", Some(0))], &[], 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", Some(100))], &t12, 0),
-            Err(NvnmForkAtTempoTime("N1", "T12"))
-        ));
-        assert!(check(&[("N1", Some(0)), ("N2", Some(0))], &[("T0", 0)], 0).is_ok());
-    }
-
     #[test]
     fn built_in_chains_are_at_the_nvnm_baseline() {
         use super::NvnmHardforks as _;
@@ -1423,11 +1245,10 @@ mod tests {
             &*super::DEV,
         ] {
             for timestamp in [0, u64::MAX] {
-                let expected = crate::Forks {
-                    tempo: spec.tempo_hardfork_at(timestamp),
-                    nvnm: crate::NvnmHardfork::Baseline,
-                };
-                assert_eq!(spec.forks_at(timestamp), expected);
+                assert_eq!(
+                    spec.nvnm_hardfork_at(timestamp),
+                    crate::NvnmHardfork::Baseline
+                );
             }
         }
     }

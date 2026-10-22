@@ -9,7 +9,7 @@ use revm::{
     Database,
     context::{CfgEnv, Journal, result::EVMError},
 };
-use tempo_chainspec::hardfork::{Forks, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{
     DEFAULT_FEE_TOKEN, IFeeManager, IStablecoinDEX, STABLECOIN_DEX_ADDRESS,
 };
@@ -58,7 +58,7 @@ pub trait FeeTokenResolver {
         state: &mut S,
         tx: &TempoTxEnv,
         fee_payer: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
@@ -73,10 +73,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         journal: &mut Journal<DB>,
         tx: &TempoTxEnv,
         fee_payer: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address> {
-        TempoFeeManager::new().resolve_fee_token(journal, tx, fee_payer, forks, actions)
+        TempoFeeManager::new().resolve_fee_token(journal, tx, fee_payer, spec, actions)
     }
 
     /// Validates whether a TIP-20 can be used to pay fees.
@@ -93,10 +93,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         &self,
         journal: &mut Journal<DB>,
         fee_token: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {
-        journal.ensure_tip20_usd(forks, fee_token, actions)
+        journal.ensure_tip20_usd(spec, fee_token, actions)
     }
 
     /// Resolves the validator token used to receive protocol fees.
@@ -104,10 +104,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         &self,
         journal: &mut Journal<DB>,
         beneficiary: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address> {
-        journal.with_read_only_storage_ctx(forks, actions, || {
+        journal.with_read_only_storage_ctx(spec, actions, || {
             TipFeeManager::new().get_validator_token(beneficiary)
         })
     }
@@ -204,7 +204,7 @@ impl FeeTokenResolver for TempoFeeManager {
         state: &mut S,
         tx: &TempoTxEnv,
         fee_payer: Address,
-        forks: Forks,
+        spec: TempoHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
@@ -228,7 +228,7 @@ impl FeeTokenResolver for TempoFeeManager {
         }
 
         // Check stored user token preference
-        let user_token = state.with_read_only_storage_ctx(forks, actions.clone(), || {
+        let user_token = state.with_read_only_storage_ctx(spec, actions.clone(), || {
             // ensure TIP_FEE_MANAGER_ADDRESS is loaded
             TipFeeManager::new().user_tokens[fee_payer].read()
         })?;
@@ -247,12 +247,12 @@ impl FeeTokenResolver for TempoFeeManager {
                         // Otherwise, restricted to TIP-20 calls that move the called token.
                         else {
                             tx.calls().all(|(kind, input)| {
-                                kind.to() == Some(&to) && is_tip20_fee_inference_call(forks.tempo, input)
+                                kind.to() == Some(&to) && is_tip20_fee_inference_call(spec, input)
                             })
                         }
                     ;
 
-            if can_infer_tip20 && state.is_valid_fee_token(forks, to, actions.clone())? {
+            if can_infer_tip20 && state.is_valid_fee_token(spec, to, actions.clone())? {
                 return Ok(to);
             }
         }
@@ -266,11 +266,11 @@ impl FeeTokenResolver for TempoFeeManager {
             && (!tx.is_aa() || calls.next().is_none())
         {
             if let Ok(call) = IStablecoinDEX::swapExactAmountInCall::abi_decode(input)
-                && state.is_valid_fee_token(forks, call.tokenIn, actions.clone())?
+                && state.is_valid_fee_token(spec, call.tokenIn, actions.clone())?
             {
                 return Ok(call.tokenIn);
             } else if let Ok(call) = IStablecoinDEX::swapExactAmountOutCall::abi_decode(input)
-                && state.is_valid_fee_token(forks, call.tokenIn, actions)?
+                && state.is_valid_fee_token(spec, call.tokenIn, actions)?
             {
                 return Ok(call.tokenIn);
             }

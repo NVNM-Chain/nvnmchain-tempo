@@ -17,7 +17,6 @@ publish = false
 workspace = true
 
 [dependencies]
-tempo-hardfork.workspace = true
 alloy-hardforks.workspace = true
 paste.workspace = true
 serde = { workspace = true, optional = true }
@@ -27,5 +26,5 @@ serde_json.workspace = true
 
 [features]
 default = ["std", "serde"]
-std = ["tempo-hardfork/std", "serde?/std", "serde_json/std"]
-serde = ["dep:serde", "tempo-hardfork/serde", "alloy-hardforks/serde"]
+std = ["serde?/std", "serde_json/std"]
+serde = ["dep:serde", "alloy-hardforks/serde"]
