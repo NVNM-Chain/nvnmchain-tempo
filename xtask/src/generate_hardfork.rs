@@ -414,9 +414,20 @@ fn add_nvnm_hardfork(root: &Path, hardfork: &str) -> eyre::Result<()> {
     let genesis_args_path = root.join(GENESIS_ARGS_SOURCE);
     let genesis_args = read(&genesis_args_path)?;
     let flag = format!(
-        "\n    /// {hardfork} hardfork activation time.\n    #[arg(long)]\n    {lower}_time: Option<u64>,\n"
+        "
+
+    /// {hardfork} hardfork activation time.
+    #[arg(long)]
+    {lower}_time: Option<u64>,"
     );
-    let genesis_args = insert_after_last_fork_flag(&genesis_args, &flag)?;
+    let genesis_args = insert_before_end(
+        &genesis_args,
+        "pub(crate) struct GenesisArgs {",
+        "
+}
+",
+        &flag,
+    )?;
     let entry = format!("            (\"{lower}Time\", self.{lower}_time),\n");
     write(
         &genesis_args_path,
@@ -445,36 +456,6 @@ fn insert_before_end(
             .ok_or_else(|| eyre::eyre!("could not find the end of `{start}`"))?;
     let mut output = source.to_owned();
     output.insert_str(at, insertion);
-    Ok(output)
-}
-
-/// Inserts `flag` after the last `--<fork>-time` field of `GenesisArgs`.
-fn insert_after_last_fork_flag(source: &str, flag: &str) -> eyre::Result<String> {
-    let start = source
-        .find("struct GenesisArgs {")
-        .ok_or_else(|| eyre::eyre!("could not find GenesisArgs"))?;
-    let end = start
-        + source[start..]
-            .find("\n}\n")
-            .unwrap_or(source.len() - start);
-    let is_fork_time = |line: &str| {
-        let line = line.trim();
-        let name = line.split(':').next().unwrap_or_default();
-        name.ends_with("_time")
-            && (name.starts_with('t') || name.starts_with('n'))
-            && name[1..].starts_with(|c: char| c.is_ascii_digit())
-    };
-    let mut at = None;
-    let mut offset = start;
-    for line in source[start..end].split_inclusive('\n') {
-        offset += line.len();
-        if is_fork_time(line) {
-            at = Some(offset);
-        }
-    }
-    let at = at.ok_or_else(|| eyre::eyre!("GenesisArgs has no fork time flag"))?;
-    let mut output = source.to_owned();
-    output.insert_str(at, flag);
     Ok(output)
 }
 
