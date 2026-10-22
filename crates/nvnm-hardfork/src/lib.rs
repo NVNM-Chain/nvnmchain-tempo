@@ -71,10 +71,10 @@ mod tests {
 
     #[test]
     fn baseline_has_no_genesis_key() {
-        assert_eq!(NvnmHardfork::Baseline.genesis_key(), None);
-        for fork in &NvnmHardfork::VARIANTS[1..] {
-            let key = format!("{}Time", fork.name().to_lowercase());
-            assert_eq!(fork.genesis_key(), Some(key.as_str()));
+        for &fork in NvnmHardfork::VARIANTS {
+            let key = (fork != NvnmHardfork::Baseline)
+                .then(|| format!("{}Time", fork.name().to_lowercase()));
+            assert_eq!(fork.genesis_key(), key.as_deref());
         }
     }
 }

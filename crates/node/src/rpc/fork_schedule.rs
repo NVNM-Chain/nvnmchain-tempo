@@ -4,7 +4,7 @@ use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_chainspec::{EthereumHardfork, ForkCondition, Hardforks, Head};
 use reth_primitives_traits::AlloyBlockHeader as _;
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
-use tempo_chainspec::hardfork::{NvnmHardforks, TempoHardforks};
+use tempo_chainspec::hardfork::{NvnmHardfork, NvnmHardforks, TempoHardforks};
 
 pub use tempo_alloy::rpc::{ForkInfo, ForkSchedule};
 
@@ -53,12 +53,14 @@ where
             .ok_or_else(|| internal_err("head header not found"))?;
         let head_timestamp = header.timestamp();
 
-        // Only Tempo forks (exclude Ethereum hardforks and Genesis).
+        // Only Tempo and NVNM forks (exclude Ethereum hardforks, Genesis and Baseline).
         let schedule = chain_spec
             .forks_iter()
             .filter(|(fork, _)| {
                 let name = fork.name();
-                name != "Genesis" && !EthereumHardfork::VARIANTS.iter().any(|h| h.name() == name)
+                name != "Genesis"
+                    && name != NvnmHardfork::Baseline.name()
+                    && !EthereumHardfork::VARIANTS.iter().any(|h| h.name() == name)
             })
             .filter_map(|(fork, condition)| {
                 let ForkCondition::Timestamp(ts) = condition else {

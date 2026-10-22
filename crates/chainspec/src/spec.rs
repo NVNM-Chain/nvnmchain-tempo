@@ -182,11 +182,11 @@ impl TempoGenesisInfo {
                 info.unread.keys().cloned().collect(),
             ));
         }
-        let nvnm: Vec<_> = NvnmHardfork::VARIANTS[1..]
+        let nvnm: Vec<_> = NvnmHardfork::VARIANTS
             .iter()
             .map(|&fork| (fork.name(), info.nvnm_fork_time(fork)))
             .collect();
-        let tempo: Vec<_> = TempoHardfork::VARIANTS[1..]
+        let tempo: Vec<_> = TempoHardfork::VARIANTS
             .iter()
             .filter_map(|&fork| Some((fork.name(), info.fork_time(fork)?)))
             .collect();
@@ -398,7 +398,7 @@ impl TempoChainSpec {
         base_spec.hardforks.extend(tempo_forks);
 
         // `insert` keeps the list in time order, so fork id counts both lanes in turn.
-        let nvnm_forks = NvnmHardfork::VARIANTS[1..].iter().filter_map(|&fork| {
+        let nvnm_forks = NvnmHardfork::VARIANTS.iter().filter_map(|&fork| {
             info.nvnm_fork_time(fork)
                 .map(|time| (fork, ForkCondition::Timestamp(time)))
         });
@@ -637,7 +637,7 @@ pub trait NvnmHardforks: TempoHardforks {
 
     /// Retrieves the NVNM fork active at a given timestamp.
     fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
-        NvnmHardfork::VARIANTS[1..]
+        NvnmHardfork::VARIANTS
             .iter()
             .rev()
             .copied()
