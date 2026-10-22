@@ -536,24 +536,38 @@ impl TempoHardforks for TempoChainSpec {
     }
 }
 
-/// Trait for querying NVNM's lane, scheduled apart from the Tempo forks.
-pub trait NvnmHardforks: TempoHardforks {
-    /// Retrieves the activation condition for an NVNM fork.
-    fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition;
+/// Generates the NVNM lane's query trait, as `tempo_hardforks_trait!` does Tempo's.
+macro_rules! nvnm_hardforks_trait {
+    ($($variant:ident),* $(,)?) => {
+        /// Trait for querying NVNM's lane, scheduled apart from the Tempo forks.
+        pub trait NvnmHardforks: TempoHardforks {
+            /// Retrieves the activation condition for an NVNM fork.
+            fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition;
 
-    /// Retrieves the NVNM fork active at a given timestamp.
-    fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
-        NvnmHardfork::VARIANTS[1..]
-            .iter()
-            .rev()
-            .copied()
-            .find(|&fork| {
-                self.nvnm_fork_activation(fork)
-                    .active_at_timestamp(timestamp)
-            })
-            .unwrap_or_default()
-    }
+            /// Retrieves the NVNM fork active at a given timestamp.
+            fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
+                NvnmHardfork::VARIANTS
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&fork| self.nvnm_fork_activation(fork).active_at_timestamp(timestamp))
+                    .unwrap_or_default()
+            }
+
+            paste::paste! {
+                $(
+                    #[doc = concat!("Returns true if ", stringify!($variant), " is active at the given timestamp.")]
+                    fn [<is_ $variant:lower _active_at_timestamp>](&self, timestamp: u64) -> bool {
+                        self.nvnm_fork_activation(NvnmHardfork::$variant)
+                            .active_at_timestamp(timestamp)
+                    }
+                )*
+            }
+        }
+    };
 }
+
+tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_hardforks_trait);
 
 impl NvnmHardforks for TempoChainSpec {
     fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition {
