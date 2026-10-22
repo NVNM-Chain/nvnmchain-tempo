@@ -197,7 +197,7 @@ mod tests {
         );
         assert_eq!(store.last_id().unwrap(), 3);
         assert_eq!(
-            store.reader().search(Mode::Suffix, "fund").unwrap(),
+            store.reader().search(Mode::Suffix, "fund", 0, 50).unwrap(),
             vec![2, 3]
         );
     }
@@ -232,7 +232,7 @@ mod tests {
         assert!(
             store
                 .reader()
-                .search(Mode::Exact, "beta fund")
+                .search(Mode::Exact, "beta fund", 0, 50)
                 .unwrap()
                 .is_empty()
         );
@@ -254,7 +254,15 @@ mod tests {
         reconcile(&replaced, &mut store, Some(1), None).unwrap();
 
         let reader = store.reader();
-        assert!(reader.search(Mode::Exact, "beta fund").unwrap().is_empty());
-        assert_eq!(reader.search(Mode::Exact, "delta fund").unwrap(), vec![2]);
+        assert!(
+            reader
+                .search(Mode::Exact, "beta fund", 0, 50)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reader.search(Mode::Exact, "delta fund", 0, 50).unwrap(),
+            vec![2]
+        );
     }
 }

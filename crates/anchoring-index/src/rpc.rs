@@ -37,14 +37,13 @@ pub struct SearchParams {
     pub limit: Option<u64>,
 }
 
+/// One page, and no total: counting reads every match, which the module refused too.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
     pub registries: Vec<Registry>,
     /// The next match's id, 8 bytes big-endian like the contract's `registries` cursor.
     pub next_key: Option<Bytes>,
-    /// Every match, not only this page's.
-    pub total: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,11 +106,14 @@ impl<Provider: StateProviderFactory> AnchoringRpc<Provider> {
         let limit = match params.limit.unwrap_or(DEFAULT_LIMIT) {
             0 => DEFAULT_LIMIT,
             limit => limit.min(MAX_LIMIT),
-        };
+        } as usize;
+        let offset = usize::try_from(params.offset).unwrap_or(usize::MAX);
 
+        // The page and the match after it, which is the next key.
+        let want = offset.saturating_add(limit + 1);
         let mut ids = self
             .index
-            .search(params.mode, &params.name)
+            .search(params.mode, &params.name, key.unwrap_or(0), want)
             .map_err(internal)?;
 
         let state = self.provider.latest().map_err(internal)?;
@@ -121,8 +123,10 @@ impl<Provider: StateProviderFactory> AnchoringRpc<Provider> {
         let count = state::registry_count(&words).map_err(internal)?;
         ids.retain(|id| *id <= count);
 
-        let (shown, next) = page(&ids, key, params.offset, limit);
-        let registries = shown
+        // From a key the ids start at the page, and the offset is 0.
+        let start = offset.min(ids.len());
+        let end = start.saturating_add(limit).min(ids.len());
+        let registries = ids[start..end]
             .iter()
             .map(|id| state::registry(&words, *id))
             .collect::<eyre::Result<Vec<_>>>()
@@ -130,8 +134,9 @@ impl<Provider: StateProviderFactory> AnchoringRpc<Provider> {
 
         Ok(SearchResponse {
             registries,
-            next_key: next.map(|id| Bytes::copy_from_slice(&id.to_be_bytes())),
-            total: ids.len() as u64,
+            next_key: ids
+                .get(end)
+                .map(|id| Bytes::copy_from_slice(&id.to_be_bytes())),
         })
     }
 
@@ -178,31 +183,4 @@ where
 
 fn internal(error: impl std::fmt::Display) -> jsonrpsee::types::ErrorObjectOwned {
     internal_rpc_err(error.to_string())
-}
-
-/// `limit` of `ids` from the id `key` or past `offset` of them, and the id after those.
-fn page(ids: &[u64], key: Option<u64>, offset: u64, limit: u64) -> (&[u64], Option<u64>) {
-    let start = match key {
-        Some(key) => ids.partition_point(|id| *id < key),
-        None => usize::try_from(offset).unwrap_or(usize::MAX).min(ids.len()),
-    };
-    let end = start.saturating_add(limit as usize).min(ids.len());
-    (&ids[start..end], ids.get(end).copied())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::page;
-
-    #[test]
-    fn a_page_starts_at_a_key_or_an_offset_and_names_the_next() {
-        let ids: [u64; 5] = [2, 3, 5, 8, 13];
-        assert_eq!(page(&ids, None, 0, 2), (&ids[..2], Some(5)));
-        assert_eq!(page(&ids, None, 3, 5), (&ids[3..], None));
-        assert_eq!(page(&ids, None, 99, 5), (&ids[5..], None));
-        assert_eq!(page(&ids, Some(5), 0, 2), (&ids[2..4], Some(13)));
-        // A key between matches starts at the next one.
-        assert_eq!(page(&ids, Some(4), 0, 2), (&ids[2..4], Some(13)));
-        assert_eq!(page(&ids, Some(14), 0, 2), (&ids[5..], None));
-    }
 }
