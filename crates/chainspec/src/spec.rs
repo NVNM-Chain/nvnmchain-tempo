@@ -4,7 +4,7 @@ use crate::{
     bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
-use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
@@ -95,53 +95,19 @@ pub struct TempoGenesisInfo {
     t14_time: Option<u64>,
     /// Every other key, which no field above reads.
     #[serde(flatten, skip_serializing)]
-    unread: BTreeMap<String, Unread>,
+    unread: BTreeMap<String, serde_json::Value>,
 }
-
-/// What an unread key holds: nothing this Tempo looks at; `IgnoredAny` would do but has no `Eq`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(from = "serde::de::IgnoredAny")]
-struct Unread;
-
-impl From<serde::de::IgnoredAny> for Unread {
-    fn from(_: serde::de::IgnoredAny) -> Self {
-        Self
-    }
-}
-
-/// Why a genesis cannot become a [`TempoChainSpec`].
-#[derive(Debug)]
-pub enum TempoGenesisError {
-    /// A Tempo field holds a value of the wrong shape.
-    Malformed(serde_json::Error),
-    /// Keys no field reads.
-    UnknownKeys(Vec<String>),
-}
-
-impl core::fmt::Display for TempoGenesisError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Malformed(err) => write!(f, "malformed Tempo genesis field: {err}"),
-            Self::UnknownKeys(keys) => write!(f, "unknown Tempo genesis fields {keys:?}"),
-        }
-    }
-}
-
-impl core::error::Error for TempoGenesisError {}
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Result<Self, TempoGenesisError> {
-        let info: Self = genesis
-            .config
-            .extra_fields
-            .deserialize_as()
-            .map_err(TempoGenesisError::Malformed)?;
-        // A key no field reads, a misspelling or a fork this node does not know, would be dropped.
+    /// Extract Tempo genesis info from genesis extra_fields. The fields are consensus-critical yet
+    /// outside the genesis hash, so a key or value no field reads is an error, not a default.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        let info: Self = genesis.config.extra_fields.deserialize_as()?;
         if !info.unread.is_empty() {
-            return Err(TempoGenesisError::UnknownKeys(
-                info.unread.keys().cloned().collect(),
-            ));
+            return Err(serde::de::Error::custom(format!(
+                "unknown keys {:?}",
+                info.unread.keys()
+            )));
         }
         Ok(info)
     }
@@ -212,7 +178,9 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)?.into(),
+        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)
+            .map_err(|e| eyre::eyre!("malformed Tempo genesis extra_fields: {e}"))?
+            .into(),
     })
 }
 
@@ -331,12 +299,11 @@ impl TempoChainSpec {
 
     /// [`Self::try_from_genesis`], panicking on its error.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        Self::try_from_genesis(genesis).unwrap_or_else(|err| panic!("{err}"))
+        Self::try_from_genesis(genesis).expect("not a Tempo genesis")
     }
 
     /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
-    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, TempoGenesisError> {
-        // Extract Tempo genesis info from extra_fields
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
         let info = TempoGenesisInfo::extract_from(&genesis)?;
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
@@ -1311,11 +1278,14 @@ mod tests {
         for key in ["n999Time", "t99Time", "epochLenght"] {
             let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, key: 5 }));
             let err = super::TempoChainSpec::try_from_genesis(genesis.clone()).unwrap_err();
-            assert!(matches!(&err, super::TempoGenesisError::UnknownKeys(keys) if keys == &[key]));
+            assert_eq!(err.to_string(), format!("unknown keys [{key:?}]"));
 
             let err =
                 super::chain_value_parser(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
-            assert!(err.to_string().contains("unknown Tempo genesis fields"));
+            assert!(
+                err.to_string()
+                    .contains("malformed Tempo genesis extra_fields")
+            );
         }
     }
 
@@ -1323,6 +1293,6 @@ mod tests {
     fn a_malformed_field_stops_startup() {
         let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, "epochLength": "x" }));
         let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
-        assert!(matches!(err, super::TempoGenesisError::Malformed(_)));
+        assert!(err.to_string().contains("invalid type"), "{err}");
     }
 }

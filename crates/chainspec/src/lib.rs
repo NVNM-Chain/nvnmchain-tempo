@@ -16,9 +16,7 @@ pub mod spec;
 #[cfg(feature = "reth")]
 pub use network_identity::NetworkIdentity;
 #[cfg(feature = "reth")]
-pub use spec::{
-    NvnmHardforks, TempoChainSpec, TempoConsensusSpec, TempoGenesisError, TempoHardforks,
-};
+pub use spec::{NvnmHardforks, TempoChainSpec, TempoConsensusSpec, TempoHardforks};
 
 pub use tempo_hardfork::{TempoHardfork, constants};
 pub use tempo_nvnm_hardfork::NvnmHardfork;
