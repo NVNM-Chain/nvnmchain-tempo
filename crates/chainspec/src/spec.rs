@@ -116,10 +116,6 @@ pub enum TempoGenesisError {
     Malformed(serde_json::Error),
     /// Keys no field reads.
     UnknownKeys(Vec<String>),
-    /// The second fork is scheduled no later than the first, or without it.
-    NvnmForksOutOfOrder(&'static str, &'static str),
-    /// An NVNM fork and a Tempo fork share one time after genesis.
-    NvnmForkAtTempoTime(&'static str, &'static str),
 }
 
 impl core::fmt::Display for TempoGenesisError {
@@ -127,46 +123,11 @@ impl core::fmt::Display for TempoGenesisError {
         match self {
             Self::Malformed(err) => write!(f, "malformed Tempo genesis field: {err}"),
             Self::UnknownKeys(keys) => write!(f, "unknown Tempo genesis fields {keys:?}"),
-            Self::NvnmForksOutOfOrder(earlier, later) => {
-                write!(f, "{later} must be scheduled after {earlier}")
-            }
-            Self::NvnmForkAtTempoTime(nvnm, tempo) => {
-                write!(f, "{nvnm} must not share its activation time with {tempo}")
-            }
         }
     }
 }
 
 impl core::error::Error for TempoGenesisError {}
-
-/// A scheduled NVNM fork follows the one before it, which must be scheduled, and shares no time
-/// with a Tempo fork; times at genesis are exempt, since fork id leaves them out.
-fn check_nvnm_schedule(
-    nvnm: &[(&'static str, Option<u64>)],
-    tempo: &[(&'static str, u64)],
-    genesis_time: u64,
-) -> Result<(), TempoGenesisError> {
-    for pair in nvnm.windows(2) {
-        let &[(earlier, earlier_time), (later, Some(later_time))] = pair else {
-            continue;
-        };
-        let in_order = earlier_time.is_some_and(|time| {
-            later_time > time || (later_time <= genesis_time && time <= genesis_time)
-        });
-        if !in_order {
-            return Err(TempoGenesisError::NvnmForksOutOfOrder(earlier, later));
-        }
-    }
-    for &(nvnm, time) in nvnm {
-        let Some(time) = time.filter(|&time| time > genesis_time) else {
-            continue;
-        };
-        if let Some(&(tempo, _)) = tempo.iter().find(|&&(_, tempo_time)| tempo_time == time) {
-            return Err(TempoGenesisError::NvnmForkAtTempoTime(nvnm, tempo));
-        }
-    }
-    Ok(())
-}
 
 impl TempoGenesisInfo {
     /// Extract Tempo genesis info from genesis extra_fields
@@ -182,15 +143,6 @@ impl TempoGenesisInfo {
                 info.unread.keys().cloned().collect(),
             ));
         }
-        let nvnm: Vec<_> = NvnmHardfork::VARIANTS
-            .iter()
-            .map(|&fork| (fork.name(), info.nvnm_fork_time(fork)))
-            .collect();
-        let tempo: Vec<_> = TempoHardfork::VARIANTS
-            .iter()
-            .filter_map(|&fork| Some((fork.name(), info.fork_time(fork)?)))
-            .collect();
-        check_nvnm_schedule(&nvnm, &tempo, genesis.timestamp)?;
         Ok(info)
     }
 
@@ -1372,30 +1324,5 @@ mod tests {
         let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, "epochLength": "x" }));
         let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
         assert!(matches!(err, super::TempoGenesisError::Malformed(_)));
-    }
-
-    #[test]
-    fn nvnm_forks_follow_each_other_and_avoid_tempo_times() {
-        use super::{TempoGenesisError::*, check_nvnm_schedule as check};
-
-        let t12 = [("T12", 100)];
-        assert!(check(&[("N1", Some(50)), ("N2", Some(60))], &t12, 0).is_ok());
-        assert!(matches!(
-            check(&[("N1", Some(60)), ("N2", Some(60))], &t12, 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", None), ("N2", Some(60))], &t12, 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", Some(100)), ("N2", Some(0))], &[], 0),
-            Err(NvnmForksOutOfOrder("N1", "N2"))
-        ));
-        assert!(matches!(
-            check(&[("N1", Some(100))], &t12, 0),
-            Err(NvnmForkAtTempoTime("N1", "T12"))
-        ));
-        assert!(check(&[("N1", Some(0)), ("N2", Some(0))], &[("T0", 0)], 0).is_ok());
     }
 }
