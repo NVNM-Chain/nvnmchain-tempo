@@ -185,7 +185,7 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
         self.get_fork_schedule()
             .await?
             .nvnm_active
-            .map_or(Ok(NvnmHardfork::Baseline), |name| name.parse())
+            .parse()
             .map_err(TransportErrorKind::custom)
     }
 

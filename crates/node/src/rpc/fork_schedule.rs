@@ -96,12 +96,10 @@ where
             .name()
             .to_string();
 
-        let nvnm_active = Some(
-            chain_spec
+        let nvnm_active = chain_spec
                 .nvnm_hardfork_at(head_timestamp)
                 .name()
-                .to_string(),
-        );
+                .to_string();
 
         Ok(ForkSchedule {
             schedule,
