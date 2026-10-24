@@ -13,7 +13,7 @@ async fn test_fork_schedule() -> eyre::Result<()> {
 
     let schedule = provider.get_fork_schedule().await?;
     assert_eq!(schedule.next_activation(), None);
-    assert_eq!(schedule.nvnm_active.as_deref(), Some("Baseline"));
+    assert_eq!(schedule.nvnm_active, "Baseline");
 
     // Every TempoHardfork variant except Genesis must appear.
     let names: Vec<&str> = schedule.schedule.iter().map(|f| f.name.as_str()).collect();
