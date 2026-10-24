@@ -428,6 +428,7 @@ where
     {
         // Get the hardfork active at the current tip
         let spec = self.active_hardfork();
+        let nvnm = self.active_nvnm_hardfork();
 
         // Reject system transactions, those are never allowed in the pool.
         if transaction.inner().is_system_tx() {
@@ -650,6 +651,7 @@ where
                         // This is a 2D nonce transaction - validate against 2D nonce
                         state_nonce = match evm.db_mut().with_read_only_storage_ctx(
                             spec,
+                            nvnm,
                             StorageActions::disabled(),
                             || {
                                 NonceManager::new().get_nonce(INonce::getNonceCall {
@@ -2707,7 +2709,12 @@ mod tests {
         let spec = provider.chain_spec().tempo_hardfork_at(0);
 
         // Test that is_fee_token_paused returns true for paused tokens
-        let result = state.is_fee_token_paused(spec, fee_token, StorageActions::disabled());
+        let result = state.is_fee_token_paused(
+            spec,
+            NvnmHardfork::Baseline,
+            fee_token,
+            StorageActions::disabled(),
+        );
         assert!(result.is_ok());
         assert!(
             result.unwrap(),
@@ -2858,8 +2865,12 @@ mod tests {
         );
 
         // BUT the pause check in is_fee_token_paused should catch it BEFORE the bypass
-        let is_paused =
-            state.is_fee_token_paused(spec, paused_validator_token, StorageActions::disabled());
+        let is_paused = state.is_fee_token_paused(
+            spec,
+            NvnmHardfork::Baseline,
+            paused_validator_token,
+            StorageActions::disabled(),
+        );
         assert!(is_paused.is_ok());
         assert!(
             is_paused.unwrap(),

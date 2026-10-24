@@ -510,7 +510,7 @@ impl EthExecutorSpec for TempoChainSpec {
 macro_rules! tempo_hardforks_trait {
     ($($variant:ident),* $(,)?) => {
         /// Trait for querying Tempo-specific hardfork activations.
-        pub trait TempoHardforks: EthereumHardforks {
+        pub trait TempoHardforks: EthereumHardforks + NvnmHardforks {
             /// Retrieves activation condition for a Tempo-specific hardfork.
             fn tempo_fork_activation(&self, fork: TempoHardfork) -> ForkCondition;
 
@@ -553,7 +553,7 @@ impl TempoHardforks for TempoChainSpec {
 macro_rules! nvnm_hardforks_trait {
     ($($variant:ident),* $(,)?) => {
         /// Trait for querying NVNM's lane, scheduled apart from the Tempo forks.
-        pub trait NvnmHardforks: TempoHardforks {
+        pub trait NvnmHardforks {
             /// Retrieves the activation condition for an NVNM fork.
             fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition;
 

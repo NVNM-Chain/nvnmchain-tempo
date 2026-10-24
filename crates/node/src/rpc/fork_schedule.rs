@@ -35,7 +35,7 @@ fn internal_err(msg: impl ToString) -> jsonrpsee::types::ErrorObject<'static> {
 #[async_trait::async_trait]
 impl<P> TempoForkScheduleApiServer for TempoForkScheduleRpc<P>
 where
-    P: ChainSpecProvider<ChainSpec: Hardforks + NvnmHardforks>
+    P: ChainSpecProvider<ChainSpec: Hardforks + TempoHardforks>
         + BlockNumReader
         + HeaderProvider
         + Send

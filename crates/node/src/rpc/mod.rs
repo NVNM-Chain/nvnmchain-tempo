@@ -408,11 +408,18 @@ where
                 tx_env,
                 fee_payer,
                 evm_env.cfg_env.spec,
+                evm_env.block_env.nvnm_hardfork,
                 actions.clone(),
             )
             .map_err(ProviderError::other)?;
         let fee_token_balance = db
-            .get_token_balance(fee_token, fee_payer, evm_env.cfg_env.spec, actions)
+            .get_token_balance(
+                fee_token,
+                fee_payer,
+                evm_env.cfg_env.spec,
+                evm_env.block_env.nvnm_hardfork,
+                actions,
+            )
             .map_err(ProviderError::other)?;
 
         Ok(fee_token_balance

@@ -99,10 +99,11 @@ pub trait TempoStateAccess<M = ()> {
     /// Returns the storage value for the given address and key.
     fn sload(&mut self, address: Address, key: U256) -> Result<U256, Self::Error>;
 
-    /// Returns a read-only storage provider for the given spec.
+    /// Returns a read-only storage provider for the given forks.
     fn with_read_only_storage_ctx<R>(
         &mut self,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
         f: impl FnOnce() -> R,
     ) -> R
@@ -110,7 +111,7 @@ pub trait TempoStateAccess<M = ()> {
         Self: Sized,
     {
         StorageCtx::enter(
-            &mut ReadOnlyStorageProvider::new(self, spec).with_actions(actions),
+            &mut ReadOnlyStorageProvider::new(self, spec, nvnm).with_actions(actions),
             f,
         )
     }
@@ -121,13 +122,14 @@ pub trait TempoStateAccess<M = ()> {
     fn is_tip20_usd(
         &mut self,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(spec, nvnm, actions, || {
             // SAFETY: caller must ensure prefix is already checked
             let token = TIP20Token::from_address_unchecked(fee_token);
             Ok(token.currency.len()? == 3 && token.currency.read()?.as_str() == "USD")
@@ -140,13 +142,14 @@ pub trait TempoStateAccess<M = ()> {
     fn ensure_tip20_usd(
         &mut self,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         fee_token: Address,
         actions: StorageActions,
     ) -> Result<(), EVMError<Self::Error, TempoInvalidTransaction>>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(spec, nvnm, actions, || {
             // SAFETY: caller must ensure prefix is already checked
             let token = TIP20Token::from_address_unchecked(fee_token);
             let len = token.currency.len()?;
@@ -175,6 +178,7 @@ pub trait TempoStateAccess<M = ()> {
     fn is_valid_fee_token(
         &mut self,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
@@ -187,20 +191,21 @@ pub trait TempoStateAccess<M = ()> {
         }
 
         // Ensure the currency is USD
-        self.is_tip20_usd(spec, fee_token, actions)
+        self.is_tip20_usd(spec, nvnm, fee_token, actions)
     }
 
     /// Checks if a fee token is paused.
     fn is_fee_token_paused(
         &mut self,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         fee_token: Address,
         actions: StorageActions,
     ) -> TempoResult<bool>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(spec, nvnm, actions, || {
             let token = TIP20Token::from_address(fee_token)?;
             token.paused()
         })
@@ -214,12 +219,13 @@ pub trait TempoStateAccess<M = ()> {
         token: Address,
         account: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<U256>
     where
         Self: Sized,
     {
-        self.with_read_only_storage_ctx(spec, actions, || {
+        self.with_read_only_storage_ctx(spec, nvnm, actions, || {
             // Load the token balance for the given account.
             TIP20Token::from_address(token)?.balances[account].read()
         })
@@ -275,6 +281,7 @@ impl<T: reth_storage_api::StateProvider> TempoStateAccess<((), (), ())> for T {
 struct ReadOnlyStorageProvider<'a, S, M = ()> {
     state: &'a mut S,
     spec: TempoHardfork,
+    nvnm: NvnmHardfork,
     actions: Option<StorageActions>,
     _marker: PhantomData<M>,
 }
@@ -284,10 +291,11 @@ where
     S: TempoStateAccess<M>,
 {
     /// Creates a new read-only storage provider.
-    fn new(state: &'a mut S, spec: TempoHardfork) -> Self {
+    fn new(state: &'a mut S, spec: TempoHardfork, nvnm: NvnmHardfork) -> Self {
         Self {
             state,
             spec,
+            nvnm,
             actions: None,
             _marker: PhantomData,
         }
@@ -308,9 +316,7 @@ where
     }
 
     fn nvnm_hardfork(&self) -> NvnmHardfork {
-        // A read-only context has no block to read the lane from, and nothing it runs gates on it.
-        // TODO: thread the lane with `spec` once an NVNM fork gates a read-only path.
-        NvnmHardfork::Baseline
+        self.nvnm
     }
 
     fn storage_actions(&self) -> StorageActions {
@@ -480,6 +486,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(token, fee_token);
@@ -508,6 +515,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, token);
@@ -530,6 +538,7 @@ mod tests {
             &TempoTxEnv::default(),
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, user_token);
@@ -557,6 +566,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(result_token, DEFAULT_FEE_TOKEN);
@@ -580,6 +590,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         // Should fallback to DEFAULT_FEE_TOKEN when no preferences are found
@@ -619,6 +630,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(token, token_in);
@@ -648,6 +660,7 @@ mod tests {
             &tx,
             caller,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(token, token_in);
@@ -671,6 +684,7 @@ mod tests {
             token_address,
             account,
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             StorageActions::disabled(),
         )?;
         assert_eq!(balance, expected_balance);
@@ -712,6 +726,7 @@ mod tests {
         // Default (unpaused) returns false
         assert!(!db.is_fee_token_paused(
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             token_address,
             StorageActions::disabled()
         )?);
@@ -720,6 +735,7 @@ mod tests {
         db.insert_account_storage(token_address, tip20_slots::PAUSED, U256::from(1))?;
         assert!(db.is_fee_token_paused(
             TempoHardfork::Genesis,
+            NvnmHardfork::Baseline,
             token_address,
             StorageActions::disabled()
         )?);
@@ -761,6 +777,7 @@ mod tests {
 
             let is_usd = db.is_tip20_usd(
                 TempoHardfork::Genesis,
+                NvnmHardfork::Baseline,
                 fee_token,
                 StorageActions::disabled(),
             )?;
@@ -781,6 +798,7 @@ mod tests {
         let err = db
             .ensure_tip20_usd(
                 TempoHardfork::Genesis,
+                NvnmHardfork::Baseline,
                 fee_token,
                 StorageActions::disabled(),
             )
