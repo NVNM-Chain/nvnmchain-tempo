@@ -13658,6 +13658,7 @@ dependencies = [
  "serde_json",
  "tempo-dkg-onchain-artifacts",
  "tempo-hardfork",
+ "tempo-nvnm-hardfork",
  "tempo-primitives",
 ]
 
@@ -14029,6 +14030,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-nvnm-hardfork"
+version = "1.16.0"
+dependencies = [
+ "alloy-hardforks",
+ "paste",
+ "serde",
+]
+
+[[package]]
 name = "tempo-payload-builder"
 version = "1.16.0"
 dependencies = [
@@ -14175,6 +14185,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempo-contracts",
+ "tempo-nvnm-hardfork",
  "tracing-subscriber",
 ]
 

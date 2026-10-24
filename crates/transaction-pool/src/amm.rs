@@ -13,7 +13,7 @@ use reth_provider::{
     ChainSpecProvider, ExecutionOutcome, HeaderProvider, ProviderError, ProviderResult,
     StateProviderFactory,
 };
-use tempo_chainspec::hardfork::{TempoHardfork, TempoHardforks};
+use tempo_chainspec::hardfork::{NvnmHardfork, NvnmHardforks, TempoHardfork, TempoHardforks};
 use tempo_evm::TempoStateAccess;
 use tempo_precompiles::{
     DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
@@ -69,12 +69,14 @@ impl AmmLiquidityCache {
     {
         let mut missing_in_cache = Vec::new();
         let hardfork;
+        let nvnm;
         let generation;
 
         // Hot path: decide each `(user, validator)` pair entirely from the primitive cache.
         {
             let inner = self.inner.read();
             hardfork = inner.hardfork;
+            nvnm = inner.nvnm;
             generation = inner.generation;
 
             // Validators always accept fees in their own token, and this is the common case, so
@@ -131,6 +133,7 @@ impl AmmLiquidityCache {
         state_provider
             .with_read_only_storage_ctx(
                 hardfork,
+                nvnm,
                 StorageActions::disabled(),
                 || -> TempoResult<bool> {
                     let manager = TipFeeManager::new();
@@ -317,8 +320,11 @@ impl AmmLiquidityCache {
                 .collect();
         }
 
-        // Refresh the cached active hardfork from the latest seen header.
-        self.inner.write().hardfork = client.chain_spec().tempo_hardfork_at(latest_timestamp);
+        // Refresh the cached active forks from the latest seen header.
+        let chain_spec = client.chain_spec();
+        let mut inner = self.inner.write();
+        inner.hardfork = chain_spec.tempo_hardfork_at(latest_timestamp);
+        inner.nvnm = chain_spec.nvnm_hardfork_at(latest_timestamp);
 
         Ok(())
     }
@@ -328,6 +334,8 @@ impl AmmLiquidityCache {
 struct AmmLiquidityCacheInner {
     /// Hardfork active at the most recently observed canonical header.
     hardfork: TempoHardfork,
+    /// NVNM fork active at that header.
+    nvnm: NvnmHardfork,
 
     /// Cache for (user_token, validator_token) -> liquidity
     pool_cache: HashMap<(Address, Address), U256>,

@@ -10,7 +10,7 @@ use alloy_transport::{
     Authorization, BoxTransport, TransportConnect, TransportError, TransportErrorKind,
 };
 use std::str::FromStr;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     IAccountKeychain::{IAccountKeychainInstance, KeyInfo},
@@ -171,6 +171,29 @@ pub trait TempoProviderExt: Provider<TempoNetwork> {
             .active
             .parse::<TempoHardfork>()
             .map_err(TransportErrorKind::custom)
+    }
+
+    /// Returns the latest active NVNM fork at the connected chain's head.
+    ///
+    /// Returns an error if the node reports a fork that this version of the SDK does not
+    /// recognize.
+    async fn get_active_nvnm_hardfork(&self) -> Result<NvnmHardfork, TransportError>
+    where
+        Self: Sized,
+    {
+        self.get_fork_schedule()
+            .await?
+            .nvnm_active
+            .parse()
+            .map_err(TransportErrorKind::custom)
+    }
+
+    /// Returns `true` if the given NVNM fork is active on the connected chain.
+    async fn is_nvnm_hardfork_active(&self, hardfork: NvnmHardfork) -> Result<bool, TransportError>
+    where
+        Self: Sized,
+    {
+        Ok(self.get_active_nvnm_hardfork().await? >= hardfork)
     }
 
     /// Returns the Tempo fork schedule and active fork at the connected chain's head.
@@ -430,6 +453,11 @@ mod tests {
 
     fn mock_provider(asserter: Asserter) -> impl alloy_provider::Provider<TempoNetwork> {
         ProviderBuilder::<_, _, TempoNetwork>::default().connect_mocked_client(asserter)
+    }
+
+    /// A `tempo_forkSchedule` answer naming `active` and scheduling nothing.
+    fn fork_schedule(active: impl ToString) -> serde_json::Value {
+        serde_json::json!({ "active": active.to_string(), "nvnmActive": "Baseline", "schedule": [] })
     }
 
     #[test]
@@ -725,11 +753,7 @@ mod tests {
         let provider = mock_provider(asserter.clone());
 
         for fork in TempoHardfork::VARIANTS {
-            asserter.push_success(&serde_json::json!({
-                "schedule": [],
-                "active": fork.to_string(),
-            }));
-
+            asserter.push_success(&fork_schedule(fork));
             assert_eq!(provider.get_active_hardfork().await.unwrap(), *fork);
         }
     }
@@ -744,7 +768,7 @@ mod tests {
             (TempoHardfork::T0, true),
             (TempoHardfork::T1, false),
         ] {
-            asserter.push_success(&serde_json::json!({ "active": "T0", "schedule": [] }));
+            asserter.push_success(&fork_schedule("T0"));
             assert_eq!(provider.is_hardfork_active(fork).await.unwrap(), expected);
         }
     }
@@ -754,13 +778,13 @@ mod tests {
         let asserter = Asserter::new();
         let provider = mock_provider(asserter.clone());
 
-        asserter.push_success(&serde_json::json!({ "active": "FutureFork", "schedule": [] }));
+        asserter.push_success(&fork_schedule("FutureFork"));
         assert!(matches!(
             provider.get_active_hardfork().await.unwrap_err(),
             TransportError::Transport(TransportErrorKind::Custom(_))
         ));
 
-        asserter.push_success(&serde_json::json!({ "active": "FutureFork", "schedule": [] }));
+        asserter.push_success(&fork_schedule("FutureFork"));
         assert!(matches!(
             provider
                 .is_hardfork_active(TempoHardfork::T0)
@@ -789,6 +813,7 @@ mod tests {
         let provider = mock_provider(asserter.clone());
         let response = serde_json::json!({
             "active": "T0",
+            "nvnmActive": "Baseline",
             "schedule": [
                 { "name": "T0", "activationTime": 0, "active": true, "forkId": "0x471a451c" },
                 { "name": "FutureFork", "activationTime": 100, "active": false }
@@ -806,7 +831,7 @@ mod tests {
             TempoHardfork::T0
         );
 
-        asserter.push_success(&serde_json::json!({ "active": "FutureFork", "schedule": [] }));
+        asserter.push_success(&fork_schedule("FutureFork"));
         assert_eq!(
             provider.get_fork_schedule().await.unwrap().active,
             "FutureFork"
@@ -819,8 +844,7 @@ mod tests {
         let provider = mock_provider(asserter.clone());
 
         for fork in [TempoHardfork::T0, TempoHardfork::T1, TempoHardfork::T0] {
-            asserter
-                .push_success(&serde_json::json!({ "active": fork.to_string(), "schedule": [] }));
+            asserter.push_success(&fork_schedule(fork));
             assert_eq!(provider.get_active_hardfork().await.unwrap(), fork);
         }
         assert!(asserter.read_q().is_empty());

@@ -45,7 +45,7 @@ use crate::evm::TempoEvm;
 use reth_evm_ethereum::EthEvmConfig;
 use tempo_chainspec::{
     TempoChainSpec,
-    hardfork::{TempoHardfork, TempoHardforks},
+    hardfork::{NvnmHardfork, NvnmHardforks, TempoHardfork, TempoHardforks},
 };
 use tempo_precompiles::{error::Result as TempoResult, storage::StorageActions};
 use tempo_revm::{TempoTxEnv, evm::TempoContext, gas_params::tempo_gas_params_with_amsterdam};
@@ -75,12 +75,13 @@ impl FeeTokenResolver for TempoEvmConfig {
         tx: &TempoTxEnv,
         fee_payer: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
         S: TempoStateAccess<M>,
     {
-        TempoFeeManager::new().resolve_fee_token(state, tx, fee_payer, spec, actions)
+        TempoFeeManager::new().resolve_fee_token(state, tx, fee_payer, spec, nvnm, actions)
     }
 }
 
@@ -202,6 +203,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
+                nvnm_hardfork: self.chain_spec().nvnm_hardfork_at(header.timestamp()),
             },
         })
     }
@@ -257,6 +259,7 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
+                nvnm_hardfork: self.chain_spec().nvnm_hardfork_at(attributes.timestamp),
             },
         })
     }

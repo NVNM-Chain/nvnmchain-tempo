@@ -9,7 +9,7 @@ use revm::{
     Database,
     context::{CfgEnv, Journal, result::EVMError},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_contracts::precompiles::{
     DEFAULT_FEE_TOKEN, IFeeManager, IStablecoinDEX, STABLECOIN_DEX_ADDRESS,
 };
@@ -59,6 +59,7 @@ pub trait FeeTokenResolver {
         tx: &TempoTxEnv,
         fee_payer: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
@@ -74,9 +75,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         tx: &TempoTxEnv,
         fee_payer: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address> {
-        TempoFeeManager::new().resolve_fee_token(journal, tx, fee_payer, spec, actions)
+        TempoFeeManager::new().resolve_fee_token(journal, tx, fee_payer, spec, nvnm, actions)
     }
 
     /// Validates whether a TIP-20 can be used to pay fees.
@@ -94,9 +96,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         journal: &mut Journal<DB>,
         fee_token: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> Result<(), EVMError<DB::Error, TempoInvalidTransaction>> {
-        journal.ensure_tip20_usd(spec, fee_token, actions)
+        journal.ensure_tip20_usd(spec, nvnm, fee_token, actions)
     }
 
     /// Resolves the validator token used to receive protocol fees.
@@ -105,9 +108,10 @@ pub trait ProtocolFeeManager<DB: Database>: Debug {
         journal: &mut Journal<DB>,
         beneficiary: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address> {
-        journal.with_read_only_storage_ctx(spec, actions, || {
+        journal.with_read_only_storage_ctx(spec, nvnm, actions, || {
             TipFeeManager::new().get_validator_token(beneficiary)
         })
     }
@@ -205,6 +209,7 @@ impl FeeTokenResolver for TempoFeeManager {
         tx: &TempoTxEnv,
         fee_payer: Address,
         spec: TempoHardfork,
+        nvnm: NvnmHardfork,
         actions: StorageActions,
     ) -> TempoResult<Address>
     where
@@ -228,7 +233,7 @@ impl FeeTokenResolver for TempoFeeManager {
         }
 
         // Check stored user token preference
-        let user_token = state.with_read_only_storage_ctx(spec, actions.clone(), || {
+        let user_token = state.with_read_only_storage_ctx(spec, nvnm, actions.clone(), || {
             // ensure TIP_FEE_MANAGER_ADDRESS is loaded
             TipFeeManager::new().user_tokens[fee_payer].read()
         })?;
@@ -252,7 +257,7 @@ impl FeeTokenResolver for TempoFeeManager {
                         }
                     ;
 
-            if can_infer_tip20 && state.is_valid_fee_token(spec, to, actions.clone())? {
+            if can_infer_tip20 && state.is_valid_fee_token(spec, nvnm, to, actions.clone())? {
                 return Ok(to);
             }
         }
@@ -266,11 +271,11 @@ impl FeeTokenResolver for TempoFeeManager {
             && (!tx.is_aa() || calls.next().is_none())
         {
             if let Ok(call) = IStablecoinDEX::swapExactAmountInCall::abi_decode(input)
-                && state.is_valid_fee_token(spec, call.tokenIn, actions.clone())?
+                && state.is_valid_fee_token(spec, nvnm, call.tokenIn, actions.clone())?
             {
                 return Ok(call.tokenIn);
             } else if let Ok(call) = IStablecoinDEX::swapExactAmountOutCall::abi_decode(input)
-                && state.is_valid_fee_token(spec, call.tokenIn, actions)?
+                && state.is_valid_fee_token(spec, nvnm, call.tokenIn, actions)?
             {
                 return Ok(call.tokenIn);
             }

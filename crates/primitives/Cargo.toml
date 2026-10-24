@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 tempo-contracts.workspace = true
+tempo-nvnm-hardfork = { workspace = true, optional = true }
 
 # Reth
 reth-db-api = { workspace = true, optional = true }
@@ -106,6 +107,7 @@ std = [
 	"sha2/std",
 	"alloy-sol-types/std",
 	"tempo-contracts/std",
+	"tempo-nvnm-hardfork?/std",
 	"reth-codecs?/std"
 ]
 reth = ["dep:reth-ethereum-primitives", "dep:reth-primitives-traits", "serde"]
@@ -122,8 +124,9 @@ serde = [
 	"tracing-subscriber/serde",
 	"revm?/serde",
 	"tempo-contracts/serde",
+	"tempo-nvnm-hardfork?/serde",
 ]
-evm = ["dep:alloy-evm", "dep:revm"]
+evm = ["dep:alloy-evm", "dep:revm", "dep:tempo-nvnm-hardfork"]
 reth-codec = [
 	"reth",
 	"serde",

@@ -12,6 +12,8 @@ pub struct ForkSchedule {
     ///
     /// Kept as a string so clients can read schedules containing unknown hardforks.
     pub active: String,
+    /// Name of the latest active NVNM fork at the chain head.
+    pub nvnm_active: String,
 }
 
 impl ForkSchedule {
@@ -51,6 +53,7 @@ mod tests {
     fn schedule_roundtrip_preserves_unknown_forks_and_wire_format() {
         let json = serde_json::json!({
             "active": "T0",
+            "nvnmActive": "Baseline",
             "schedule": [
                 { "name": "T0", "activationTime": 0, "active": true, "forkId": "0x471a451c" },
                 { "name": "FutureFork", "activationTime": 100, "active": false }
@@ -68,6 +71,7 @@ mod tests {
     fn next_activation_uses_the_earliest_inactive_fork() {
         let mut schedule: ForkSchedule = serde_json::from_value(serde_json::json!({
             "active": "T0",
+            "nvnmActive": "Baseline",
             "schedule": [
                 { "name": "T0", "activationTime": 0, "active": true },
                 { "name": "T2", "activationTime": 200, "active": false },

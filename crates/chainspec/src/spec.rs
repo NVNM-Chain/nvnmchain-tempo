@@ -4,7 +4,7 @@ use crate::{
     bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, sync::Arc, vec::Vec};
 use alloy_eips::eip7840::BlobParams;
 use alloy_evm::eth::spec::EthExecutorSpec;
 use alloy_genesis::Genesis;
@@ -22,6 +22,7 @@ use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
 use tempo_hardfork::TempoHardfork;
+use tempo_nvnm_hardfork::NvnmHardfork;
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -92,16 +93,23 @@ pub struct TempoGenesisInfo {
     /// Activation timestamp for T14 hardfork.
     #[serde(skip_serializing_if = "Option::is_none")]
     t14_time: Option<u64>,
+    /// Every other key, which no field above reads.
+    #[serde(flatten, skip_serializing)]
+    unread: BTreeMap<String, serde_json::Value>,
 }
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Self {
-        genesis
-            .config
-            .extra_fields
-            .deserialize_as::<Self>()
-            .unwrap_or_default()
+    /// Extract Tempo genesis info from genesis extra_fields. The fields are consensus-critical yet
+    /// outside the genesis hash, so a key or value no field reads is an error, not a default.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        let info: Self = genesis.config.extra_fields.deserialize_as()?;
+        if !info.unread.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "unknown keys {:?}",
+                info.unread.keys()
+            )));
+        }
+        Ok(info)
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -130,6 +138,24 @@ impl TempoGenesisInfo {
 
         tempo_hardfork::tempo_post_genesis_hardforks!(fork_time_match)
     }
+
+    /// Returns the activation timestamp for an NVNM fork, or `None` if not scheduled.
+    pub fn nvnm_fork_time(&self, fork: NvnmHardfork) -> Option<u64> {
+        macro_rules! nvnm_fork_time_match {
+            ($($variant:ident),* $(,)?) => {
+                paste::paste! {
+                    match fork {
+                        NvnmHardfork::Baseline => Some(0),
+                        $(NvnmHardfork::$variant => self.[<$variant:lower _time>],)*
+                        // Non-exhaustive across crates, as in `fork_time`.
+                        _ => None,
+                    }
+                }
+            };
+        }
+
+        tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_fork_time_match)
+    }
 }
 
 /// Tempo chain specification parser.
@@ -152,7 +178,9 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
+        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)
+            .map_err(|e| eyre::eyre!("malformed Tempo genesis extra_fields: {e}"))?
+            .into(),
     })
 }
 
@@ -269,10 +297,14 @@ impl TempoChainSpec {
         TempoConsensusSpec::general_gas_limit_at(self, timestamp, gas_limit, shared_gas_limit)
     }
 
-    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    /// [`Self::try_from_genesis`], panicking on its error.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis);
+        Self::try_from_genesis(genesis).expect("not a Tempo genesis")
+    }
+
+    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
+        let info = TempoGenesisInfo::extract_from(&genesis)?;
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -283,6 +315,14 @@ impl TempoChainSpec {
         });
 
         base_spec.hardforks.extend(tempo_forks);
+
+        // `insert` keeps the list in time order, so fork id counts both lanes in turn.
+        let nvnm_forks = NvnmHardfork::VARIANTS.iter().filter_map(|&fork| {
+            info.nvnm_fork_time(fork)
+                .map(|time| (fork, ForkCondition::Timestamp(time)))
+        });
+
+        base_spec.hardforks.extend(nvnm_forks);
 
         let inner = base_spec.map_header(|inner| TempoHeader {
             general_gas_limit: 0,
@@ -297,12 +337,12 @@ impl TempoChainSpec {
         let network_identity =
             NetworkIdentity::from_extra_data(inner.genesis_header().inner.extra_data.as_ref()).ok();
 
-        Self {
+        Ok(Self {
             inner,
             info,
             network_identity,
             default_follow_url: None,
-        }
+        })
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -470,7 +510,7 @@ impl EthExecutorSpec for TempoChainSpec {
 macro_rules! tempo_hardforks_trait {
     ($($variant:ident),* $(,)?) => {
         /// Trait for querying Tempo-specific hardfork activations.
-        pub trait TempoHardforks: EthereumHardforks {
+        pub trait TempoHardforks: EthereumHardforks + NvnmHardforks {
             /// Retrieves activation condition for a Tempo-specific hardfork.
             fn tempo_fork_activation(&self, fork: TempoHardfork) -> ForkCondition;
 
@@ -509,6 +549,45 @@ impl TempoHardforks for TempoChainSpec {
     }
 }
 
+/// Generates the NVNM lane's query trait, as `tempo_hardforks_trait!` does Tempo's.
+macro_rules! nvnm_hardforks_trait {
+    ($($variant:ident),* $(,)?) => {
+        /// Trait for querying NVNM's lane, scheduled apart from the Tempo forks.
+        pub trait NvnmHardforks {
+            /// Retrieves the activation condition for an NVNM fork.
+            fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition;
+
+            /// Retrieves the NVNM fork active at a given timestamp.
+            fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
+                NvnmHardfork::VARIANTS
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&fork| self.nvnm_fork_activation(fork).active_at_timestamp(timestamp))
+                    .unwrap_or_default()
+            }
+
+            paste::paste! {
+                $(
+                    #[doc = concat!("Returns true if ", stringify!($variant), " is active at the given timestamp.")]
+                    fn [<is_ $variant:lower _active_at_timestamp>](&self, timestamp: u64) -> bool {
+                        self.nvnm_fork_activation(NvnmHardfork::$variant)
+                            .active_at_timestamp(timestamp)
+                    }
+                )*
+            }
+        }
+    };
+}
+
+tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_hardforks_trait);
+
+impl NvnmHardforks for TempoChainSpec {
+    fn nvnm_fork_activation(&self, fork: NvnmHardfork) -> ForkCondition {
+        self.fork(fork)
+    }
+}
+
 /// Chain-spec policy for Tempo consensus header gas limits.
 ///
 /// The hardfork schedule determines the default Tempo L1 policy, while chains that reuse the
@@ -538,8 +617,11 @@ impl TempoConsensusSpec for TempoChainSpec {
 #[cfg(test)]
 mod tests {
     use crate::{
-        TempoHardfork,
-        spec::{TEMPO_T1_BASE_FEE, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_FLOOR, TempoHardforks},
+        NvnmHardfork, TempoHardfork,
+        spec::{
+            NvnmHardforks, TEMPO_T1_BASE_FEE, TEMPO_T7_BASE_FEE_CAP, TEMPO_T7_BASE_FEE_FLOOR,
+            TempoHardforks,
+        },
     };
     use alloy_primitives::hex;
     use commonware_codec::Encode as _;
@@ -1176,8 +1258,41 @@ mod tests {
             );
             assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
+            assert_eq!(
+                spec.nvnm_hardfork_at(u64::MAX),
+                NvnmHardfork::Baseline,
+                "{id}"
+            );
             assert!(spec.network_identity.is_some(), "{id}");
             assert_eq!(spec.default_follow_url(), Some(follow), "{id}");
         }
+    }
+
+    fn lane_genesis(config: serde_json::Value) -> alloy_genesis::Genesis {
+        serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} })).unwrap()
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn an_unknown_key_stops_startup() {
+        for key in ["n999Time", "t99Time", "epochLenght"] {
+            let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, key: 5 }));
+            let err = super::TempoChainSpec::try_from_genesis(genesis.clone()).unwrap_err();
+            assert_eq!(err.to_string(), format!("unknown keys [{key:?}]"));
+
+            let err =
+                super::chain_value_parser(&serde_json::to_string(&genesis).unwrap()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("malformed Tempo genesis extra_fields")
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_field_stops_startup() {
+        let genesis = lane_genesis(serde_json::json!({ "chainId": 1234, "epochLength": "x" }));
+        let err = super::TempoChainSpec::try_from_genesis(genesis).unwrap_err();
+        assert!(err.to_string().contains("invalid type"), "{err}");
     }
 }

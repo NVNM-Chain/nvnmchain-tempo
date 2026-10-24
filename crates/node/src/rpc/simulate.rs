@@ -24,7 +24,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use tempo_chainspec::hardfork::TempoHardforks;
+use tempo_chainspec::hardfork::{NvnmHardforks, TempoHardforks};
 use tempo_evm::TempoStateAccess;
 use tempo_precompiles::{
     storage::{ContractStorage, StorageActions},
@@ -210,11 +210,13 @@ impl<N: FullNodeTypes<Types = TempoNode>> TempoSimulate<N> {
             .spawn_blocking_io_fut(async move |this| {
                 let _permit = permit;
                 let state = this.state_at_block_id(block).await?;
-                let spec = this.provider().chain_spec().tempo_hardfork_at(timestamp);
+                let chain_spec = this.provider().chain_spec();
+                let spec = chain_spec.tempo_hardfork_at(timestamp);
+                let nvnm = chain_spec.nvnm_hardfork_at(timestamp);
                 let mut db = StateProviderDatabase::new(state);
 
                 let resolved =
-                    db.with_read_only_storage_ctx(spec, StorageActions::disabled(), || {
+                    db.with_read_only_storage_ctx(spec, nvnm, StorageActions::disabled(), || {
                         missing
                             .into_iter()
                             .filter_map(|address| {

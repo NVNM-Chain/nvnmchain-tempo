@@ -13,7 +13,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use std::{cell::RefCell, rc::Rc};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 /// Production [`PrecompileStorageProvider`] backed by the live EVM journal.
@@ -23,6 +23,7 @@ pub struct EvmPrecompileStorageProvider<'a> {
     internals: EvmInternals<'a>,
     gas_tracker: GasTracker,
     spec: TempoHardfork,
+    nvnm_hardfork: NvnmHardfork,
     amsterdam_eip8037_enabled: bool,
     is_static: bool,
     gas_params: GasParams,
@@ -47,10 +48,15 @@ impl<'a> EvmPrecompileStorageProvider<'a> {
         is_static: bool,
         gas_params: GasParams,
     ) -> Self {
+        let nvnm_hardfork = internals
+            .block_env_downcast_ref::<TempoBlockEnv>()
+            .map(|block| block.nvnm_hardfork)
+            .unwrap_or_default();
         Self {
             internals,
             gas_tracker: GasTracker::new(gas_limit, gas_limit, reservoir),
             spec,
+            nvnm_hardfork,
             amsterdam_eip8037_enabled,
             is_static,
             gas_params,
@@ -568,6 +574,11 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
     #[inline]
     fn spec(&self) -> TempoHardfork {
         self.spec
+    }
+
+    #[inline]
+    fn nvnm_hardfork(&self) -> NvnmHardfork {
+        self.nvnm_hardfork
     }
 
     #[inline]

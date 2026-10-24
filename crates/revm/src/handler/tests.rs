@@ -18,7 +18,7 @@ use revm::{
     },
     primitives::hardfork::SpecId,
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, ITIPFeeAMM};
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, storage::ContractStorage, test_util::TIP20Setup,
@@ -146,6 +146,7 @@ impl<DB: Database> ProtocolFeeManager<DB> for ValidatorTokenLookupFailsFeeManage
         tx: &TempoTxEnv,
         _fee_payer: Address,
         _spec: TempoHardfork,
+        _nvnm: NvnmHardfork,
         _actions: StorageActions,
     ) -> tempo_precompiles::error::Result<Address> {
         Ok(tx.fee_token.unwrap_or(DEFAULT_FEE_TOKEN))
@@ -156,6 +157,7 @@ impl<DB: Database> ProtocolFeeManager<DB> for ValidatorTokenLookupFailsFeeManage
         _journal: &mut Journal<DB>,
         _beneficiary: Address,
         _spec: TempoHardfork,
+        _nvnm: NvnmHardfork,
         _actions: StorageActions,
     ) -> tempo_precompiles::error::Result<Address> {
         Err(TempoPrecompileError::Fatal(
@@ -523,6 +525,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
             &ctx.tx,
             user,
             ctx.cfg.spec,
+            ctx.block.nvnm_hardfork,
             tempo_precompiles::storage::StorageActions::disabled(),
         )?;
         assert_eq!(DEFAULT_FEE_TOKEN, fee_token);
@@ -544,6 +547,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
             &ctx.tx,
             user,
             ctx.cfg.spec,
+            ctx.block.nvnm_hardfork,
             tempo_precompiles::storage::StorageActions::disabled(),
         )?;
         assert_eq!(user_fee_token, fee_token);
@@ -556,6 +560,7 @@ fn test_get_fee_token() -> eyre::Result<()> {
         &ctx.tx,
         user,
         ctx.cfg.spec,
+        ctx.block.nvnm_hardfork,
         tempo_precompiles::storage::StorageActions::disabled(),
     )?;
     assert_eq!(tx_fee_token, fee_token);
