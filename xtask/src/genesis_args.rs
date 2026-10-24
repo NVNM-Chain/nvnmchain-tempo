@@ -131,6 +131,11 @@ pub(crate) struct GenesisArgs {
     #[arg(long, default_value_t = u64::MAX)]
     pathusd_amount: u64,
 
+    /// pathUSD to mint besides the generated accounts: a JSON object of address to amount, in the
+    /// token's 6 decimals.
+    #[arg(long, value_name = "PATH", value_parser = read_balances)]
+    pathusd_balances: Option<BTreeMap<Address, u64>>,
+
     /// Custom admin address for validator config.
     /// If not set, uses the first generated account.
     #[arg(long)]
@@ -355,7 +360,13 @@ impl GenesisArgs {
         initialize_tip20_factory(&mut evm)?;
 
         println!("Creating pathUSD through factory");
-        create_path_usd_token(pathusd_admin, &addresses, self.pathusd_amount, &mut evm)?;
+        create_path_usd_token(
+            pathusd_admin,
+            &addresses,
+            self.pathusd_amount,
+            self.pathusd_balances.as_ref(),
+            &mut evm,
+        )?;
 
         let (alpha_token_address, beta_token_address, theta_token_address) =
             if !self.no_extra_tokens {
@@ -888,6 +899,7 @@ fn create_path_usd_token(
     admin: Address,
     recipients: &[Address],
     amount_per_recipient: u64,
+    balances: Option<&BTreeMap<Address, u64>>,
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
 ) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
@@ -924,10 +936,24 @@ fn create_path_usd_token(
                     )
                     .expect("Could not mint pathUSD");
             }
+            for (&to, &amount) in balances.into_iter().flatten() {
+                token.mint(
+                    admin,
+                    ITIP20::mintCall {
+                        to,
+                        amount: U256::from(amount),
+                    },
+                )?;
+            }
 
             Ok(())
         },
     )
+}
+
+/// `--pathusd-balances`.
+fn read_balances(path: &str) -> eyre::Result<BTreeMap<Address, u64>> {
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
 enum SaltOrAddress {
@@ -1501,5 +1527,39 @@ mod anchoring_tests {
     #[test]
     fn without_the_flag_the_genesis_carries_none() {
         assert!(alloc(false, 0, Some(OWNER)).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pathusd_tests {
+    use super::*;
+
+    const ADMIN: Address = address!("0x00000000000000000000000000000000000000A0");
+    const ACCOUNT: Address = address!("0x00000000000000000000000000000000000000B0");
+    const HOLDER: Address = address!("0x00000000000000000000000000000000000000C0");
+
+    #[test]
+    fn balances_are_minted_besides_the_generated_accounts() -> eyre::Result<()> {
+        let mut evm = setup_tempo_evm(1337);
+        initialize_registry(&mut evm)?;
+        initialize_tip20_factory(&mut evm)?;
+        let balances = BTreeMap::from([(HOLDER, 1_500_000)]);
+        create_path_usd_token(ADMIN, &[ACCOUNT], 7, Some(&balances), &mut evm)?;
+
+        let ctx = evm.ctx_mut();
+        StorageCtx::enter_evm(
+            &mut ctx.journaled_state,
+            &ctx.block,
+            &ctx.cfg,
+            &ctx.tx,
+            StorageActions::disabled(),
+            || {
+                let token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+                let balance = |account| token.balance_of(ITIP20::balanceOfCall { account });
+                assert_eq!(balance(ACCOUNT)?, U256::from(7));
+                assert_eq!(balance(HOLDER)?, U256::from(1_500_000));
+                Ok(())
+            },
+        )
     }
 }
