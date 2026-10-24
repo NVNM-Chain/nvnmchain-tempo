@@ -142,10 +142,8 @@ pub trait PrecompileStorageProvider {
     /// Returns the currently active hardfork.
     fn spec(&self) -> TempoHardfork;
 
-    /// Returns the currently active NVNM fork; a provider without a block sees none.
-    fn nvnm_hardfork(&self) -> NvnmHardfork {
-        NvnmHardfork::Baseline
-    }
+    /// Returns the currently active NVNM fork.
+    fn nvnm_hardfork(&self) -> NvnmHardfork;
 
     /// Returns the shared storage-actions recorder for this provider.
     fn storage_actions(&self) -> StorageActions {

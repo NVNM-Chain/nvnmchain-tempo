@@ -8,7 +8,7 @@ use revm::{
     context::{JournalTr, result::EVMError},
     state::{AccountInfo, Bytecode},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_precompiles::{
     error::{Result as TempoResult, TempoPrecompileError},
     storage::{Handler, PrecompileStorageProvider, StorageAction, StorageActions, StorageCtx},
@@ -305,6 +305,12 @@ where
 {
     fn spec(&self) -> TempoHardfork {
         self.spec
+    }
+
+    fn nvnm_hardfork(&self) -> NvnmHardfork {
+        // A read-only context has no block to read the lane from, and nothing it runs gates on it.
+        // TODO: thread the lane with `spec` once an NVNM fork gates a read-only path.
+        NvnmHardfork::Baseline
     }
 
     fn storage_actions(&self) -> StorageActions {
