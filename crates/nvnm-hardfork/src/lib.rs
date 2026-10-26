@@ -33,14 +33,6 @@ macro_rules! nvnm_hardfork {
                         *self as u8 >= Self::$variant as u8
                     }
                 )*
-
-                /// The genesis key holding this fork's activation time; `Baseline` has none.
-                pub const fn genesis_key(&self) -> Option<&'static str> {
-                    match self {
-                        Self::Baseline => None,
-                        $(Self::$variant => Some(concat!(stringify!([<$variant:lower>]), "Time")),)*
-                    }
-                }
             }
         }
 
@@ -64,17 +56,3 @@ nvnm_hardfork!(
         Baseline,
     }
 );
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn baseline_has_no_genesis_key() {
-        for &fork in NvnmHardfork::VARIANTS {
-            let key = (fork != NvnmHardfork::Baseline)
-                .then(|| format!("{}Time", fork.name().to_lowercase()));
-            assert_eq!(fork.genesis_key(), key.as_deref());
-        }
-    }
-}
