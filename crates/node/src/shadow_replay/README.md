@@ -7,11 +7,11 @@ consensus-critical. It reports expected fork changes, unexplained differences, a
 execution coverage. It does not decide consensus validity or modify the canonical chain.
 
 Enable live replay with `--shadow-replay` (latest compiled hardfork) or
-`--shadow-replay HARDFORK` (explicit candidate). The existing `--shadow-replay.hardfork HARDFORK`
-form is also accepted. The live replayer subscribes to canonical-state notifications and processes
-newly committed blocks. It reports notification gaps rather than backfilling them; the
-`shadow-replay` command can instead scan an explicit historical block range. Blocks where the
-candidate hardfork is already canonical are skipped.
+`--shadow-replay HARDFORK` (an explicit candidate of either lane, `T13` or `N1`). The existing
+`--shadow-replay.hardfork HARDFORK` form is also accepted. The live replayer subscribes to
+canonical-state notifications and processes newly committed blocks. It reports notification gaps
+rather than backfilling them; the `shadow-replay` command can instead scan an explicit historical
+block range. Blocks where the candidate hardfork is already canonical are skipped.
 
 ## Execution model
 

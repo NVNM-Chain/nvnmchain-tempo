@@ -10,11 +10,8 @@ use reth_provider::{
     TransactionVariant, providers::BlockchainProvider,
 };
 use std::time::{Duration, Instant};
-use tempo_chainspec::{
-    hardfork::TempoHardfork,
-    spec::{TempoChainSpecParser, TempoHardforks as _},
-};
-use tempo_node::{ReplayOutcome, ShadowReplayer, node::TempoNode};
+use tempo_chainspec::spec::TempoChainSpecParser;
+use tempo_node::{ReplayOutcome, ShadowFork, ShadowReplayer, node::TempoNode};
 use tracing::{info, info_span, warn};
 
 /// Replay a canonical block range independently under candidate hardfork rules.
@@ -32,9 +29,9 @@ pub struct ShadowReplay {
     #[arg(long)]
     to: Option<u64>,
 
-    /// Candidate hardfork to activate for counterfactual execution.
+    /// Candidate hardfork to activate for counterfactual execution, of either lane (`T13`, `N1`).
     #[arg(long)]
-    hardfork: TempoHardfork,
+    hardfork: ShadowFork,
 
     /// Exit unsuccessfully on unexplained findings or inconclusive comparisons.
     #[arg(long)]
@@ -80,7 +77,7 @@ impl ShadowReplay {
             let block = provider
                 .recovered_block(number.into(), TransactionVariant::NoHash)?
                 .ok_or_else(|| eyre!("canonical block {number} not found"))?;
-            if chain_spec.tempo_hardfork_at(block.timestamp()) >= self.hardfork {
+            if self.hardfork.is_canonical(&chain_spec, block.timestamp()) {
                 skipped += 1;
             } else {
                 let receipts = provider

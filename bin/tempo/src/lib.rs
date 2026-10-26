@@ -84,7 +84,7 @@ pub use tempo_node::{
     TempoPooledTransaction, TransactionOrigin,
 };
 use tempo_node::{
-    ShadowReplayer, TempoFullNode,
+    ShadowFork, ShadowReplayer, TempoFullNode,
     rpc::consensus::{TempoConsensusApiServer, TempoConsensusRpc},
     telemetry::{
         HardwareMetricsConfig, PrometheusMetricsConfig, install_hardware_metrics,
@@ -641,7 +641,8 @@ pub fn tempo_main_with(mut overrides: TempoOverrides) -> eyre::Result<()> {
             .wrap_err("failed launching execution node")?;
 
         if let Some(hardfork) = args.node_args.shadow_replay {
-            let hardfork = hardfork.unwrap_or_else(|| *TempoHardfork::VARIANTS.last().unwrap());
+            let hardfork = hardfork
+                .unwrap_or_else(|| ShadowFork::Tempo(*TempoHardfork::VARIANTS.last().unwrap()));
             ShadowReplayer::new(node.provider.clone(), hardfork).spawn(node.tasks().clone());
         }
 
@@ -746,8 +747,8 @@ mod tests {
     use clap::{CommandFactory, FromArgMatches, Parser};
 
     use super::{
-        TempoArgs, TempoChainSpec, TempoCli, TempoHardfork, apply_tempo_cli_overrides, defaults,
-        follow::FollowMode, snapshot_download,
+        ShadowFork, TempoArgs, TempoChainSpec, TempoCli, TempoHardfork, apply_tempo_cli_overrides,
+        defaults, follow::FollowMode, snapshot_download,
     };
     use reth_ethereum::{chainspec::EthChainSpec as _, cli::Commands};
     use tempo_contracts::precompiles::{
@@ -770,7 +771,10 @@ mod tests {
 
         for flag in ["--shadow-replay", "--shadow-replay.hardfork"] {
             let args = parse_node_args(&["tempo", "node", "--dev", flag, "T12"]);
-            assert_eq!(args.node_args.shadow_replay, Some(Some(TempoHardfork::T12)));
+            assert_eq!(
+                args.node_args.shadow_replay,
+                Some(Some(ShadowFork::Tempo(TempoHardfork::T12)))
+            );
         }
     }
 
