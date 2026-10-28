@@ -43,18 +43,9 @@ they are still there.
 
 ## Getting Started
 
-Build the node, run a localnet, and point your tooling at it.
-
 ```bash
 git clone https://github.com/NVNM-Chain/nvnmchain-tempo
 cd nvnmchain-tempo
-```
-
-Install [`just`](https://github.com/casey/just?tab=readme-ov-file#packages), then the
-dependencies:
-
-```bash
-just
 ```
 
 Configure Git to run the repository hooks:
@@ -66,7 +57,7 @@ Configure Git to run the repository hooks:
 Build:
 
 ```bash
-just build-all
+cargo build --release --bin tempo
 ```
 
 Run the tests:
@@ -75,47 +66,23 @@ Run the tests:
 cargo nextest run
 ```
 
-Start a localnet:
+Start a dev chain (chain id 1337, RPC at `http://127.0.0.1:8545`). It has no anchoring
+contract.
 
 ```bash
-just localnet
+./target/release/tempo node --dev --chain dev --dev.block-time 500ms --http
 ```
-
-For a bootstrapped localnet container (deterministic accounts, prefunded TIP-20 tokens, Fee
-AMM and DEX liquidity), see [`docs/localnet.md`](./docs/localnet.md).
 
 ### As an operator
 
-Install from a pre-built release, build from source, or use the provided Docker image. Each
-release ships `<binary>-<version>-<target>.tar.gz` plus `.sha256` (archive checksum) and
-`.asc` (GPG signature), and is covered by Sigstore-signed SLSA build provenance.
-
-To verify manually, pick **one** of the two paths below —
-
-**Path A — offline / no GitHub auth required (checksum + GPG):**
+Install from a release or the Docker image `ghcr.io/nvnm-chain/tempo`. Releases are not
+signed; check an archive against the release's `checksums.txt`:
 
 ```bash
-TAG=v1.6.0
-ARCHIVE=<binary>-${TAG}-x86_64-unknown-linux-gnu.tar.gz
-
+TAG=v1.16.0-nvnm.1
 gh release download "$TAG" --repo NVNM-Chain/nvnmchain-tempo \
-  -p "$ARCHIVE" -p "$ARCHIVE.sha256" -p "$ARCHIVE.asc"
-
-sha256sum -c "$ARCHIVE.sha256"
-
-# Public key + fingerprint: see the release notes.
-gpg --verify "$ARCHIVE.asc" "$ARCHIVE"
-```
-
-**Path B — Sigstore (requires `gh` installed and authenticated):**
-
-```bash
-TAG=v1.6.0
-ARCHIVE=<binary>-${TAG}-x86_64-unknown-linux-gnu.tar.gz
-
-gh release download "$TAG" --repo NVNM-Chain/nvnmchain-tempo -p "$ARCHIVE"
-gh attestation verify "$ARCHIVE" --repo NVNM-Chain/nvnmchain-tempo \
-  --predicate-type https://slsa.dev/provenance/v1
+  -p "tempo-${TAG}-x86_64-unknown-linux-gnu.tar.gz" -p checksums.txt
+sha256sum -c --ignore-missing checksums.txt
 ```
 
 Genesis-time import is a separate path: `init-from-binary-dump <file>` with an optional
