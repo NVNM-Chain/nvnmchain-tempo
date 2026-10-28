@@ -88,8 +88,7 @@ AMM and DEX liquidity), see [`docs/localnet.md`](./docs/localnet.md).
 
 Install from a pre-built release, build from source, or use the provided Docker image. Each
 release ships `<binary>-<version>-<target>.tar.gz` plus `.sha256` (archive checksum) and
-`.asc` (GPG signature), and is covered by Sigstore-signed SLSA build provenance. The
-[`tempoup`](./tempoup) installer performs these checks automatically.
+`.asc` (GPG signature), and is covered by Sigstore-signed SLSA build provenance.
 
 To verify manually, pick **one** of the two paths below —
 
