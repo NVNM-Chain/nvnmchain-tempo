@@ -16,8 +16,8 @@ they are still there.
 
   - Fees are paid in TIP-20 balances, so an anchoring workload costs a stablecoin balance
     rather than a speculative asset. The Fee AMM converts to the validator's preferred token.
-  - Because money never leaves the TIP-20 domain, per-transaction fee token and amount are
-    reconcilable from receipts alone.
+  - Receipts name each transaction's fee token and fee payer; the fee is
+    `gasUsed × effectiveGasPrice / 10^12` in that token's units, rounded up.
 
 - Native smart accounts (`0x76` transactions)
 
@@ -31,15 +31,15 @@ they are still there.
   - Built on the [Reth SDK](https://github.com/paradigmxyz/reth) for execution, state and
     `eth_*` RPC.
   - Simplex BFT via [Commonware](https://commonware.xyz/) drives ordering and finality in
-    process — no Engine API hop, sub-second blocks and fast finality.
+    process: Engine API calls go over a channel, not HTTP. Sub-second blocks and fast
+    finality.
 
 ## What makes NVNMChain familiar
 
 - Fully compatible with the Ethereum Virtual Machine (EVM), targeting the Osaka hardfork.
 - Deploy and interact with smart contracts using Solidity, Foundry, Hardhat and the rest of
   the Ethereum toolchain.
-- All Ethereum JSON-RPC methods work out of the box; anchoring adds its own namespace
-  alongside them.
+- All Ethereum JSON-RPC methods work out of the box.
 
 ## Getting Started
 
