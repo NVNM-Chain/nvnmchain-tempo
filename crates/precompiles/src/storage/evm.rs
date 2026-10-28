@@ -13,7 +13,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use std::{cell::RefCell, rc::Rc};
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 /// Production [`PrecompileStorageProvider`] backed by the live EVM journal.
@@ -568,6 +568,11 @@ impl<'a> PrecompileStorageProvider for EvmPrecompileStorageProvider<'a> {
     #[inline]
     fn spec(&self) -> TempoHardfork {
         self.spec
+    }
+
+    #[inline]
+    fn nvnm_hardfork(&self) -> NvnmHardfork {
+        self.block_env().nvnm_hardfork
     }
 
     #[inline]

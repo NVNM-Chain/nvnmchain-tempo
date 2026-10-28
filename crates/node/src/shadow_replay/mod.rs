@@ -33,7 +33,7 @@ use alloy_rlp::{encode_list, list_length};
 use analysis::Report;
 use fees::{FeeWrites, RecordingFeeManager};
 use metrics::{Counter, Gauge, Histogram};
-use reth_chainspec::ForkCondition;
+use reth_chainspec::{ForkCondition, Hardfork};
 use reth_ethereum::tasks::TaskExecutor;
 use reth_evm::ConfigureEvm as _;
 use reth_primitives_traits::RecoveredBlock;
@@ -49,13 +49,50 @@ use reth_revm::{
 use reth_tracing::tracing::{debug, error, info, info_span, warn};
 use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 use tempo_chainspec::{
-    hardfork::TempoHardfork,
+    hardfork::{NvnmHardfork, NvnmHardforks as _, TempoHardfork},
     spec::{TempoChainSpec, TempoHardforks as _},
 };
 use tempo_contracts::precompiles::{ITIP20, TIP_FEE_MANAGER_ADDRESS};
 use tempo_evm::{TempoEvmConfig, TempoTxResult};
 use tempo_primitives::{Block, TempoPrimitives, TempoReceipt};
 use tokio::sync::broadcast::error::RecvError;
+
+/// A candidate fork from either lane, parsed from the fork's enum name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowFork {
+    Tempo(TempoHardfork),
+    Nvnm(NvnmHardfork),
+}
+
+impl ShadowFork {
+    /// Whether the canonical chain already runs this fork at `timestamp`.
+    pub fn is_canonical(&self, spec: &TempoChainSpec, timestamp: u64) -> bool {
+        match *self {
+            Self::Tempo(fork) => spec.tempo_hardfork_at(timestamp) >= fork,
+            Self::Nvnm(fork) => spec.nvnm_hardfork_at(timestamp) >= fork,
+        }
+    }
+}
+
+impl core::str::FromStr for ShadowFork {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        name.parse()
+            .map(Self::Tempo)
+            .or_else(|_| name.parse().map(Self::Nvnm))
+            .map_err(|_| format!("unknown hardfork `{name}`"))
+    }
+}
+
+impl core::fmt::Display for ShadowFork {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Tempo(fork) => write!(f, "{fork}"),
+            Self::Nvnm(fork) => write!(f, "{fork}"),
+        }
+    }
+}
 
 /// Result of replaying one canonical block under candidate hardfork rules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,12 +169,12 @@ pub struct ShadowReplayer<P> {
     provider: P,
     real_config: TempoEvmConfig,
     shadow_config: TempoEvmConfig,
-    shadow_hardfork: TempoHardfork,
+    shadow_hardfork: ShadowFork,
     metrics: ShadowReplayMetrics,
 }
 
 impl<P: ChainSpecProvider<ChainSpec = TempoChainSpec>> ShadowReplayer<P> {
-    pub fn new(provider: P, shadow_hardfork: TempoHardfork) -> Self {
+    pub fn new(provider: P, shadow_hardfork: ShadowFork) -> Self {
         let canonical_spec = provider.chain_spec();
         let shadow_spec = Arc::new(shadow_spec(&canonical_spec, shadow_hardfork));
         Self {
@@ -197,12 +234,7 @@ where
                         block_hash = ?block.hash(),
                         %hardfork,
                     );
-                    if replayer
-                        .real_config
-                        .chain_spec()
-                        .tempo_hardfork_at(block.timestamp())
-                        >= hardfork
-                    {
+                    if hardfork.is_canonical(replayer.real_config.chain_spec(), block.timestamp()) {
                         span.in_scope(|| {
                             debug!(target: "shadow_replay", "Candidate already active on canonical chain")
                         });
@@ -258,7 +290,12 @@ impl<P: StateProviderFactory + Sync> ShadowReplayer<P> {
             .real_config
             .chain_spec()
             .tempo_hardfork_at(block.timestamp());
-        let rules = expectations::between(canonical, self.shadow_hardfork);
+        // No NVNM fork has expectations yet, so its candidate gets only the fee normalization.
+        let candidate = match self.shadow_hardfork {
+            ShadowFork::Tempo(fork) => fork,
+            ShadowFork::Nvnm(_) => canonical,
+        };
+        let rules = expectations::between(canonical, candidate);
         let report = Report::analyze(&real, &shadow, &rules, block);
         let outcome = report.outcome(&shadow);
         self.metrics.record_report(&report, outcome);
@@ -676,19 +713,28 @@ fn hash_logs<T: alloy_rlp::Encodable>(logs: &[T]) -> B256 {
     keccak256(encoded)
 }
 
-fn shadow_spec(canonical: &TempoChainSpec, hardfork: TempoHardfork) -> TempoChainSpec {
+fn shadow_spec(canonical: &TempoChainSpec, hardfork: ShadowFork) -> TempoChainSpec {
     // Production replay starts after T10; mainnet genesis is at timestamp 0.
     // Activate candidate rules at timestamp 1 so candidate fork is not mistaken for a genesis.
     let mut spec = canonical.clone();
-    for &fork in TempoHardfork::VARIANTS
-        .iter()
-        .filter(|&&fork| fork != TempoHardfork::Genesis && fork <= hardfork)
-    {
+    match hardfork {
+        ShadowFork::Tempo(hardfork) => activate_up_to(&mut spec, TempoHardfork::VARIANTS, hardfork),
+        ShadowFork::Nvnm(hardfork) => activate_up_to(&mut spec, NvnmHardfork::VARIANTS, hardfork),
+    }
+    spec
+}
+
+/// Activates `lane`'s forks after its first, Genesis or Baseline, up to `hardfork` at timestamp 1.
+fn activate_up_to<H: Hardfork + Copy + PartialOrd>(
+    spec: &mut TempoChainSpec,
+    lane: &[H],
+    hardfork: H,
+) {
+    for &fork in lane[1..].iter().filter(|&&fork| fork <= hardfork) {
         spec.inner
             .hardforks
             .insert(fork, ForkCondition::Timestamp(1));
     }
-    spec
 }
 
 #[cfg(test)]
@@ -748,9 +794,43 @@ mod tests {
     }
 
     #[test]
+    fn a_candidate_is_named_from_either_lane() {
+        assert_eq!("T13".parse(), Ok(ShadowFork::Tempo(TempoHardfork::T13)));
+        assert_eq!(
+            "Baseline".parse(),
+            Ok(ShadowFork::Nvnm(NvnmHardfork::Baseline))
+        );
+        assert!("N999".parse::<ShadowFork>().is_err());
+    }
+
+    #[test]
+    fn a_candidate_is_canonical_by_its_own_lane() {
+        use reth_chainspec::Hardforks as _;
+
+        let canonical = TempoChainSpec::mainnet();
+        let shadow = shadow_spec(&canonical, ShadowFork::Nvnm(NvnmHardfork::Baseline));
+        assert_eq!(
+            shadow
+                .forks_iter()
+                .map(|(fork, _)| fork.name())
+                .collect::<Vec<_>>(),
+            canonical
+                .forks_iter()
+                .map(|(fork, _)| fork.name())
+                .collect::<Vec<_>>(),
+            "the lane's baseline activates nothing"
+        );
+        assert!(ShadowFork::Nvnm(NvnmHardfork::Baseline).is_canonical(&canonical, 0));
+        assert!(!ShadowFork::Tempo(TempoHardfork::T13).is_canonical(&canonical, 0));
+    }
+
+    #[test]
     fn candidate_pre_block_setup_is_transaction_prestate() {
         let canonical = TempoChainSpec::mainnet();
-        let candidate = Arc::new(shadow_spec(&canonical, TempoHardfork::T13));
+        let candidate = Arc::new(shadow_spec(
+            &canonical,
+            ShadowFork::Tempo(TempoHardfork::T13),
+        ));
         let mut block = Block::default();
         let ForkCondition::Timestamp(timestamp) =
             canonical.tempo_fork_activation(TempoHardfork::T4)

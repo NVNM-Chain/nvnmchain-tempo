@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 tempo-hardfork.workspace = true
+tempo-nvnm-hardfork.workspace = true
 tempo-primitives.workspace = true
 
 reth-cli = { workspace = true, optional = true }
@@ -43,6 +44,7 @@ commonware-cryptography = { workspace = true, optional = true }
 default = ["std", "serde", "reth", "cli"]
 std = [
     "tempo-hardfork/std",
+    "tempo-nvnm-hardfork/std",
     "alloy-eips/std",
     "alloy-evm?/std",
     "alloy-genesis/std",
@@ -57,6 +59,7 @@ std = [
 ]
 serde = [
     "tempo-hardfork/serde",
+    "tempo-nvnm-hardfork/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "tempo-primitives/serde"

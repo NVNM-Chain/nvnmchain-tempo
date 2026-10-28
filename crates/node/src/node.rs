@@ -1,5 +1,5 @@
 use crate::{
-    TempoPayloadTypes,
+    ShadowFork, TempoPayloadTypes,
     engine::TempoEngineValidator,
     executed_state::{ExecutedState, TempoEngineTreeValidatorBuilder},
     gossip::GossipProtocol,
@@ -43,7 +43,7 @@ use reth_transaction_pool::{
     blobstore::InMemoryBlobStore, error::InvalidPoolTransactionError,
 };
 use std::sync::Arc;
-use tempo_chainspec::{TempoConsensusSpec, hardfork::TempoHardfork, spec::TempoChainSpec};
+use tempo_chainspec::{TempoConsensusSpec, spec::TempoChainSpec};
 use tempo_evm::{TempoEvmConfig, consensus::TempoConsensus};
 use tempo_payload_builder::{
     DEFAULT_BUILD_TIME_MULTIPLIER, TempoPayloadBuilder, TempoPayloadBuilderConfig,
@@ -124,14 +124,15 @@ pub struct TempoNodeArgs {
     )]
     pub builder_build_time_multiplier: f64,
 
-    /// Replay canonical blocks under the latest compiled hardfork, or an explicit HARDFORK.
+    /// Replay canonical blocks under the latest compiled hardfork, or an explicit HARDFORK of
+    /// either lane (`T13`, `N1`).
     #[arg(
         long = "shadow-replay",
         visible_alias = "shadow-replay.hardfork",
         value_name = "HARDFORK",
         num_args = 0..=1
     )]
-    pub shadow_replay: Option<Option<TempoHardfork>>,
+    pub shadow_replay: Option<Option<ShadowFork>>,
 }
 
 impl Default for TempoNodeArgs {

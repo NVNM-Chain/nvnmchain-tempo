@@ -6,7 +6,7 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use std::collections::HashMap;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 use crate::{
@@ -238,6 +238,10 @@ impl PrecompileStorageProvider for HashMapStorageProvider {
 
     fn spec(&self) -> TempoHardfork {
         self.spec
+    }
+
+    fn nvnm_hardfork(&self) -> NvnmHardfork {
+        self.block_env.nvnm_hardfork
     }
 
     fn amsterdam_eip8037_enabled(&self) -> bool {

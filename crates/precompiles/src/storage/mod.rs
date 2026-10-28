@@ -27,7 +27,7 @@ use revm::{
     interpreter::gas::{KECCAK256, KECCAK256WORD},
     state::{AccountInfo, Bytecode},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::TempoBlockEnv;
 
 use crate::error::{Result, TempoPrecompileError};
@@ -141,6 +141,9 @@ pub trait PrecompileStorageProvider {
 
     /// Returns the currently active hardfork.
     fn spec(&self) -> TempoHardfork;
+
+    /// Returns the currently active NVNM fork.
+    fn nvnm_hardfork(&self) -> NvnmHardfork;
 
     /// Returns the shared storage-actions recorder for this provider.
     fn storage_actions(&self) -> StorageActions {
