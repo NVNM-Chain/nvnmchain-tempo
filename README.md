@@ -3,30 +3,14 @@
 A Layer 1, purpose-built blockchain for anchoring.
 
 NVNMChain is an EVM Layer 1 built for one job: putting data commitments on-chain and proving
-they are still there. Anchoring is not a smart contract bolted onto a general-purpose chain —
-the registry corpus ships in genesis, the Merkle Mountain Range (MMR) is a precompile, and the
-name index is a non-consensus ExEx that can be deleted and rebuilt at any time.
+they are still there.
 
 ## What makes NVNMChain different
 
 - Anchoring as a first-class primitive
 
-  - The anchoring contract lives at the same address on every NVNMChain network (`0x…0A00`),
-    with its launch runtime and (from `T12`) its ERC-1967 proxy implementation pinned by
-    keccak in genesis — a node cannot boot with different anchoring code.
-  - Registries, ids and names are stored on-chain; the export corpus arrives through the
-    genesis binary dump rather than thousands of setup transactions.
-  - The MMR precompile keeps one caller-partitioned tree per namespace: a single slot for the
-    leaf count plus one slot per live peak, so an append needs no witness and a tree of any
-    size costs `log n` slots. Append is a binary carry-merge, and the aligned precondition is
-    enforced so the mountain range can never be rewritten in place.
-
-- An index that is not consensus
-
-  - A Reth ExEx streams ids and names into RocksDB level with state, and an RPC namespace
-    serves prefix, suffix and contains queries with pagination.
-  - Rows are read back out of the contract, so the index is deletable and rebuildable without
-    touching consensus state.
+  - The anchoring contract lives at a well-known address (`0x…0A00`).
+  - Registries, ids and names are stored on-chain.
 
 - No native gas token
 
