@@ -7,7 +7,7 @@ use super::analysis::{AccountDelta, Field};
 use crate::shadow_replay::{Boundary, Evidence, ObservedTx, TxOutcome, fees::post_fee_slot_change};
 use alloy::{
     consensus::Transaction as _,
-    primitives::{B256, KECCAK256_EMPTY, U256, keccak256},
+    primitives::{B256, U256, keccak256},
     sol_types::{Revert, SolError as _},
 };
 use std::sync::LazyLock;
@@ -324,8 +324,13 @@ mod tests {
         let owner = U256::from(0xA0);
         let implementation = U256::from_be_bytes(T12_ANCHORING_IMPLEMENTATION.into_word().0);
         let transition = |before, after, owner_before| {
-            let info = |code_hash| Some(AccountInfo::default().with_code_hash(code_hash));
-            let mut state = reth_revm::db::TransitionState::default();
+            let info = |code_hash| {
+                Some(AccountInfo {
+                    code_hash,
+                    ..Default::default()
+                })
+            };
+            let mut state = TransitionState::default();
             state.transitions.insert(
                 ANCHORING_ADDRESS,
                 TransitionAccount {
@@ -395,7 +400,7 @@ mod tests {
         let registry = Address::with_last_byte(0xA0);
         let unchanged = evidence(&[]);
         let moved = |before, after| {
-            let mut state = reth_revm::db::TransitionState::default();
+            let mut state = TransitionState::default();
             state.transitions.insert(
                 ZONE_FACTORY_ADDRESS,
                 TransitionAccount {
