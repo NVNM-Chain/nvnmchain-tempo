@@ -31,11 +31,12 @@ use tempo_contracts::{
         T12_ANCHORING_IMPLEMENTATION_HASH, T12_ANCHORING_PROXY_RUNTIME,
     },
     precompiles::{
-        ADDRESS_REGISTRY_ADDRESS, CONFIGURABLE_ACCOUNT_ADDRESS, CURRENT_COMMITTEE_ADDRESS, ICurrentCommittee,
-        INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount, RECEIVE_POLICY_GUARD_ADDRESS,
-        SIGNATURE_VERIFIER_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-        VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS, initial_zone_factory_state,
-        t13_zone_factory_state, zone_factory_config, zone_factory_config_fields,
+        ADDRESS_REGISTRY_ADDRESS, CONFIGURABLE_ACCOUNT_ADDRESS, CURRENT_COMMITTEE_ADDRESS,
+        ICurrentCommittee, INITIAL_FACTORY_OWNER, InitialZoneFactoryAccount,
+        RECEIVE_POLICY_GUARD_ADDRESS, SIGNATURE_VERIFIER_ADDRESS, STORAGE_CREDITS_ADDRESS,
+        TIP20_CHANNEL_RESERVE_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS, ZONE_FACTORY_ADDRESS,
+        initial_zone_factory_state, t13_zone_factory_state, zone_factory_config,
+        zone_factory_config_fields,
     },
 };
 use tempo_precompiles::{storage::StorageActions, validator_config_v2::ValidatorConfigV2};
