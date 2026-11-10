@@ -449,10 +449,16 @@ impl<'a> TempoBlockExecutor<'a> {
         Ok(())
     }
 
-    /// Puts the launch build behind the ERC-1967 proxy, storage kept, once an ordinary deployment
-    /// has put the implementation at its CREATE2 address, and gives it the validator registry's
-    /// owner, or none if the registry has none. Every block past T12 looks until then; the launch
-    /// build's hash is the gate, so this runs once and an owner transferred to zero stays zero.
+    /// Force upgrade anchoring contract to an ERC-1967 proxy, the implementation must have been deployed at
+    /// the expected address, the proxy owner is initialized to be validator owner.
+    ///
+    /// ```
+    /// require(anchoring.code_hash == T11_ANCHORING_RUNTIME_HASH)
+    /// require(T12_ANCHORING_IMPLEMENTATION.code_hash == T12_ANCHORING_IMPLEMENTATION_HASH)
+    /// anchoring.code = T12_ANCHORING_PROXY_RUNTIME
+    /// anchoring.state.implementation = T12_ANCHORING_IMPLEMENTATION
+    /// anchoring.state.owner = validator_owner
+    /// ```
     fn upgrade_anchoring_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let original = self
             .evm_mut()
