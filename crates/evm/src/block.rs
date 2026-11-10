@@ -497,9 +497,12 @@ impl<'a> TempoBlockExecutor<'a> {
         Ok(())
     }
 
-    /// Gives a zone factory still owned by upstream's `INITIAL_FACTORY_OWNER` to the validator
-    /// registry's owner, if it has one, its zone count kept. Nothing records a hand-over: a
-    /// factory given back to upstream's key is taken again.
+    /// Reset initial zone factory owner to validator owner.
+    ///
+    /// ```
+    /// require(zone_factory.state.owner == INITIAL_FACTORY_OWNER
+    /// zone_factory.state.owner = validator_owner
+    /// ```
     fn hand_over_zone_factory_at_boundary(&mut self) -> Result<(), BlockExecutionError> {
         let config = self
             .evm_mut()
