@@ -61,6 +61,8 @@ jobs:
 
   zones-artifacts:
     name: Build Zones test artifacts
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -130,6 +132,8 @@ jobs:
 
   genesis:
     name: Genesis generation
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -170,7 +174,8 @@ jobs:
 
   test:
     name: test (${{ matrix.partition }}/2)
-    needs: zones-artifacts
+    if: needs.changes.outputs.rust == 'true'
+    needs: [changes, zones-artifacts]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -210,6 +215,8 @@ jobs:
 
   e2e:
     name: e2e (${{ matrix.partition }}/4)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -267,8 +274,8 @@ jobs:
 
   jit:
     name: JIT equivalence
-    runs-on: depot-ubuntu-latest-16
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -305,6 +312,8 @@ jobs:
 
   cli:
     name: CLI smoke tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -358,6 +367,8 @@ jobs:
 
   msrv:
     name: MSRV
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:

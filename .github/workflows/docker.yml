@@ -78,7 +78,7 @@ jobs:
 
           owner="$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           registry="ghcr.io/${owner}"
-          targets=(tempo tempo-localnet tempo-sidecar tempo-xtask)
+          targets=(tempo tempo-localnet tempo-xtask)
 
           args=()
           # The `chef` base image is pulled in as a named build context, so it
@@ -118,7 +118,7 @@ jobs:
 
           out="digests-${ARCH}.txt"
           : > "$out"
-          for target in tempo tempo-localnet tempo-sidecar tempo-xtask; do
+          for target in tempo tempo-localnet tempo-xtask; do
             digest="$(jq -er --arg t "$target" '.[$t]["containerimage.digest"]' meta.json)"
             echo "${target} ${digest}" >> "$out"
           done
@@ -198,22 +198,6 @@ jobs:
             type=sha,prefix=sha-
             type=ref,event=pr
 
-      - name: Docker metadata for tempo-sidecar
-        id: meta-tempo-sidecar
-        uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/tempo-sidecar
-          bake-target: tempo-sidecar
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=stable,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=edge,branch=main
-            type=sha,prefix=sha-
-            type=ref,event=pr
-
       - name: Docker metadata for tempo-xtask
         id: meta-tempo-xtask
         uses: tempoxyz/gh-actions/vendor/docker/metadata-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
@@ -248,7 +232,6 @@ jobs:
         env:
           TAGS_TEMPO: ${{ steps.meta-tempo.outputs.tags }}
           TAGS_TEMPO_LOCALNET: ${{ steps.meta-tempo-localnet.outputs.tags }}
-          TAGS_TEMPO_SIDECAR: ${{ steps.meta-tempo-sidecar.outputs.tags }}
           TAGS_TEMPO_XTASK: ${{ steps.meta-tempo-xtask.outputs.tags }}
         run: |
           set -euo pipefail
@@ -256,11 +239,10 @@ jobs:
           declare -A tags_by_image=(
             [tempo]="$TAGS_TEMPO"
             [tempo-localnet]="$TAGS_TEMPO_LOCALNET"
-            [tempo-sidecar]="$TAGS_TEMPO_SIDECAR"
             [tempo-xtask]="$TAGS_TEMPO_XTASK"
           )
 
-          for image in tempo tempo-localnet tempo-sidecar tempo-xtask; do
+          for image in tempo tempo-localnet tempo-xtask; do
             repo="${REGISTRY}/${image}"
             sources=()
             while read -r name digest; do
@@ -299,7 +281,6 @@ jobs:
         env:
           TEMPO_TAGS: ${{ steps.meta-tempo.outputs.tags }}
           TEMPO_LOCALNET_TAGS: ${{ steps.meta-tempo-localnet.outputs.tags }}
-          TEMPO_SIDECAR_TAGS: ${{ steps.meta-tempo-sidecar.outputs.tags }}
           TEMPO_XTASK_TAGS: ${{ steps.meta-tempo-xtask.outputs.tags }}
         run: |
           set -euo pipefail
@@ -326,7 +307,6 @@ jobs:
           images=(
             "$TEMPO_TAGS"
             "$TEMPO_LOCALNET_TAGS"
-            "$TEMPO_SIDECAR_TAGS"
             "$TEMPO_XTASK_TAGS"
           )
           sign_failures=0
@@ -353,7 +333,6 @@ jobs:
         env:
           TEMPO_TAGS: ${{ steps.meta-tempo.outputs.tags }}
           TEMPO_LOCALNET_TAGS: ${{ steps.meta-tempo-localnet.outputs.tags }}
-          TEMPO_SIDECAR_TAGS: ${{ steps.meta-tempo-sidecar.outputs.tags }}
           TEMPO_XTASK_TAGS: ${{ steps.meta-tempo-xtask.outputs.tags }}
           SHORT_SHA: ${{ steps.shortsha.outputs.shortsha }}
           BUILD_OUTCOME: ${{ needs.build.result }}
@@ -419,7 +398,6 @@ jobs:
 
           summarize_image "\`${REGISTRY}/tempo\`" "$TEMPO_TAGS"
           summarize_image "\`${REGISTRY}/tempo-localnet\`" "$TEMPO_LOCALNET_TAGS"
-          summarize_image "\`${REGISTRY}/tempo-sidecar\`" "$TEMPO_SIDECAR_TAGS"
           summarize_image "\`${REGISTRY}/tempo-xtask\`" "$TEMPO_XTASK_TAGS"
 
   release:
