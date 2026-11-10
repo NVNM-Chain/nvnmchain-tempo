@@ -171,18 +171,16 @@ pub(crate) struct GenesisArgs {
     #[command(flatten)]
     hardforks: TempoHardforkArgs,
 
-    /// Places the anchoring contract. Left out, the genesis carries none, as upstream's own
-    /// networks want.
+    /// Pre-deploy the anchoring contract.
     #[arg(long)]
     anchoring: bool,
 
-    /// Owner of the anchoring contract on a chain that starts at T12. If not set, or zero, the
-    /// validator admin. A chain that schedules T12 later gets the registry's owner at the fork.
+    /// Set the owner of the anchoring proxy contract. Default to validator admin if not set or zero.
     #[arg(long, requires = "anchoring")]
     anchoring_owner: Option<Address>,
 
-    /// Owner of the zone factory on a chain that starts at T10; zero leaves it with no owner, so no
-    /// zone can ever be created. If not set, the validator admin.
+    /// Set the owner of the zone factory. Default to validator admin if not set.
+    /// Zero means no owner, so no zone can be created.
     #[arg(long)]
     zone_owner: Option<Address>,
 }
