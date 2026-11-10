@@ -1,6 +1,32 @@
 **/.git
 contrib/
+# Cross.toml builds contrib/cross/Dockerfile.* with the repo root as context.
+!contrib/cross/
 docs/
 localnet/
 scripts/
 target/
+
+# Nothing below is tracked in this repo. The patterns exist so a developer's
+# local credentials cannot be swept into the build context by `COPY . .` and
+# baked into a layer (or a shared buildcache) that later gets pushed to GHCR.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.age
+**/signing.share
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/.ssh/
+**/.aws/
+**/.kube/
+**/.netrc
+**/.npmrc
+**/secrets/
+**/*secret*.y*ml

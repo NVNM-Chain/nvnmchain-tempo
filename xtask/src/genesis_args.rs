@@ -25,7 +25,7 @@ use rand_08::SeedableRng as _;
 use rayon::prelude::*;
 use std::{
     collections::BTreeMap,
-    iter::repeat_with,
+    iter::{once, repeat_with},
     net::SocketAddr,
     path::{Path, PathBuf},
 };
@@ -37,10 +37,13 @@ use tempo_chainspec::{
 use tempo_consensus_config::{SigningKey, SigningShare};
 use tempo_contracts::{
     CREATEX_ADDRESS, MULTICALL3_ADDRESS, SAFE_DEPLOYER_ADDRESS,
+    anchoring::{
+        ANCHORING_ADDRESS, ANCHORING_OWNER_SLOT, ERC1967_IMPLEMENTATION_SLOT,
+        T11_ANCHORING_RUNTIME, T12_ANCHORING_IMPLEMENTATION, T12_ANCHORING_PROXY_RUNTIME,
+    },
     contracts::{CreateX, Multicall3, SafeDeployer},
     precompiles::{
-        INITIAL_FACTORY_OWNER, IValidatorConfigV2, createTokenCall, initial_zone_factory_state,
-        t13_zone_factory_state,
+        IValidatorConfigV2, createTokenCall, initial_zone_factory_state, t13_zone_factory_state,
     },
 };
 use tempo_dkg_onchain_artifacts::OnchainDkgOutcome;
@@ -167,6 +170,19 @@ pub(crate) struct GenesisArgs {
     /// Tempo hardfork schedule. Individual `--<fork>-time` flags default to genesis (0).
     #[command(flatten)]
     hardforks: TempoHardforkArgs,
+
+    /// Pre-deploy the anchoring contract.
+    #[arg(long)]
+    anchoring: bool,
+
+    /// Set the owner of the anchoring proxy contract. Default to validator admin if not set or zero.
+    #[arg(long, requires = "anchoring")]
+    anchoring_owner: Option<Address>,
+
+    /// Set the owner of the zone factory. Default to validator admin if not set.
+    /// Zero means no owner, so no zone can be created.
+    #[arg(long)]
+    zone_owner: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -349,6 +365,23 @@ impl GenesisArgs {
             );
         }
 
+        let validator_onchain_addresses = self.validator_onchain_addresses()?;
+        let fee_recipients: Vec<Address> = once(self.coinbase)
+            .chain(validator_onchain_addresses.iter().copied())
+            .collect();
+        // Validators outside the generated accounts get the token too, or they could not pay for
+        // their own move off it.
+        let fee_payers: Vec<Address> = if self.deployment_gas_token {
+            addresses
+                .iter()
+                .chain(&validator_onchain_addresses)
+                .copied()
+                .unique()
+                .collect()
+        } else {
+            addresses.clone()
+        };
+
         let deployment_gas_token = {
             if self.deployment_gas_token {
                 let mut rng = rand_08::rngs::StdRng::seed_from_u64(
@@ -366,7 +399,7 @@ impl GenesisArgs {
                     self.deployment_gas_token_admin.expect(
                         "Deployment gas token admin is required if you want to deploy the token",
                     ),
-                    &addresses,
+                    &fee_payers,
                     U256::from(u64::MAX),
                     SaltOrAddress::Salt(B256::from(salt_bytes)),
                     &mut evm,
@@ -385,8 +418,6 @@ impl GenesisArgs {
         );
         let consensus_config =
             generate_consensus_config(&self.validators, self.seed, self.no_dkg_in_genesis);
-
-        let validator_onchain_addresses = self.validator_onchain_addresses()?;
 
         println!("Initializing validator config v2");
         initialize_validator_config_v2(
@@ -414,9 +445,8 @@ impl GenesisArgs {
         initialize_fee_manager(
             default_validator_fee_token,
             default_user_fee_token,
-            addresses.clone(),
-            // TODO: also populate validators here, once the logic is back.
-            vec![self.coinbase],
+            fee_payers,
+            fee_recipients,
             &mut evm,
         );
 
@@ -520,7 +550,15 @@ impl GenesisArgs {
         ] {
             genesis_alloc.insert(address, predeployed_contract(code));
         }
-        insert_zone_state_at_genesis(&self.hardforks, &mut genesis_alloc);
+        let zone_owner = zone_owner_at_genesis(self.zone_owner, &self.hardforks, validator_admin)?;
+        insert_zone_state_at_genesis(&self.hardforks, zone_owner, &mut genesis_alloc);
+        insert_anchoring_contract_at_genesis(
+            self.anchoring,
+            &self.hardforks,
+            self.anchoring_owner,
+            validator_admin,
+            &mut genesis_alloc,
+        )?;
 
         let mut chain_config = ethereum_chain_config(self.chain_id);
         chain_config
@@ -576,16 +614,72 @@ impl GenesisArgs {
     }
 }
 
+/// Places the anchoring contract: on a chain starting at T12 the proxy, with its owner and the
+/// address its implementation is deployed to after launch; else the launch build, which has no
+/// owner.
+fn insert_anchoring_contract_at_genesis(
+    anchoring: bool,
+    hardforks: &TempoHardforkArgs,
+    owner: Option<Address>,
+    validator_admin: Address,
+    genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
+) -> eyre::Result<()> {
+    if !anchoring {
+        return Ok(());
+    }
+    println!("Initializing the anchoring contract");
+    let owner = owner.filter(|owner| !owner.is_zero());
+    let (code, storage) = if hardforks.active_at_genesis(TempoHardfork::T12) {
+        let slots = [
+            (ANCHORING_OWNER_SLOT, owner.unwrap_or(validator_admin)),
+            (ERC1967_IMPLEMENTATION_SLOT, T12_ANCHORING_IMPLEMENTATION),
+        ];
+        let storage = slots.map(|(slot, address)| (B256::from(slot), address.into_word()));
+        (T12_ANCHORING_PROXY_RUNTIME, Some(BTreeMap::from(storage)))
+    } else {
+        eyre::ensure!(
+            owner.is_none(),
+            "--anchoring-owner needs T12 at genesis; T12 later gives the registry's owner"
+        );
+        (T11_ANCHORING_RUNTIME, None)
+    };
+    genesis_alloc.insert(
+        ANCHORING_ADDRESS,
+        GenesisAccount {
+            code: Some(code),
+            nonce: Some(1),
+            storage,
+            ..Default::default()
+        },
+    );
+    Ok(())
+}
+
+/// `--zone-owner` resolved to the help text's default. With T10 later there is no factory to own
+/// yet, so a named one is refused.
+fn zone_owner_at_genesis(
+    named: Option<Address>,
+    hardforks: &TempoHardforkArgs,
+    validator_admin: Address,
+) -> eyre::Result<Address> {
+    eyre::ensure!(
+        named.is_none() || hardforks.active_at_genesis(TempoHardfork::T10),
+        "--zone-owner needs T10 at genesis; T10 later installs upstream's owner, and T12 the registry's"
+    );
+    Ok(named.unwrap_or(validator_admin))
+}
+
 fn insert_zone_state_at_genesis(
     hardforks: &TempoHardforkArgs,
+    owner: Address,
     genesis_alloc: &mut BTreeMap<Address, GenesisAccount>,
 ) {
     if hardforks.active_at_genesis(TempoHardfork::T10) {
         println!("Initializing ZoneFactory and shared runtimes");
         let accounts = if hardforks.active_at_genesis(TempoHardfork::T13) {
-            t13_zone_factory_state(INITIAL_FACTORY_OWNER)
+            t13_zone_factory_state(owner)
         } else {
-            initial_zone_factory_state(INITIAL_FACTORY_OWNER)
+            initial_zone_factory_state(owner)
         };
         for account in accounts {
             genesis_alloc.insert(
@@ -613,8 +707,8 @@ fn create_path_usd_token(
     with_genesis_storage(evm, || {
         TIP20Factory::new().create_token_reserved_address(
             PATH_USD_ADDRESS,
-            "pathUSD",
-            "pathUSD",
+            "nUSD",
+            "nUSD",
             "USD",
             Address::ZERO,
             admin,
@@ -746,7 +840,7 @@ fn initialize_fee_manager(
     validator_fee_token_address: Address,
     user_fee_token_address: Address,
     initial_accounts: Vec<Address>,
-    validators: Vec<Address>,
+    fee_recipients: Vec<Address>,
     evm: &mut GenesisEvm,
 ) {
     // Update the beneficiary since the validator can't set the validator fee token for themselves
@@ -770,12 +864,12 @@ fn initialize_fee_manager(
                 .expect("Could not set fee token");
         }
 
-        // Set validator fee tokens to pathUSD
-        for validator in validators {
-            println!("Setting user token for {validator} {validator_fee_token_address}");
+        // Every fee recipient takes the validator fee token
+        for recipient in fee_recipients {
+            println!("Setting validator token for {recipient} {validator_fee_token_address}");
             fee_manager
                 .set_validator_token(
-                    validator,
+                    recipient,
                     IFeeManager::setValidatorTokenCall {
                         token: validator_fee_token_address,
                     },
@@ -946,8 +1040,8 @@ mod tests {
     use clap::Parser;
     use tempo_contracts::{
         precompiles::{
-            ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS,
-            ZONE_VERIFIER_ADDRESS,
+            INITIAL_FACTORY_OWNER, ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS,
+            ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
         },
         zones::{
             T13_ZONE_MESSENGER_RUNTIME, T13_ZONE_PORTAL_RUNTIME, T13_ZONE_VERIFIER_RUNTIME,
@@ -1025,13 +1119,29 @@ mod tests {
     }
 
     #[test]
+    fn the_zone_owner_flag_needs_t10_at_genesis() {
+        let (named, admin) = (Address::with_last_byte(0xA0), Address::with_last_byte(0xB0));
+        let resolve = |flag, t10_time| {
+            let hardforks = TempoHardforkArgs {
+                t10_time: Some(t10_time),
+                ..Default::default()
+            };
+            zone_owner_at_genesis(flag, &hardforks, admin)
+        };
+        assert_eq!(resolve(Some(named), 0).unwrap(), named);
+        assert_eq!(resolve(Some(Address::ZERO), 0).unwrap(), Address::ZERO);
+        assert_eq!(resolve(None, 0).unwrap(), admin);
+        assert!(resolve(Some(named), 1).is_err());
+    }
+
+    #[test]
     fn t10_genesis_installs_factory_and_canonical_shared_runtimes() {
         let mut alloc = BTreeMap::new();
         let hardforks = TempoHardforkArgs {
             t13_time: Some(1),
             ..Default::default()
         };
-        insert_zone_state_at_genesis(&hardforks, &mut alloc);
+        insert_zone_state_at_genesis(&hardforks, INITIAL_FACTORY_OWNER, &mut alloc);
         let account = alloc.remove(&ZONE_FACTORY_ADDRESS).unwrap();
         let expected_config =
             U256::ONE | (U256::from_be_slice(INITIAL_FACTORY_OWNER.as_slice()) << u32::BITS);
@@ -1057,7 +1167,7 @@ mod tests {
             t10_time: Some(1),
             ..Default::default()
         };
-        insert_zone_state_at_genesis(&hardforks, &mut alloc);
+        insert_zone_state_at_genesis(&hardforks, INITIAL_FACTORY_OWNER, &mut alloc);
 
         assert!(!alloc.contains_key(&ZONE_FACTORY_ADDRESS));
     }
@@ -1066,7 +1176,7 @@ mod tests {
     fn t13_genesis_installs_t13_shared_runtimes() {
         let mut alloc = BTreeMap::new();
         let hardforks = TempoHardforkArgs::default();
-        insert_zone_state_at_genesis(&hardforks, &mut alloc);
+        insert_zone_state_at_genesis(&hardforks, INITIAL_FACTORY_OWNER, &mut alloc);
 
         for (destination, expected) in [
             (ZONE_PORTAL_IMPL_ADDRESS, T13_ZONE_PORTAL_RUNTIME),
@@ -1120,5 +1230,77 @@ mod tests {
         assert!(from_file.resolved_mnemonic().is_err());
         std::fs::remove_file(path).unwrap();
         assert!(from_file.validator_onchain_addresses().is_err());
+    }
+}
+
+#[cfg(test)]
+mod anchoring_tests {
+    use super::*;
+
+    const OWNER: Address = address!("0x00000000000000000000000000000000000000A0");
+    const VALIDATOR_ADMIN: Address = address!("0x00000000000000000000000000000000000000B0");
+
+    fn alloc(
+        anchoring: bool,
+        t12_time: u64,
+        owner: Option<Address>,
+    ) -> eyre::Result<BTreeMap<Address, GenesisAccount>> {
+        let hardforks = TempoHardforkArgs {
+            t12_time: Some(t12_time),
+            ..Default::default()
+        };
+        let mut alloc = BTreeMap::new();
+        insert_anchoring_contract_at_genesis(
+            anchoring,
+            &hardforks,
+            owner,
+            VALIDATOR_ADMIN,
+            &mut alloc,
+        )?;
+        Ok(alloc)
+    }
+
+    #[test]
+    fn a_chain_scheduling_t12_later_starts_on_the_ownerless_launch_build() {
+        for owner in [None, Some(Address::ZERO)] {
+            let alloc = alloc(true, 1, owner).unwrap();
+            let anchoring = &alloc[&ANCHORING_ADDRESS];
+            assert_eq!(anchoring.code, Some(T11_ANCHORING_RUNTIME));
+            assert_eq!(anchoring.nonce, Some(1));
+            assert_eq!(anchoring.storage, None);
+            assert_eq!(alloc.len(), 1, "nothing else belongs here");
+        }
+        assert!(alloc(true, 1, Some(OWNER)).is_err());
+    }
+
+    #[test]
+    fn a_chain_starting_at_t12_has_the_proxy_and_its_owner_from_block_0() {
+        let slots = |owner: Address| {
+            Some(BTreeMap::from([
+                (B256::from(ANCHORING_OWNER_SLOT), owner.into_word()),
+                (
+                    B256::from(ERC1967_IMPLEMENTATION_SLOT),
+                    T12_ANCHORING_IMPLEMENTATION.into_word(),
+                ),
+            ]))
+        };
+        let unnamed = alloc(true, 0, None).unwrap();
+        assert_eq!(unnamed[&ANCHORING_ADDRESS].storage, slots(VALIDATOR_ADMIN));
+
+        let alloc = alloc(true, 0, Some(OWNER)).unwrap();
+        let anchoring = &alloc[&ANCHORING_ADDRESS];
+        assert_eq!(anchoring.code, Some(T12_ANCHORING_PROXY_RUNTIME));
+        assert_eq!(anchoring.storage, slots(OWNER));
+        assert_eq!(
+            alloc.len(),
+            1,
+            "the implementation is deployed after launch"
+        );
+    }
+
+    /// Upstream's own networks generate the same way and must not pick it up.
+    #[test]
+    fn without_the_flag_the_genesis_carries_none() {
+        assert!(alloc(false, 0, Some(OWNER)).unwrap().is_empty());
     }
 }

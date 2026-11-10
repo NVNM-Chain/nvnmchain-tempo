@@ -63,8 +63,8 @@ jobs:
     name: Build Zones test artifacts
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: depot-ubuntu-latest-16
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -134,8 +134,8 @@ jobs:
     name: Genesis generation
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: depot-ubuntu-latest-4
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -176,8 +176,8 @@ jobs:
     name: test (${{ matrix.partition }}/2)
     if: needs.changes.outputs.rust == 'true'
     needs: [changes, zones-artifacts]
-    runs-on: depot-ubuntu-latest-32
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       id-token: write
       contents: read
@@ -217,8 +217,8 @@ jobs:
     name: e2e (${{ matrix.partition }}/4)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: depot-ubuntu-latest-32
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       id-token: write
       contents: read
@@ -274,8 +274,8 @@ jobs:
 
   jit:
     name: JIT equivalence
-    runs-on: depot-ubuntu-latest-16
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -314,8 +314,8 @@ jobs:
     name: CLI smoke tests
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: depot-ubuntu-latest-4
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -341,7 +341,7 @@ jobs:
 
   tempoup:
     name: tempoup installer tests
-    runs-on: depot-ubuntu-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -369,8 +369,8 @@ jobs:
     name: MSRV
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: depot-ubuntu-latest-4
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       id-token: write
       contents: read

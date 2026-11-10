@@ -9,12 +9,14 @@ use reth_ethereum::node::core::args::{
     GasPriceOracleArgs,
 };
 use reth_prune_types::{PruneMode, PruneModes};
-use std::{borrow::Cow, str::FromStr, time::Duration};
+use std::{str::FromStr, time::Duration};
 use tempo_chainspec::spec::TEMPO_T7_BASE_FEE_FLOOR;
 use url::Url;
 
-pub(crate) const DEFAULT_DOWNLOAD_URL: &str = "https://snapshots.tempoxyz.dev/4217";
-const SNAPSHOT_API_URL: &str = "https://snapshots.tempoxyz.dev/api/snapshots";
+/// NVNM's snapshot host: `tempo download` discovers snapshots at its `/api/snapshots`.
+const SNAPSHOT_URL: &str = "https://download.nvnm.testnet.nvnmchain.io";
+/// NVNM peers list, `{"<chain id>": ["enode://…"]}`; "none" disables it.
+pub(crate) const BOOTNODES_ENDPOINT: &str = "none";
 const MINIMAL_PEER_SYNC_RETENTION_BLOCKS: u64 =
     tempo_consensus::MINIMAL_PEER_SYNC_FINALIZED_BLOCKS + 64;
 
@@ -148,20 +150,8 @@ pub(crate) struct TelemetryConfig {
 }
 
 fn init_download_urls() {
-    let download_defaults = DownloadDefaults {
-        available_snapshots: vec![
-            Cow::Owned(format!("{DEFAULT_DOWNLOAD_URL} (mainnet)")),
-            Cow::Borrowed("https://snapshots.tempoxyz.dev/42431 (moderato)"),
-            Cow::Borrowed("https://snapshots.tempoxyz.dev/42429 (andantino)"),
-        ],
-        default_base_url: Cow::Borrowed(DEFAULT_DOWNLOAD_URL),
-        default_chain_aware_base_url: None,
-        snapshot_api_url: Cow::Borrowed(SNAPSHOT_API_URL),
-        long_help: None,
-        full_preset_includes_rocksdb_indices: false,
-    };
-
-    download_defaults
+    DownloadDefaults::default()
+        .with_snapshot_source_url(SNAPSHOT_URL)
         .try_init()
         .expect("failed to initialize download URLs");
 }

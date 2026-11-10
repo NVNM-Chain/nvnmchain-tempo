@@ -471,7 +471,7 @@ pub struct ValidatorTransactionArgs {
     wallet: WalletArgs,
 
     /// The RPC URL to submit the transaction to.
-    #[arg(long, default_value = "https://rpc.presto.tempo.xyz")]
+    #[arg(long, default_value = "https://rpc.nvnm.testnet.nvnmchain.io")]
     rpc_url: String,
 
     /// Skip the interactive confirmation prompt.
@@ -698,7 +698,7 @@ pub struct CreateAddValidatorSignatureArgs {
     #[arg(
         long,
         value_name = "RPC_URL",
-        default_value = "https://rpc.presto.tempo.xyz"
+        default_value = "https://rpc.nvnm.testnet.nvnmchain.io"
     )]
     chain_id_from_rpc_url: String,
     #[command(flatten)]
@@ -739,7 +739,7 @@ pub struct CreateRotateValidatorSignatureArgs {
     #[arg(
         long,
         value_name = "RPC_URL",
-        default_value = "https://rpc.presto.tempo.xyz"
+        default_value = "https://rpc.nvnm.testnet.nvnmchain.io"
     )]
     chain_id_from_rpc_url: String,
     #[command(flatten)]
@@ -1224,11 +1224,11 @@ pub struct ValidatorInfo {
     id: ValidatorId,
 
     /// RPC URL to query.
-    #[arg(long, default_value = "https://rpc.presto.tempo.xyz")]
+    #[arg(long, default_value = "https://rpc.nvnm.testnet.nvnmchain.io")]
     rpc_url: String,
 
-    /// Chain spec override for local/unknown chains (mainnet, testnet, moderato, or path to
-    /// chainspec file). Resolved automatically from the RPC chain id when omitted.
+    /// Chain spec override for local/unknown chains (a built-in name or a chainspec file).
+    /// Resolved automatically from the RPC chain id when omitted.
     #[arg(long, short, value_parser = tempo_chainspec::spec::chain_value_parser)]
     chain: Option<Arc<TempoChainSpec>>,
 
@@ -1389,11 +1389,11 @@ struct InfoOutput {
 #[derive(Debug, clap::Args)]
 pub struct Info {
     /// RPC URL to query. Takes precedence over the chain spec's default RPC URL.
-    /// Defaults to the mainnet RPC URL when neither --rpc-url nor --chain is set.
+    /// Defaults to the NVNM testnet RPC URL when neither --rpc-url nor --chain is set.
     #[arg(long)]
     rpc_url: Option<String>,
 
-    /// Chain spec (mainnet, testnet, or path to chainspec file).
+    /// Chain spec (a built-in name or a chainspec file).
     /// Resolved automatically from the RPC chain id when omitted.
     #[arg(long, short, value_parser = tempo_chainspec::spec::chain_value_parser)]
     chain: Option<Arc<TempoChainSpec>>,
@@ -1424,9 +1424,9 @@ impl Info {
             (None, Some(chain)) => chain
                 .default_follow_url()
                 .ok_or_eyre("--chain spec has no default RPC URL; pass --rpc-url explicitly")?,
-            (None, None) => tempo_chainspec::spec::PRESTO
+            (None, None) => tempo_chainspec::spec::NVNM_TESTNET
                 .default_follow_url()
-                .expect("mainnet chain spec has a default RPC URL"),
+                .expect("NVNM testnet chain spec has a default RPC URL"),
         };
 
         let provider = connect(rpc_url).await?;
@@ -2208,7 +2208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn info_without_rpc_url_or_chain_queries_mainnet_rpc() {
+    async fn info_without_rpc_url_or_chain_queries_nvnm_testnet_rpc() {
         let cli = TempoCli::try_parse_from(["tempo", "consensus", "info"]).unwrap();
         let info = match cli.command {
             reth_ethereum::cli::Commands::Ext(TempoSubcommand::Consensus(
@@ -2219,7 +2219,7 @@ mod tests {
 
         // Serve the chain id request, then fail the next request so the command stops early.
         let asserter = Asserter::new();
-        asserter.push_success(&tempo_chainspec::spec::PRESTO.chain_id());
+        asserter.push_success(&tempo_chainspec::spec::NVNM_TESTNET.chain_id());
         asserter.push_failure_msg("mocked: stop after chain id");
 
         let mut requested_url = None;
@@ -2232,7 +2232,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(requested_url.as_deref(), Some("wss://rpc.presto.tempo.xyz"));
+        assert_eq!(
+            requested_url.as_deref(),
+            Some("wss://ws.nvnm.testnet.nvnmchain.io")
+        );
         assert_eq!(err.to_string(), "failed to get latest block number");
         assert!(asserter.read_q().is_empty());
     }

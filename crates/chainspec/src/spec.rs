@@ -1,7 +1,7 @@
 pub use tempo_hardfork::constants::gas::*;
 
 use crate::{
-    bootnodes::{moderato_nodes, presto_nodes},
+    bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -88,8 +88,8 @@ impl TempoGenesisInfo {
 #[derive(Debug, Clone, Default)]
 pub struct TempoChainSpecParser;
 
-/// Chains supported by Tempo. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
+/// NVNM's chains by name; the first is the default.
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "nvnm-canary"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -98,6 +98,9 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 #[cfg(feature = "cli")]
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
+        "nvnm-testnet" => NVNM_TESTNET.clone(),
+        "nvnm-canary" => NVNM_CANARY.clone(),
+        // Tempo's, unlisted: shadowfork names them.
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
@@ -123,6 +126,8 @@ pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
         42431 => Some(MODERATO.clone()),
+        787222 => Some(NVNM_CANARY.clone()),
+        787223 => Some(NVNM_TESTNET.clone()),
         _ => None,
     }
 }
@@ -144,6 +149,26 @@ pub static PRESTO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
     TempoChainSpec::from_genesis(genesis)
         .with_network_identity(NetworkIdentity::mainnet())
         .with_default_follow_url("wss://rpc.presto.tempo.xyz")
+        .into()
+});
+
+/// NVNM testnet, chain 787223, still on its genesis DKG identity.
+pub static NVNM_TESTNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-testnet.json"))
+        .expect("`./genesis/nvnm-testnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://ws.nvnm.testnet.nvnmchain.io")
+        .into()
+});
+
+/// NVNM canary, chain 787222, where a fork runs before it reaches the testnet.
+pub static NVNM_CANARY: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-canary.json"))
+        .expect("`./genesis/nvnm-canary.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://ws.nvnm.canary.mantrachain.dev")
         .into()
 });
 
@@ -351,7 +376,9 @@ impl EthChainSpec for TempoChainSpec {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
             42431 => Some(moderato_nodes()),
-            _ => self.inner.bootnodes(),
+            787223 => Some(nvnm_testnet_nodes()),
+            // `None` makes reth seed discovery with Ethereum mainnet's bootnodes.
+            _ => Some(Vec::new()),
         }
     }
 
@@ -1063,6 +1090,58 @@ mod tests {
                 .expect(&format!("failed to parse chain `{name}`"));
 
             assert_eq!(spec.chain(), resolved.chain(), "chain mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn bootnodes_are_never_none() {
+        assert!(!super::PRESTO.bootnodes().unwrap().is_empty());
+        assert!(!super::MODERATO.bootnodes().unwrap().is_empty());
+        assert_eq!(super::DEV.bootnodes(), Some(Vec::new()));
+
+        // Even an id reth knows (Ethereum mainnet) gets none of reth's lists.
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1 },
+            "alloc": {}
+        }))
+        .unwrap();
+        let ethereum = super::TempoChainSpec::from_genesis(genesis);
+        assert_eq!(ethereum.bootnodes(), Some(Vec::new()));
+    }
+
+    /// Block 0 and config as the live nodes report them (`debug_chainConfig`), plus the T12 this
+    /// release schedules: canary on 2026-10-23 08:00 UTC, the testnet five days later.
+    #[test]
+    fn nvnm_chains_match_the_live_networks() {
+        use alloy_primitives::b256;
+
+        for (spec, id, genesis, t12, follow) in [
+            (
+                &*super::NVNM_CANARY,
+                787222,
+                b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
+                1_792_742_400,
+                "wss://ws.nvnm.canary.mantrachain.dev",
+            ),
+            (
+                &*super::NVNM_TESTNET,
+                787223,
+                b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
+                1_793_260_800,
+                "wss://ws.nvnm.testnet.nvnmchain.io",
+            ),
+        ] {
+            assert_eq!(spec.chain().id(), id);
+            assert_eq!(spec.genesis_hash(), genesis, "{id}");
+            assert_eq!(
+                spec.info.epoch_length().map(|n| n.get()),
+                Some(21_600),
+                "{id}"
+            );
+            assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
+            assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
+            assert!(spec.network_identity.is_some(), "{id}");
+            assert_eq!(spec.default_follow_url(), Some(follow), "{id}");
         }
     }
 }
