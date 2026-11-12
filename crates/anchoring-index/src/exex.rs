@@ -1,8 +1,8 @@
 //! The Execution Extension that keeps the index level with the contract.
 //!
 //! Each round reads the registry count and the missing names out of state, never out of
-//! blocks: one path serves the first backfill, a restart, a new block and a reorg, and the
-//! dump-loaded corpus — which emitted no log — indexes like any other. No head is set, so
+//! blocks: one path serves the first backfill, a restart, a new block and a reorg, and state
+//! set at block 0 — which emitted no log — indexes like any other. No head is set, so
 //! reth backfills nothing.
 
 use alloy_consensus::BlockHeader as _;

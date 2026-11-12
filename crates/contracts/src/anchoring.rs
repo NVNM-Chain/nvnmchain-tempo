@@ -1,7 +1,6 @@
 //! The anchoring contract, as the genesis alloc places it. `cargo xtask anchoring-runtime` copies
 //! the proxy in from the contracts repo's `layout/` and checks the implementation there: both pins
-//! are contracts `dcf8c09`'s, whose `layout/anchoring.json` fixes the slots the dump writer and the
-//! explorer read. The corpus arrives separately, from the dump loader.
+//! are contracts `dcf8c09`'s, whose `layout/anchoring.json` fixes the slots the explorer reads.
 
 use alloy_primitives::{Address, B256, Bytes, U256, address, b256};
 
@@ -16,7 +15,7 @@ pub const T11_ANCHORING_RUNTIME: Bytes =
 pub const T11_ANCHORING_RUNTIME_HASH: B256 =
     b256!("893a2f955868c80ae17905aa36cc4f71a771731b530e72ff6cfb063f559a7c0e");
 
-/// `_owner` in `layout/anchoring.json`, past every slot the dump writes.
+/// `_owner` in `layout/anchoring.json`.
 pub const ANCHORING_OWNER_SLOT: U256 = U256::from_limbs([11, 0, 0, 0]);
 
 /// The ERC-1967 proxy T12 puts over the launch build once the implementation is deployed: solady's,

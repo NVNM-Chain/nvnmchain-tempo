@@ -1,5 +1,5 @@
 //! Registries read straight out of the contract's storage. `layout/anchoring.json` in the
-//! contracts repo pins the slots, and the dump writer and explorer read them the same way.
+//! contracts repo pins the slots, and the explorer reads them the same way.
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use reth_storage_api::StateProvider;
