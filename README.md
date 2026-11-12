@@ -82,14 +82,11 @@ Install from a release or the Docker image `ghcr.io/nvnm-chain/tempo`. Releases 
 signed; check an archive against the release's `checksums.txt`:
 
 ```bash
-TAG=v1.16.0-nvnm.1
+TAG=v1.18.2-nvnm.1
 gh release download "$TAG" --repo NVNM-Chain/nvnmchain-tempo \
   -p "tempo-${TAG}-x86_64-unknown-linux-gnu.tar.gz" -p checksums.txt
 sha256sum -c --ignore-missing checksums.txt
 ```
-
-Genesis-time import is a separate path: `init-from-binary-dump <file>` with an optional
-`--sha256` verified **before the database is opened**.
 
 ## Contributing
 

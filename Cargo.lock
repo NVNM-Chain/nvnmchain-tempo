@@ -15050,7 +15050,6 @@ version = "1.18.2"
 dependencies = [
  "alloy",
  "alloy-primitives",
- "alloy-rlp",
  "clap",
  "coins-bip32",
  "eyre",
@@ -15063,21 +15062,17 @@ dependencies = [
  "reth-db-api",
  "reth-etl",
  "reth-evm",
- "reth-metrics",
  "reth-primitives-traits",
  "reth-provider",
- "reth-prune-types",
  "reth-tasks",
  "reth-trie",
  "reth-trie-db",
- "sha2 0.10.9",
  "tempfile",
  "tempo-chainspec",
  "tempo-precompiles",
  "tempo-primitives",
  "tokio",
  "tracing",
- "zstd 0.14.3",
 ]
 
 [[package]]
