@@ -89,7 +89,7 @@ impl TempoGenesisInfo {
 pub struct TempoChainSpecParser;
 
 /// NVNM's chains by name; the first is the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "nvnm-canary"];
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "nvnm-canary", "nvnm-mainnet"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -100,6 +100,7 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
         "nvnm-testnet" => NVNM_TESTNET.clone(),
         "nvnm-canary" => NVNM_CANARY.clone(),
+        "nvnm-mainnet" => NVNM_MAINNET.clone(),
         // Tempo's, unlisted: shadowfork names them.
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
@@ -126,6 +127,7 @@ pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
         42431 => Some(MODERATO.clone()),
+        7872 => Some(NVNM_MAINNET.clone()),
         787222 => Some(NVNM_CANARY.clone()),
         787223 => Some(NVNM_TESTNET.clone()),
         _ => None,
@@ -170,6 +172,14 @@ pub static NVNM_CANARY: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
     TempoChainSpec::from_genesis(genesis)
         .with_default_follow_url("wss://ws.nvnm.canary.mantrachain.dev")
         .into()
+});
+
+/// NVNM mainnet, chain 7872. Its genesis is a stand-in until the launch run writes the real one.
+pub static NVNM_MAINNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-mainnet.json"))
+        .expect("`./genesis/nvnm-mainnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis).into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -1110,7 +1120,8 @@ mod tests {
     }
 
     /// Block 0 and config as the live nodes report them (`debug_chainConfig`), plus the T12 this
-    /// release schedules: canary on 2026-10-23 08:00 UTC, the testnet five days later.
+    /// release schedules: canary on 2026-10-23 08:00 UTC, the testnet five days later, mainnet from
+    /// genesis.
     #[test]
     fn nvnm_chains_match_the_live_networks() {
         use alloy_primitives::b256;
@@ -1121,14 +1132,21 @@ mod tests {
                 787222,
                 b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
                 1_792_742_400,
-                "wss://ws.nvnm.canary.mantrachain.dev",
+                Some("wss://ws.nvnm.canary.mantrachain.dev"),
             ),
             (
                 &*super::NVNM_TESTNET,
                 787223,
                 b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
                 1_793_260_800,
-                "wss://ws.nvnm.testnet.nvnmchain.io",
+                Some("wss://ws.nvnm.testnet.nvnmchain.io"),
+            ),
+            (
+                &*super::NVNM_MAINNET,
+                7872,
+                b256!("3d084628b2e06c2bcddd9e19bfb3d5de8118363bf9e8fb819d572bb94a7f9843"),
+                0,
+                None,
             ),
         ] {
             assert_eq!(spec.chain().id(), id);
@@ -1140,8 +1158,9 @@ mod tests {
             );
             assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
+            assert_eq!(spec.info.fork_time(TempoHardfork::T13), None, "{id}");
             assert!(spec.network_identity.is_some(), "{id}");
-            assert_eq!(spec.default_follow_url(), Some(follow), "{id}");
+            assert_eq!(spec.default_follow_url(), follow, "{id}");
         }
     }
 }
