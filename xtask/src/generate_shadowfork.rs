@@ -118,6 +118,7 @@ impl GenerateShadowfork {
         let validator_onchain_addresses = genesis_args
             .validator_onchain_addresses()
             .wrap_err("failed resolving shadow validator onchain addresses")?;
+        let fee_recipients = genesis_args.validator_fee_recipients(&validator_onchain_addresses)?;
         let (genesis, consensus_config) = genesis_args
             .generate_genesis()
             .await
@@ -137,7 +138,7 @@ impl GenerateShadowfork {
             let consensus_p2p_port = validator.addr.port();
             let execution_p2p_port = consensus_p2p_port + 1;
             let validator_address = validator_onchain_addresses[idx];
-            let fee_recipient = validator_address;
+            let fee_recipient = fee_recipients[idx];
             let validator_public_key: B256 = validator
                 .public_key()
                 .encode()

@@ -151,6 +151,12 @@ pub(crate) struct GenesisArgs {
     #[arg(long, value_delimiter = ',')]
     validator_addresses: Vec<Address>,
 
+    /// One fee recipient per validator, in `--validators` order, instead of its own address. The
+    /// recipients take nUSD, so this conflicts with `--deployment-gas-token`, whose payers would
+    /// need an nUSD pool.
+    #[arg(long, value_delimiter = ',', conflicts_with = "deployment_gas_token")]
+    fee_recipients: Vec<Address>,
+
     /// Disable creating Alpha/Beta/ThetaUSD and OUSD tokens.
     #[arg(long)]
     no_extra_tokens: bool,
@@ -259,6 +265,23 @@ impl GenesisArgs {
 
             Ok(self.validator_addresses[0..self.validators.len()].to_vec())
         }
+    }
+
+    /// `--fee-recipients`, or else each validator itself.
+    pub(crate) fn validator_fee_recipients(
+        &self,
+        validators: &[Address],
+    ) -> eyre::Result<Vec<Address>> {
+        if self.fee_recipients.is_empty() {
+            return Ok(validators.to_vec());
+        }
+        eyre::ensure!(
+            self.fee_recipients.len() == validators.len(),
+            "--fee-recipients names {} recipients for {} validators",
+            self.fee_recipients.len(),
+            validators.len()
+        );
+        Ok(self.fee_recipients.clone())
     }
 
     /// Generates a genesis json file.
@@ -427,6 +450,7 @@ impl GenesisArgs {
             &validator_onchain_addresses,
             self.no_dkg_in_genesis,
             self.chain_id,
+            &self.validator_fee_recipients(&validator_onchain_addresses)?,
         )?;
 
         println!("Initializing fee manager");
@@ -892,6 +916,7 @@ fn initialize_validator_config_v2(
     onchain_validator_addresses: &[Address],
     no_dkg_in_genesis: bool,
     chain_id: u64,
+    fee_recipients: &[Address],
 ) -> eyre::Result<()> {
     with_genesis_storage(evm, || {
         let mut v2 = ValidatorConfigV2::new();
@@ -932,7 +957,9 @@ fn initialize_validator_config_v2(
                 egress: addr.ip(),
             };
 
-            let message = config.add_validator_message_hash(validator_address);
+            // One per validator: `validator_fee_recipients` checks the count.
+            let fee_recipient = fee_recipients[i];
+            let message = config.add_validator_message_hash(fee_recipient);
             let private_key = validator.signing_key.clone().into_inner();
             let signature = private_key.sign(
                 tempo_precompiles::validator_config_v2::VALIDATOR_NS_ADD,
@@ -946,7 +973,7 @@ fn initialize_validator_config_v2(
                     publicKey: pubkey,
                     ingress: config.ingress.to_string(),
                     egress: config.egress.to_string(),
-                    feeRecipient: validator_address,
+                    feeRecipient: fee_recipient,
                     signature: signature.encode().into(),
                 },
             )
@@ -1230,6 +1257,70 @@ mod tests {
         assert!(from_file.resolved_mnemonic().is_err());
         std::fs::remove_file(path).unwrap();
         assert!(from_file.validator_onchain_addresses().is_err());
+    }
+
+    #[test]
+    fn validators_are_added_with_their_own_fee_recipients() -> eyre::Result<()> {
+        let validators: Vec<SocketAddr> =
+            vec!["127.0.0.1:8000".parse()?, "127.0.0.1:8001".parse()?];
+        let addresses = [Address::with_last_byte(1), Address::with_last_byte(2)];
+        let fee_recipients = [Address::with_last_byte(0xF1), Address::with_last_byte(0xF2)];
+        let consensus_config = generate_consensus_config(&validators, Some(1), false);
+
+        let mut evm = create_genesis_evm(genesis_evm_env(1337));
+        initialize_validator_config_v2(
+            Address::with_last_byte(0xA0),
+            &mut evm,
+            &consensus_config,
+            &addresses,
+            false,
+            1337,
+            &fee_recipients,
+        )?;
+        with_genesis_storage(&mut evm, || -> eyre::Result<()> {
+            let v2 = ValidatorConfigV2::new();
+            for (address, fee_recipient) in addresses.into_iter().zip(fee_recipients) {
+                assert_eq!(
+                    v2.validator_by_address(address)?.feeRecipient,
+                    fee_recipient
+                );
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn fee_recipients_default_to_the_validators_and_name_one_each() {
+        let validators = [Address::with_last_byte(1), Address::with_last_byte(2)];
+        let unset = parse("").unwrap();
+        assert_eq!(
+            unset.validator_fee_recipients(&validators).unwrap(),
+            validators
+        );
+
+        let named = parse("--fee-recipients 0x00000000000000000000000000000000000000f1,0x00000000000000000000000000000000000000f2").unwrap();
+        assert_eq!(
+            named.validator_fee_recipients(&validators).unwrap(),
+            [Address::with_last_byte(0xF1), Address::with_last_byte(0xF2)]
+        );
+
+        let short = parse("--fee-recipients 0x00000000000000000000000000000000000000f1").unwrap();
+        assert_eq!(
+            short
+                .validator_fee_recipients(&validators)
+                .unwrap_err()
+                .to_string(),
+            "--fee-recipients names 1 recipients for 2 validators"
+        );
+    }
+
+    #[test]
+    fn fee_recipients_conflict_with_the_deployment_gas_token() {
+        let err = parse(
+            "--fee-recipients 0x00000000000000000000000000000000000000fe --deployment-gas-token",
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
 
