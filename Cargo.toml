@@ -25,6 +25,7 @@ members = [
   "crates/ext",
   "crates/evm",
   "crates/hardfork",
+  "crates/nvnm-hardfork",
   "crates/e2e",
   "crates/faucet",
   "crates/fuzz-harness",
@@ -221,6 +222,7 @@ tempo-invariants = { path = "crates/invariants" }
 tempo-evm = { path = "crates/evm", default-features = false }
 tempo-eyre = { path = "crates/eyre", default-features = false }
 tempo-hardfork = { path = "crates/hardfork", default-features = false }
+tempo-nvnm-hardfork = { path = "crates/nvnm-hardfork", default-features = false }
 tempo-ext = { path = "crates/ext" }
 tempo-payload-builder = { path = "crates/payload/builder", default-features = false }
 tempo-payload-types = { path = "crates/payload/types", default-features = false }

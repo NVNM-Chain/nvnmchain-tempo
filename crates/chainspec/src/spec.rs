@@ -21,6 +21,7 @@ use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
 use tempo_hardfork::TempoHardfork;
+use tempo_nvnm_hardfork::NvnmHardfork;
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -66,6 +67,24 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
+    /// Returns the activation timestamp for an NVNM fork, or `None` if not scheduled.
+    fn nvnm_fork_time(&self, fork: NvnmHardfork) -> Option<u64> {
+        macro_rules! nvnm_fork_time_match {
+            ($($variant:ident),* $(,)?) => {
+                paste::paste! {
+                    match fork {
+                        $(NvnmHardfork::$variant => self.[<$variant:lower _time>],)*
+                        // `Baseline` is not scheduled, and the enum is non-exhaustive across
+                        // crates, as in `fork_time`.
+                        _ => None,
+                    }
+                }
+            };
+        }
+
+        tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_fork_time_match)
+    }
+
     /// Extract Tempo genesis info from genesis extra_fields
     fn extract_from(genesis: &Genesis) -> Self {
         genesis
@@ -235,6 +254,12 @@ impl TempoChainSpec {
         });
 
         base_spec.hardforks.extend(tempo_forks);
+        // `insert` keeps the list in time order, so fork id counts both lanes in turn.
+        let nvnm_forks = NvnmHardfork::VARIANTS.iter().filter_map(|&fork| {
+            info.nvnm_fork_time(fork)
+                .map(|time| (fork, ForkCondition::Timestamp(time)))
+        });
+        base_spec.hardforks.extend(nvnm_forks);
 
         let inner = base_spec.map_header(|inner| TempoHeader {
             general_gas_limit: 0,
@@ -277,6 +302,16 @@ impl TempoChainSpec {
     /// Returns the mainnet chainspec.
     pub fn mainnet() -> Self {
         PRESTO.as_ref().clone()
+    }
+
+    /// Returns the NVNM fork active at `timestamp`: the latest one reached, else `Baseline`.
+    pub fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
+        NvnmHardfork::VARIANTS
+            .iter()
+            .rev()
+            .copied()
+            .find(|&fork| self.fork(fork).active_at_timestamp(timestamp))
+            .unwrap_or_default()
     }
 }
 

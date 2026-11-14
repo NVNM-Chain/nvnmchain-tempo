@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 tempo-hardfork.workspace = true
+tempo-nvnm-hardfork.workspace = true
 tempo-primitives.workspace = true
 
 reth-cli = { workspace = true, optional = true }
@@ -45,6 +46,7 @@ tempo-contracts.workspace = true
 default = ["std", "serde", "reth", "cli"]
 std = [
     "tempo-hardfork/std",
+    "tempo-nvnm-hardfork/std",
     "alloy-eips/std",
     "alloy-genesis/std",
     "alloy-primitives/std",
@@ -60,6 +62,7 @@ std = [
 ]
 serde = [
     "tempo-hardfork/serde",
+    "tempo-nvnm-hardfork/serde",
     "alloy-eips/serde",
     "alloy-primitives/serde",
     "evm2?/serde",
