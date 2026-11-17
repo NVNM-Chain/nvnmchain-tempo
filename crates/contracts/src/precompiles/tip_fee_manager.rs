@@ -44,6 +44,7 @@ crate::sol! {
         error InvalidToken();
         error InsufficientFeeTokenBalance();
         error CannotChangeWithinBlock();
+        error FeesLocked();
     }
 }
 

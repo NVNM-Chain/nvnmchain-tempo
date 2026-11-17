@@ -7,7 +7,7 @@ use evm2::{
     version::GasParams,
 };
 use std::collections::HashMap;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::{TempoBlockEnv, account::encode_config_commitment};
 
 use crate::{
@@ -428,6 +428,11 @@ impl HashMapStorageProvider {
     /// Overrides the block number.
     pub fn set_block_number(&mut self, block_number: u64) {
         self.block_env.number = U256::from(block_number);
+    }
+
+    /// Overrides the active NVNM fork.
+    pub fn set_nvnm_hardfork(&mut self, fork: NvnmHardfork) {
+        self.block_env.ext.nvnm_hardfork = fork;
     }
 
     /// Overrides the active hardfork spec.

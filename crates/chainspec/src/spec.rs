@@ -42,6 +42,9 @@ macro_rules! tempo_genesis_info {
                 /// Optional override for the general (non-payment) gas limit.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 general_gas_limit: Option<u64>,
+                /// Activation timestamp for the N1 NVNM fork.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                n1_time: Option<u64>,
                 $(
                     #[doc = concat!("Activation timestamp for the ", stringify!($variant), " hardfork.")]
                     #[serde(skip_serializing_if = "Option::is_none")]
@@ -544,6 +547,7 @@ mod tests {
     use reth_chainspec::{ForkCondition, Hardforks};
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser as _;
+    use tempo_nvnm_hardfork::NvnmHardfork;
     use tempo_primitives::Header;
 
     #[test]
@@ -744,6 +748,28 @@ mod tests {
         assert_eq!(chainspec.tempo_hardfork_at(0), latest);
         assert_eq!(chainspec.tempo_hardfork_at(1000), latest);
         assert_eq!(chainspec.tempo_hardfork_at(u64::MAX), latest);
+    }
+
+    #[test]
+    fn test_nvnm_fork_times_schedule_the_lane() {
+        let genesis = |config| {
+            super::TempoChainSpec::from_genesis(
+                serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} }))
+                    .unwrap(),
+            )
+        };
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234, "n1Time": 100 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(99), NvnmHardfork::Baseline);
+        assert_eq!(chainspec.nvnm_hardfork_at(100), NvnmHardfork::N1);
+        // `Baseline` is no fork, so `tempo_forkSchedule` does not list it.
+        assert!(
+            reth_chainspec::Hardforks::forks_iter(&chainspec)
+                .all(|(fork, _)| fork.name() != NvnmHardfork::Baseline.name())
+        );
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(u64::MAX), NvnmHardfork::Baseline);
     }
 
     #[test]

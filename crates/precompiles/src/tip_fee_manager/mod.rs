@@ -13,7 +13,7 @@ use crate::{
     tip20_factory::TIP20Factory,
     tip403_registry::AuthRole,
 };
-use alloy::primitives::{Address, B256, U256, uint};
+use alloy::primitives::{Address, B256, U256, address, uint};
 pub use tempo_contracts::precompiles::{
     DEFAULT_FEE_TOKEN, FeeManagerError, FeeManagerEvent, IFeeManager, ITIPFeeAMM,
     TIP_FEE_MANAGER_ADDRESS, TIPFeeAMMError, TIPFeeAMMEvent,
@@ -58,6 +58,13 @@ impl TipFeeManager {
     pub const BASIS_POINTS: u64 = 10000;
     /// Minimum TIP-20 balance required for fee operations (1e9).
     pub const MINIMUM_BALANCE: U256 = uint!(1_000_000_000_U256);
+    /// Share of every fee credited to each of [`Self::DEVSHARE`] and [`Self::BUYBACK`] from NVNM's N1.
+    const FEE_SHARE_BPS: u64 = 2500;
+    /// Ledger key of the devshare share: the low 20 bytes of
+    /// `keccak256("nvnm.fee-split.devshare")`, which no key signs for.
+    const DEVSHARE: Address = address!("0x4AB3DB921a43C20dd296FC8C014698D4b4E66117");
+    /// Ledger key of the buyback share, from `"nvnm.fee-split.buyback"`.
+    const BUYBACK: Address = address!("0xB617809fD2B75bB221F4c600045Ca6f74aE93bf8");
 
     /// Initializes the fee manager precompile.
     pub fn initialize(&mut self) -> Result<()> {
@@ -227,6 +234,8 @@ impl TipFeeManager {
     /// the validator-credited amount (post-feeAMM haircut, in the validator's fee token), which
     /// is used by the payload builder to score blocks by actual proposer revenue.
     ///
+    /// From NVNM's N1 that amount is what the devshare and buyback shares leave.
+    ///
     /// # Errors
     /// - `InvalidToken` — `fee_token` does not have a valid TIP-20 prefix
     /// - `InsufficientLiquidity` — AMM pool lacks liquidity for the fee swap
@@ -264,9 +273,20 @@ impl TipFeeManager {
             compute_amount_out(compute_amount_out(actual_spending)?)?
         };
 
-        self.increment_collected_fees(beneficiary, validator_token, amount)?;
+        let kept = if self.storage.nvnm_hardfork().is_n1() {
+            let share = amount
+                .checked_mul(U256::from(Self::FEE_SHARE_BPS))
+                .ok_or_else(TempoPrecompileError::under_overflow)?
+                / U256::from(Self::BASIS_POINTS);
+            self.increment_collected_fees(Self::DEVSHARE, validator_token, share)?;
+            self.increment_collected_fees(Self::BUYBACK, validator_token, share)?;
+            amount - share - share
+        } else {
+            amount
+        };
+        self.increment_collected_fees(beneficiary, validator_token, kept)?;
 
-        Ok(amount)
+        Ok(kept)
     }
 
     /// Increment collected fees for a specific validator and token combination.
@@ -290,9 +310,14 @@ impl TipFeeManager {
     ///
     /// # Errors
     /// - `InvalidToken` — `token` does not have a valid TIP-20 prefix
+    /// - `FeesLocked` — NVNM's N1 is active
     pub fn distribute_fees(&mut self, validator: Address, token: Address) -> Result<()> {
         // collect_fee_pre_tx creates FeeManager balance slots for free; do not convert them into storage credits.
         StorageCtx.set_tip1060_storage_credit_minting(false);
+
+        if self.storage.nvnm_hardfork().is_n1() {
+            return Err(FeeManagerError::fees_locked().into());
+        }
 
         let amount = self.collected_fees[validator][token].read()?;
         if amount.is_zero() {
@@ -324,7 +349,8 @@ impl TipFeeManager {
 
 #[cfg(test)]
 mod tests {
-    use tempo_chainspec::hardfork::TempoHardfork;
+    use alloy::primitives::keccak256;
+    use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
     use tempo_contracts::precompiles::TIP20Error;
 
     use super::*;
@@ -1077,6 +1103,53 @@ mod tests {
             let remaining = fee_manager.collected_fees[validator][token.address()].read()?;
             assert_eq!(remaining, U256::ZERO);
 
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_n1_splits_each_fee_and_holds_the_ledger() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new(1);
+        storage.set_nvnm_hardfork(NvnmHardfork::N1);
+        let [admin, validator] = [(); 2].map(|_| Address::random());
+        for (key, label) in [
+            (TipFeeManager::DEVSHARE, "nvnm.fee-split.devshare"),
+            (TipFeeManager::BUYBACK, "nvnm.fee-split.buyback"),
+        ] {
+            assert_eq!(key, Address::from_word(keccak256(label)));
+        }
+
+        StorageCtx::enter(&mut storage, || {
+            let token = TIP20Setup::create("Test", "TST", admin).apply()?.address();
+            let mut fee_manager = TipFeeManager::new();
+            fee_manager.set_validator_token(
+                validator,
+                IFeeManager::setValidatorTokenCall { token },
+                Address::random(),
+            )?;
+            let credited = fee_manager.collect_fee_post_tx(
+                Address::random(),
+                U256::from(6001),
+                U256::ZERO,
+                token,
+                validator,
+            )?;
+            assert_eq!(credited, U256::from(3001));
+
+            for (account, share) in [
+                (validator, 3001),
+                (TipFeeManager::DEVSHARE, 1500),
+                (TipFeeManager::BUYBACK, 1500),
+            ] {
+                assert_eq!(
+                    fee_manager.collected_fees[account][token].read()?,
+                    U256::from(share)
+                );
+                assert_eq!(
+                    fee_manager.distribute_fees(account, token),
+                    Err(FeeManagerError::fees_locked().into())
+                );
+            }
             Ok(())
         })
     }

@@ -183,6 +183,10 @@ pub(crate) struct GenesisArgs {
     /// Zero means no owner, so no zone can be created.
     #[arg(long)]
     zone_owner: Option<Address>,
+
+    /// NVNM's N1 activation timestamp; unscheduled if unset.
+    #[arg(long)]
+    n1_time: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -570,6 +574,11 @@ impl GenesisArgs {
                 .insert_value("generalGasLimit".to_string(), general_gas_limit)?;
         }
         self.hardforks.write_to(&mut chain_config);
+        if let Some(n1_time) = self.n1_time {
+            chain_config
+                .extra_fields
+                .insert_value("n1Time".to_string(), n1_time)?;
+        }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -1115,6 +1124,16 @@ mod tests {
             !genesis
                 .alloc
                 .contains_key(&tempo_precompiles::CONFIGURABLE_ACCOUNT_ADDRESS)
+        );
+    }
+
+    #[tokio::test]
+    async fn n1_time_reaches_genesis() {
+        let chainspec =
+            tempo_chainspec::TempoChainSpec::from_genesis(generate("--n1-time 100").await);
+        assert_eq!(
+            chainspec.nvnm_hardfork_at(100),
+            tempo_chainspec::hardfork::NvnmHardfork::N1
         );
     }
 
