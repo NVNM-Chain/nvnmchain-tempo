@@ -54,8 +54,8 @@ nvnm_hardfork!(
         /// No lane fork; `Genesis` names Tempo's.
         #[default]
         Baseline,
-        /// FeeManager credits a quarter of every fee to each of its devshare and buyback ledger
-        /// keys and pays nothing out. A later fork opens the ledger and names their wallets.
+        /// FeeManager sets a quarter of every fee aside for devshare and a quarter for buyback,
+        /// apart from the validators' ledger, and closes the validators' payouts.
         N1,
     }
 );
