@@ -32,6 +32,8 @@ crate::sol! {
         // Fee functions
         function distributeFees(address validator, address token) external;
         function collectedFees(address validator, address token) external view returns (uint256);
+        /// NVNM, from N1: pays the devshare and buyback shares held in `token` to their wallets.
+        function claimFeeShares(address token) external;
         // NOTE: collectFeePreTx is a protocol-internal function called directly by the
         // execution handler, not exposed via the dispatch interface.
 
@@ -44,6 +46,8 @@ crate::sol! {
         error InvalidToken();
         error InsufficientFeeTokenBalance();
         error CannotChangeWithinBlock();
+        error FeesLocked();
+        error FeeWalletNotSet();
     }
 }
 

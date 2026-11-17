@@ -1,7 +1,9 @@
 //! ABI dispatch for the [`TipFeeManager`] precompile.
 
 use crate::{
-    Precompile, charge_input_cost, dispatch, mutate,
+    Precompile, charge_input_cost, dispatch,
+    dispatch::{selector_from_calldata, unknown_selector_result},
+    mutate,
     storage::Handler,
     tip_fee_manager::{
         ITIPFeeAMM, TipFeeManager,
@@ -9,13 +11,20 @@ use crate::{
     },
     view,
 };
-use alloy::primitives::Address;
+use alloy::{primitives::Address, sol_types::SolCall};
 use evm2::precompiles::PrecompileResult;
 use tempo_contracts::precompiles::IFeeManager;
 impl Precompile for TipFeeManager {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
+        }
+
+        // NVNM: `claimFeeShares` does not exist before N1.
+        if selector_from_calldata(calldata) == Some(IFeeManager::claimFeeSharesCall::SELECTOR)
+            && !self.storage.nvnm_hardfork().is_n1()
+        {
+            return unknown_selector_result(calldata);
         }
 
         dispatch!(
@@ -35,7 +44,8 @@ impl Precompile for TipFeeManager {
                     setUserToken(call) => mutate(call, msg_sender, |sender, c| self.set_user_token(sender, c)),
                     distributeFees(call) => mutate(call, msg_sender, |_, c| {
                         self.distribute_fees(c.validator, c.token)
-                    })
+                    }),
+                    claimFeeShares(call) => mutate(call, msg_sender, |_, c| self.claim_fee_shares(c.token))
 
                 }
                 ITIPFeeAMM::ITIPFeeAMMCalls {
@@ -79,7 +89,7 @@ mod tests {
     use crate::{
         Precompile, expect_precompile_revert,
         storage::{ContractStorage, StorageCtx, hashmap::HashMapStorageProvider},
-        test_util::{TIP20Setup, assert_full_coverage, check_selector_coverage},
+        test_util::{TIP20Setup, assert_full_coverage, check_selector_coverage, revert_bytes},
         tip_fee_manager::{
             FeeManagerError,
             amm::{M, MIN_LIQUIDITY, N, PoolKey, SCALE},
@@ -87,10 +97,12 @@ mod tests {
     };
     use alloy::{
         primitives::{Address, B256, U256},
-        sol_types::{SolCall, SolValue},
+        sol_types::{SolCall, SolError, SolValue},
     };
+    use tempo_chainspec::hardfork::NvnmHardfork;
     use tempo_contracts::precompiles::{
         IFeeManager, IFeeManager::IFeeManagerCalls, ITIPFeeAMM, ITIPFeeAMM::ITIPFeeAMMCalls,
+        UnknownFunctionSelector,
     };
 
     #[test]
@@ -315,7 +327,23 @@ mod tests {
 
     #[test]
     fn test_tip_fee_manager_selector_coverage() -> eyre::Result<()> {
+        let claim = IFeeManager::claimFeeSharesCall {
+            token: Address::ZERO,
+        }
+        .abi_encode();
         let mut storage = HashMapStorageProvider::new(1);
+        StorageCtx::enter(&mut storage, || {
+            let result = TipFeeManager::new().call(&claim, Address::ZERO);
+            let decoded = UnknownFunctionSelector::abi_decode(revert_bytes(&result))?;
+            assert_eq!(
+                decoded.selector.as_slice(),
+                &IFeeManager::claimFeeSharesCall::SELECTOR
+            );
+            eyre::Ok(())
+        })?;
+
+        // NVNM: `claimFeeShares` exists from N1.
+        storage.set_nvnm_hardfork(NvnmHardfork::N1);
         StorageCtx::enter(&mut storage, || {
             let mut fee_manager = TipFeeManager::new();
 
