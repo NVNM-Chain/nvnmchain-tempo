@@ -32,6 +32,7 @@ pub use tempo_hardfork::{TempoHardfork, constants};
 /// Backwards-compatible hardfork import path.
 pub mod hardfork {
     pub use tempo_hardfork::TempoHardfork;
+    pub use tempo_nvnm_hardfork::NvnmHardfork;
 
     #[cfg(feature = "reth")]
     pub use crate::spec::TempoHardforks;
