@@ -11,7 +11,7 @@ use evm2::{
 };
 use scoped_tls::scoped_thread_local;
 use std::cell::RefCell;
-use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
 use tempo_primitives::{TempoBlockEnv, TempoBlockExt};
 
 use crate::{
@@ -244,6 +244,12 @@ impl StorageCtx {
     /// Returns the currently active hardfork.
     pub fn spec(&self) -> TempoHardfork {
         Self::with_storage(|s| s.spec())
+    }
+
+    /// Returns the NVNM fork active in this block. Like the block's other fields, a read-only
+    /// context has none.
+    pub fn nvnm_hardfork(&self) -> NvnmHardfork {
+        self.with_block_env(|block_env| block_env.ext.nvnm_hardfork)
     }
 
     /// Returns the shared storage-actions recorder for the current storage context.

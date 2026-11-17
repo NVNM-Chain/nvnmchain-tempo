@@ -21,6 +21,7 @@ use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
 use tempo_hardfork::TempoHardfork;
+use tempo_nvnm_hardfork::NvnmHardfork;
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -33,7 +34,7 @@ macro_rules! tempo_genesis_info {
         paste::paste! {
             /// Tempo genesis info extracted from genesis extra_fields
             #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-            #[serde(rename_all = "camelCase")]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
             pub struct TempoGenesisInfo {
                 /// The epoch length used by consensus.
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,13 +67,28 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Self {
-        genesis
-            .config
-            .extra_fields
-            .deserialize_as::<Self>()
-            .unwrap_or_default()
+    /// Returns the activation timestamp for an NVNM fork, or `None` if not scheduled.
+    fn nvnm_fork_time(&self, fork: NvnmHardfork) -> Option<u64> {
+        macro_rules! nvnm_fork_time_match {
+            ($($variant:ident),* $(,)?) => {
+                paste::paste! {
+                    match fork {
+                        $(NvnmHardfork::$variant => self.[<$variant:lower _time>],)*
+                        // `Baseline` is not scheduled, and the enum is non-exhaustive across
+                        // crates, as in `fork_time`.
+                        _ => None,
+                    }
+                }
+            };
+        }
+
+        tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_fork_time_match)
+    }
+
+    /// Extract Tempo genesis info from genesis extra_fields. They are consensus-critical yet
+    /// outside the genesis hash, so a malformed value or an unknown key is an error, not a default.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        genesis.config.extra_fields.deserialize_as()
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -104,7 +120,9 @@ pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
+        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)
+            .map_err(|e| eyre::eyre!("invalid Tempo genesis config: {e}"))?
+            .into(),
     })
 }
 
@@ -221,10 +239,16 @@ impl TempoChainSpec {
         TempoConsensusSpec::general_gas_limit_at(self, timestamp, gas_limit, shared_gas_limit)
     }
 
-    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    /// [`Self::try_from_genesis`], panicking on its error: for a genesis already known to parse.
     pub fn from_genesis(genesis: Genesis) -> Self {
+        Self::try_from_genesis(genesis).expect("genesis has invalid Tempo fields")
+    }
+
+    /// Converts the given [`Genesis`] into a [`TempoChainSpec`], or returns why its Tempo fields
+    /// do not parse.
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
         // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis);
+        let info = TempoGenesisInfo::extract_from(&genesis)?;
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -235,6 +259,12 @@ impl TempoChainSpec {
         });
 
         base_spec.hardforks.extend(tempo_forks);
+        // `insert` keeps the list in time order, so fork id counts both lanes in turn.
+        let nvnm_forks = NvnmHardfork::VARIANTS.iter().filter_map(|&fork| {
+            info.nvnm_fork_time(fork)
+                .map(|time| (fork, ForkCondition::Timestamp(time)))
+        });
+        base_spec.hardforks.extend(nvnm_forks);
 
         let inner = base_spec.map_header(|inner| TempoHeader {
             general_gas_limit: 0,
@@ -249,12 +279,12 @@ impl TempoChainSpec {
         let network_identity =
             NetworkIdentity::from_extra_data(inner.genesis_header().inner.extra_data.as_ref()).ok();
 
-        Self {
+        Ok(Self {
             inner,
             info,
             network_identity,
             default_follow_url: None,
-        }
+        })
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -277,6 +307,16 @@ impl TempoChainSpec {
     /// Returns the mainnet chainspec.
     pub fn mainnet() -> Self {
         PRESTO.as_ref().clone()
+    }
+
+    /// Returns the NVNM fork active at `timestamp`: the latest one reached, else `Baseline`.
+    pub fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
+        NvnmHardfork::VARIANTS
+            .iter()
+            .rev()
+            .copied()
+            .find(|&fork| self.fork(fork).active_at_timestamp(timestamp))
+            .unwrap_or_default()
     }
 }
 
@@ -625,6 +665,37 @@ mod tests {
             .forks_iter()
             .any(|(fork, _)| fork.name() == "Genesis");
         assert!(has_genesis, "Genesis hardfork should be in inner.hardforks");
+    }
+
+    #[test]
+    fn test_try_from_genesis_refuses_unknown_and_malformed_fields() {
+        let try_from = |config: serde_json::Value| {
+            let genesis =
+                serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} }))
+                    .unwrap();
+            super::TempoChainSpec::try_from_genesis(genesis).map_err(|e| e.to_string())
+        };
+
+        // A misspelt key, or a fork this binary lacks, is not dropped.
+        for key in ["epochLenght", "t99Time", "n99Time"] {
+            let err = try_from(serde_json::json!({ "chainId": 1234, key: 5 })).unwrap_err();
+            assert!(err.starts_with(&format!("unknown field `{key}`")), "{err}");
+        }
+        // A malformed value does not fall back to a default with every fork off.
+        let err = try_from(serde_json::json!({ "chainId": 1234, "t12Time": "0" })).unwrap_err();
+        assert!(err.starts_with("invalid type: string"), "{err}");
+        assert!(try_from(serde_json::json!({ "chainId": 1234, "t12Time": null })).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_chain_parser_reports_an_invalid_genesis_config() {
+        let genesis = r#"{ "config": { "chainId": 1234, "t99Time": 5 }, "alloc": {} }"#;
+        let err = super::chain_value_parser(genesis).unwrap_err().to_string();
+        assert!(
+            err.starts_with("invalid Tempo genesis config: unknown field `t99Time`"),
+            "{err}"
+        );
     }
 
     #[test]

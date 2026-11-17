@@ -4,6 +4,7 @@ use alloy_primitives::{U256, uint};
 use core::num::NonZeroU64;
 
 use crate::ed25519::PublicKey;
+use tempo_nvnm_hardfork::NvnmHardfork;
 
 /// Tempo's complete EVM2 block environment.
 pub type TempoBlockEnv = evm2::env::BlockEnvExt<TempoBlockExt>;
@@ -18,6 +19,9 @@ pub struct TempoBlockExt {
     pub epoch_length: NonZeroU64,
     /// Proposer's Ed25519 public key. `Some` only for post-T4 blocks.
     pub proposer_public_key: Option<PublicKey>,
+
+    /// NVNM fork active at this block; the Tempo one stays in the EVM config's `spec`.
+    pub nvnm_hardfork: NvnmHardfork,
 }
 
 impl Default for TempoBlockExt {
@@ -26,6 +30,7 @@ impl Default for TempoBlockExt {
             timestamp_millis_part: 0,
             epoch_length: NonZeroU64::MIN,
             proposer_public_key: None,
+            nvnm_hardfork: NvnmHardfork::Baseline,
         }
     }
 }
