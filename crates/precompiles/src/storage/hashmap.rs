@@ -7,7 +7,7 @@ use evm2::{
     version::GasParams,
 };
 use std::collections::HashMap;
-use tempo_chainspec::hardfork::{NvnmHardfork, TempoHardfork};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_primitives::{TempoBlockEnv, account::encode_config_commitment};
 
 use crate::{
@@ -431,8 +431,14 @@ impl HashMapStorageProvider {
     }
 
     /// Overrides the active NVNM fork.
-    pub fn set_nvnm_hardfork(&mut self, fork: NvnmHardfork) {
+    pub fn set_nvnm_hardfork(&mut self, fork: tempo_chainspec::hardfork::NvnmHardfork) {
         self.block_env.ext.nvnm_hardfork = fork;
+    }
+
+    /// Names the wallets the devshare and buyback shares of the fees are paid to.
+    pub fn set_fee_wallets(&mut self, devshare: Address, buyback: Address) {
+        self.block_env.ext.fee_devshare = Some(devshare);
+        self.block_env.ext.fee_buyback = Some(buyback);
     }
 
     /// Overrides the active hardfork spec.

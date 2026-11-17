@@ -1,6 +1,6 @@
 //! Tempo-specific EVM2 block environment fields.
 
-use alloy_primitives::{U256, uint};
+use alloy_primitives::{Address, U256, uint};
 use core::num::NonZeroU64;
 
 use crate::ed25519::PublicKey;
@@ -22,6 +22,10 @@ pub struct TempoBlockExt {
 
     /// NVNM fork active at this block; the Tempo one stays in the EVM config's `spec`.
     pub nvnm_hardfork: NvnmHardfork,
+    /// NVNM: the genesis config's `feeDevshare`.
+    pub fee_devshare: Option<Address>,
+    /// NVNM: the genesis config's `feeBuyback`.
+    pub fee_buyback: Option<Address>,
 }
 
 impl Default for TempoBlockExt {
@@ -31,6 +35,8 @@ impl Default for TempoBlockExt {
             epoch_length: NonZeroU64::MIN,
             proposer_public_key: None,
             nvnm_hardfork: NvnmHardfork::Baseline,
+            fee_devshare: None,
+            fee_buyback: None,
         }
     }
 }

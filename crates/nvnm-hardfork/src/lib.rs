@@ -55,7 +55,8 @@ nvnm_hardfork!(
         #[default]
         Baseline,
         /// FeeManager sets a quarter of every fee aside for devshare and a quarter for buyback,
-        /// apart from the validators' ledger, and closes the validators' payouts.
+        /// apart from the validators' ledger, pays the two on `claimFeeShares`, and closes the
+        /// validators' payouts.
         N1,
     }
 );

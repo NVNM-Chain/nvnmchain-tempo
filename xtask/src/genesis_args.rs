@@ -193,6 +193,14 @@ pub(crate) struct GenesisArgs {
     /// N1 activation timestamp (0 = genesis).
     #[arg(long, value_name = "TIMESTAMP")]
     n1_time: Option<u64>,
+
+    /// Wallet the fee split's devshare share is paid to.
+    #[arg(long, requires = "fee_buyback")]
+    fee_devshare: Option<Address>,
+
+    /// Wallet the fee split's buyback share is paid to.
+    #[arg(long, requires = "fee_devshare")]
+    fee_buyback: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -589,6 +597,14 @@ impl GenesisArgs {
         chain_config
             .extra_fields
             .insert_value("n1Time".to_string(), n1_time)?;
+        if let (Some(devshare), Some(buyback)) = (self.fee_devshare, self.fee_buyback) {
+            chain_config
+                .extra_fields
+                .insert_value("feeDevshare".to_string(), devshare)?;
+            chain_config
+                .extra_fields
+                .insert_value("feeBuyback".to_string(), buyback)?;
+        }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -1152,6 +1168,25 @@ mod tests {
             assert_eq!(chainspec.nvnm_hardfork_at(99), before, "{flags}");
             assert_eq!(chainspec.nvnm_hardfork_at(100), from, "{flags}");
         }
+    }
+
+    #[tokio::test]
+    async fn fee_wallet_flags_reach_the_genesis_config() {
+        let (devshare, buyback) = (Address::with_last_byte(0xD0), Address::with_last_byte(0xB0));
+        let genesis = generate(&format!(
+            "--fee-devshare {devshare} --fee-buyback {buyback}"
+        ))
+        .await;
+
+        let info = tempo_chainspec::TempoChainSpec::from_genesis(genesis).info;
+        assert_eq!(info.fee_devshare, Some(devshare));
+        assert_eq!(info.fee_buyback, Some(buyback));
+        assert_eq!(
+            parse(&format!("--fee-devshare {devshare}"))
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     #[test]

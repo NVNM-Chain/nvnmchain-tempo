@@ -35,8 +35,7 @@ pub struct TipFeeManager {
     pools: Mapping<B256, Pool>,
     total_supply: Mapping<B256, U256>,
     liquidity_balances: Mapping<B256, Mapping<Address, U256>>,
-    /// NVNM: devshare's share of the fees collected from N1, by token. Nothing pays it out yet: a
-    /// later fork names the wallet that claims it.
+    /// NVNM: devshare's share of the fees collected from N1, by token.
     #[slot("nvnm.fee-split.devshare")]
     devshare_fees: Mapping<Address, U256>,
     /// NVNM: buyback's share, as `devshare_fees`.
@@ -343,6 +342,36 @@ impl TipFeeManager {
         self.emit_event(FeeManagerEvent::fees_distributed(validator, token, amount))?;
 
         Ok(())
+    }
+
+    /// Pays the devshare and buyback shares held in `token` to the wallets the genesis config
+    /// names, as [`Self::distribute_fees`] pays a validator. Anyone may call it.
+    ///
+    /// # Errors
+    /// - `InvalidToken` — `token` does not have a valid TIP-20 prefix
+    /// - `FeeWalletNotSet` — a share is held and the config names no wallet for it
+    pub fn claim_fee_shares(&mut self, token: Address) -> Result<()> {
+        // As in `distribute_fees`: the share slots were created for free.
+        StorageCtx.set_tip1060_storage_credit_minting(false);
+
+        let wallets = self
+            .storage
+            .with_block_env(|block| [block.ext.fee_devshare, block.ext.fee_buyback]);
+        let held = [
+            self.devshare_fees[token].read()?,
+            self.buyback_fees[token].read()?,
+        ];
+        for (amount, wallet) in held.into_iter().zip(wallets) {
+            if amount.is_zero() {
+                continue;
+            }
+            let wallet = wallet.ok_or_else(FeeManagerError::fee_wallet_not_set)?;
+            TIP20Token::from_address(token)?
+                .transfer(self.address, ITIP20::transferCall { to: wallet, amount })?;
+            self.emit_event(FeeManagerEvent::fees_distributed(wallet, token, amount))?;
+        }
+        self.devshare_fees[token].write(U256::ZERO)?;
+        self.buyback_fees[token].write(U256::ZERO)
     }
 
     /// Reads the stored fee token preference for a user.
@@ -1114,10 +1143,14 @@ mod tests {
     fn test_n1_splits_each_fee_and_closes_validator_payouts() -> eyre::Result<()> {
         let mut storage = HashMapStorageProvider::new(1);
         storage.set_nvnm_hardfork(NvnmHardfork::N1);
-        let [admin, validator] = [(); 2].map(|_| Address::random());
+        let [admin, validator, devshare, buyback] = [(); 4].map(|_| Address::random());
 
-        StorageCtx::enter(&mut storage, || {
-            let token = TIP20Setup::create("Test", "TST", admin).apply()?.address();
+        let token = StorageCtx::enter(&mut storage, || {
+            let token = TIP20Setup::create("Test", "TST", admin)
+                .with_issuer(admin)
+                .with_mint(TIP_FEE_MANAGER_ADDRESS, U256::from(6001))
+                .apply()?
+                .address();
             let mut fee_manager = TipFeeManager::new();
             fee_manager.set_validator_token(
                 validator,
@@ -1143,6 +1176,26 @@ mod tests {
                 fee_manager.distribute_fees(validator, token),
                 Err(FeeManagerError::fees_locked().into())
             );
+
+            // The shares are paid to the wallets the config names, and to nobody without them.
+            assert_eq!(
+                fee_manager.claim_fee_shares(token),
+                Err(FeeManagerError::fee_wallet_not_set().into())
+            );
+            Ok::<_, eyre::Report>(token)
+        })?;
+
+        storage.set_fee_wallets(devshare, buyback);
+        StorageCtx::enter(&mut storage, || {
+            let mut fee_manager = TipFeeManager::new();
+            fee_manager.claim_fee_shares(token)?;
+            for wallet in [devshare, buyback] {
+                let paid = TIP20Token::from_address(token)?
+                    .balance_of(ITIP20::balanceOfCall { account: wallet })?;
+                assert_eq!(paid, U256::from(1500));
+            }
+            assert_eq!(fee_manager.devshare_fees[token].read()?, U256::ZERO);
+            assert_eq!(fee_manager.buyback_fees[token].read()?, U256::ZERO);
             Ok(())
         })
     }

@@ -45,6 +45,14 @@ macro_rules! tempo_genesis_info {
                 /// Activation timestamp for the N1 NVNM fork.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 n1_time: Option<u64>,
+                /// Wallet NVNM's `claimFeeShares` pays the devshare share to. Claims already
+                /// executed depend on it, so from N1 it is neither added nor edited: a fork
+                /// names another.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_devshare: Option<Address>,
+                /// Wallet the buyback share is paid to, as `fee_devshare`.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_buyback: Option<Address>,
                 $(
                     #[doc = concat!("Activation timestamp for the ", stringify!($variant), " hardfork.")]
                     #[serde(skip_serializing_if = "Option::is_none")]
