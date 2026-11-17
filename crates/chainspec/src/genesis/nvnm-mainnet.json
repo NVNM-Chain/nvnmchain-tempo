@@ -20,6 +20,7 @@
     "terminalTotalDifficulty": 0,
     "terminalTotalDifficultyPassed": true,
     "epochLength": 21600,
+    "n1Time": 0,
     "t0Time": 0,
     "t10Time": 0,
     "t11Time": 0,

@@ -32,6 +32,7 @@ use std::{
 use tempo_chainspec::{
     TempoHardfork,
     cli::TempoHardforkArgs,
+    hardfork::NvnmHardfork,
     spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE},
 };
 use tempo_consensus_config::{SigningKey, SigningShare};
@@ -183,6 +184,23 @@ pub(crate) struct GenesisArgs {
     /// Zero means no owner, so no zone can be created.
     #[arg(long)]
     zone_owner: Option<Address>,
+
+    /// Latest NVNM fork to enable, for example `Baseline` for none. Later ones are disabled
+    /// unless their `--n<k>-time` flag is passed.
+    #[arg(long, value_name = "FORK")]
+    nvnm_hardfork: Option<NvnmHardfork>,
+
+    /// N1 activation timestamp (0 = genesis).
+    #[arg(long, value_name = "TIMESTAMP")]
+    n1_time: Option<u64>,
+
+    /// Wallet the fee split's devshare share is paid to.
+    #[arg(long, requires = "fee_buyback")]
+    fee_devshare: Option<Address>,
+
+    /// Wallet the fee split's buyback share is paid to.
+    #[arg(long, requires = "fee_devshare")]
+    fee_buyback: Option<Address>,
 }
 
 #[derive(Clone, Debug)]
@@ -570,6 +588,23 @@ impl GenesisArgs {
                 .insert_value("generalGasLimit".to_string(), general_gas_limit)?;
         }
         self.hardforks.write_to(&mut chain_config);
+        // As the Tempo forks above: at genesis unless told otherwise, `null` when disabled.
+        let n1_time = self.n1_time.or_else(|| {
+            self.nvnm_hardfork
+                .is_none_or(|latest| latest.is_n1())
+                .then_some(0)
+        });
+        chain_config
+            .extra_fields
+            .insert_value("n1Time".to_string(), n1_time)?;
+        if let (Some(devshare), Some(buyback)) = (self.fee_devshare, self.fee_buyback) {
+            chain_config
+                .extra_fields
+                .insert_value("feeDevshare".to_string(), devshare)?;
+            chain_config
+                .extra_fields
+                .insert_value("feeBuyback".to_string(), buyback)?;
+        }
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -1115,6 +1150,42 @@ mod tests {
             !genesis
                 .alloc
                 .contains_key(&tempo_precompiles::CONFIGURABLE_ACCOUNT_ADDRESS)
+        );
+    }
+
+    #[tokio::test]
+    async fn nvnm_forks_start_at_genesis_unless_told_otherwise() {
+        for (flags, before, from) in [
+            ("", NvnmHardfork::N1, NvnmHardfork::N1),
+            ("--n1-time 100", NvnmHardfork::Baseline, NvnmHardfork::N1),
+            (
+                "--nvnm-hardfork baseline",
+                NvnmHardfork::Baseline,
+                NvnmHardfork::Baseline,
+            ),
+        ] {
+            let chainspec = tempo_chainspec::TempoChainSpec::from_genesis(generate(flags).await);
+            assert_eq!(chainspec.nvnm_hardfork_at(99), before, "{flags}");
+            assert_eq!(chainspec.nvnm_hardfork_at(100), from, "{flags}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fee_wallet_flags_reach_the_genesis_config() {
+        let (devshare, buyback) = (Address::with_last_byte(0xD0), Address::with_last_byte(0xB0));
+        let genesis = generate(&format!(
+            "--fee-devshare {devshare} --fee-buyback {buyback}"
+        ))
+        .await;
+
+        let info = tempo_chainspec::TempoChainSpec::from_genesis(genesis).info;
+        assert_eq!(info.fee_devshare, Some(devshare));
+        assert_eq!(info.fee_buyback, Some(buyback));
+        assert_eq!(
+            parse(&format!("--fee-devshare {devshare}"))
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
         );
     }
 

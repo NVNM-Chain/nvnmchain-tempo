@@ -42,6 +42,17 @@ macro_rules! tempo_genesis_info {
                 /// Optional override for the general (non-payment) gas limit.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 general_gas_limit: Option<u64>,
+                /// Activation timestamp for the N1 NVNM fork.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                n1_time: Option<u64>,
+                /// Wallet NVNM's `claimFeeShares` pays the devshare share to. Claims already
+                /// executed depend on it, so from N1 it is neither added nor edited: a fork
+                /// names another.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_devshare: Option<Address>,
+                /// Wallet the buyback share is paid to, as `fee_devshare`.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_buyback: Option<Address>,
                 $(
                     #[doc = concat!("Activation timestamp for the ", stringify!($variant), " hardfork.")]
                     #[serde(skip_serializing_if = "Option::is_none")]
@@ -544,6 +555,7 @@ mod tests {
     use reth_chainspec::{ForkCondition, Hardforks};
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser as _;
+    use tempo_nvnm_hardfork::NvnmHardfork;
     use tempo_primitives::Header;
 
     #[test]
@@ -744,6 +756,28 @@ mod tests {
         assert_eq!(chainspec.tempo_hardfork_at(0), latest);
         assert_eq!(chainspec.tempo_hardfork_at(1000), latest);
         assert_eq!(chainspec.tempo_hardfork_at(u64::MAX), latest);
+    }
+
+    #[test]
+    fn test_nvnm_fork_times_schedule_the_lane() {
+        let genesis = |config| {
+            super::TempoChainSpec::from_genesis(
+                serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} }))
+                    .unwrap(),
+            )
+        };
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234, "n1Time": 100 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(99), NvnmHardfork::Baseline);
+        assert_eq!(chainspec.nvnm_hardfork_at(100), NvnmHardfork::N1);
+        // `Baseline` is no fork, so `tempo_forkSchedule` does not list it.
+        assert!(
+            reth_chainspec::Hardforks::forks_iter(&chainspec)
+                .all(|(fork, _)| fork.name() != NvnmHardfork::Baseline.name())
+        );
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(u64::MAX), NvnmHardfork::Baseline);
     }
 
     #[test]
@@ -1197,13 +1231,14 @@ mod tests {
     fn nvnm_chains_match_the_live_networks() {
         use alloy_primitives::b256;
 
-        for (spec, id, genesis, t12, follow) in [
+        for (spec, id, genesis, t12, follow, lane) in [
             (
                 &*super::NVNM_CANARY,
                 787222,
                 b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
                 1_792_742_400,
                 Some("wss://ws.nvnm.canary.mantrachain.dev"),
+                NvnmHardfork::Baseline,
             ),
             (
                 &*super::NVNM_TESTNET,
@@ -1211,6 +1246,7 @@ mod tests {
                 b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
                 1_793_260_800,
                 Some("wss://ws.nvnm.testnet.nvnmchain.io"),
+                NvnmHardfork::Baseline,
             ),
             (
                 &*super::NVNM_MAINNET,
@@ -1218,6 +1254,8 @@ mod tests {
                 b256!("3d084628b2e06c2bcddd9e19bfb3d5de8118363bf9e8fb819d572bb94a7f9843"),
                 0,
                 None,
+                // Mainnet splits fees from its first block.
+                NvnmHardfork::N1,
             ),
         ] {
             assert_eq!(spec.chain().id(), id);
@@ -1230,6 +1268,7 @@ mod tests {
             assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T13), None, "{id}");
+            assert_eq!(spec.nvnm_hardfork_at(u64::MAX), lane, "{id}");
             assert!(spec.network_identity.is_some(), "{id}");
             assert_eq!(spec.default_follow_url(), follow, "{id}");
         }
