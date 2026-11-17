@@ -32,6 +32,7 @@ use std::{
 use tempo_chainspec::{
     TempoHardfork,
     cli::TempoHardforkArgs,
+    hardfork::NvnmHardfork,
     spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE},
 };
 use tempo_consensus_config::{SigningKey, SigningShare};
@@ -184,8 +185,13 @@ pub(crate) struct GenesisArgs {
     #[arg(long)]
     zone_owner: Option<Address>,
 
-    /// NVNM's N1 activation timestamp; unscheduled if unset.
-    #[arg(long)]
+    /// Latest NVNM fork to enable, for example `Baseline` for none. Later ones are disabled
+    /// unless their `--n<k>-time` flag is passed.
+    #[arg(long, value_name = "FORK")]
+    nvnm_hardfork: Option<NvnmHardfork>,
+
+    /// N1 activation timestamp (0 = genesis).
+    #[arg(long, value_name = "TIMESTAMP")]
     n1_time: Option<u64>,
 }
 
@@ -574,11 +580,15 @@ impl GenesisArgs {
                 .insert_value("generalGasLimit".to_string(), general_gas_limit)?;
         }
         self.hardforks.write_to(&mut chain_config);
-        if let Some(n1_time) = self.n1_time {
-            chain_config
-                .extra_fields
-                .insert_value("n1Time".to_string(), n1_time)?;
-        }
+        // As the Tempo forks above: at genesis unless told otherwise, `null` when disabled.
+        let n1_time = self.n1_time.or_else(|| {
+            self.nvnm_hardfork
+                .is_none_or(|latest| latest.is_n1())
+                .then_some(0)
+        });
+        chain_config
+            .extra_fields
+            .insert_value("n1Time".to_string(), n1_time)?;
         let mut extra_data = Bytes::from_static(b"tempo-genesis");
 
         if let Some(consensus_config) = &consensus_config {
@@ -1128,13 +1138,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn n1_time_reaches_genesis() {
-        let chainspec =
-            tempo_chainspec::TempoChainSpec::from_genesis(generate("--n1-time 100").await);
-        assert_eq!(
-            chainspec.nvnm_hardfork_at(100),
-            tempo_chainspec::hardfork::NvnmHardfork::N1
-        );
+    async fn nvnm_forks_start_at_genesis_unless_told_otherwise() {
+        for (flags, before, from) in [
+            ("", NvnmHardfork::N1, NvnmHardfork::N1),
+            ("--n1-time 100", NvnmHardfork::Baseline, NvnmHardfork::N1),
+            (
+                "--nvnm-hardfork baseline",
+                NvnmHardfork::Baseline,
+                NvnmHardfork::Baseline,
+            ),
+        ] {
+            let chainspec = tempo_chainspec::TempoChainSpec::from_genesis(generate(flags).await);
+            assert_eq!(chainspec.nvnm_hardfork_at(99), before, "{flags}");
+            assert_eq!(chainspec.nvnm_hardfork_at(100), from, "{flags}");
+        }
     }
 
     #[test]
