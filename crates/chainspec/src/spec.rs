@@ -1237,7 +1237,7 @@ mod tests {
                 b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
                 1_792_742_400,
                 Some("wss://ws.nvnm.canary.mantrachain.dev"),
-                NvnmHardfork::Baseline,
+                NvnmHardfork::N1,
             ),
             (
                 &*super::NVNM_TESTNET,
@@ -1245,7 +1245,7 @@ mod tests {
                 b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
                 1_793_260_800,
                 Some("wss://ws.nvnm.testnet.nvnmchain.io"),
-                NvnmHardfork::Baseline,
+                NvnmHardfork::N1,
             ),
             (
                 &*super::NVNM_MAINNET,
