@@ -1223,13 +1223,14 @@ mod tests {
     fn nvnm_chains_match_the_live_networks() {
         use alloy_primitives::b256;
 
-        for (spec, id, genesis, t12, follow) in [
+        for (spec, id, genesis, t12, follow, lane) in [
             (
                 &*super::NVNM_CANARY,
                 787222,
                 b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
                 1_792_742_400,
                 Some("wss://ws.nvnm.canary.mantrachain.dev"),
+                NvnmHardfork::Baseline,
             ),
             (
                 &*super::NVNM_TESTNET,
@@ -1237,6 +1238,7 @@ mod tests {
                 b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
                 1_793_260_800,
                 Some("wss://ws.nvnm.testnet.nvnmchain.io"),
+                NvnmHardfork::Baseline,
             ),
             (
                 &*super::NVNM_MAINNET,
@@ -1244,6 +1246,8 @@ mod tests {
                 b256!("3d084628b2e06c2bcddd9e19bfb3d5de8118363bf9e8fb819d572bb94a7f9843"),
                 0,
                 None,
+                // Mainnet splits fees from its first block.
+                NvnmHardfork::N1,
             ),
         ] {
             assert_eq!(spec.chain().id(), id);
@@ -1256,6 +1260,7 @@ mod tests {
             assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
             assert_eq!(spec.info.fork_time(TempoHardfork::T13), None, "{id}");
+            assert_eq!(spec.nvnm_hardfork_at(u64::MAX), lane, "{id}");
             assert!(spec.network_identity.is_some(), "{id}");
             assert_eq!(spec.default_follow_url(), follow, "{id}");
         }
