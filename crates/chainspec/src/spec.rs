@@ -1,7 +1,7 @@
 pub use tempo_hardfork::constants::gas::*;
 
 use crate::{
-    bootnodes::{moderato_nodes, presto_nodes},
+    bootnodes::{moderato_nodes, nvnm_testnet_nodes, presto_nodes},
     network_identity::NetworkIdentity,
 };
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
@@ -21,6 +21,7 @@ use reth_network_peers::NodeRecord;
 #[cfg(feature = "std")]
 use std::sync::LazyLock;
 use tempo_hardfork::TempoHardfork;
+use tempo_nvnm_hardfork::NvnmHardfork;
 use tempo_primitives::TempoHeader;
 
 // End-of-block system transactions
@@ -33,7 +34,7 @@ macro_rules! tempo_genesis_info {
         paste::paste! {
             /// Tempo genesis info extracted from genesis extra_fields
             #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-            #[serde(rename_all = "camelCase")]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
             pub struct TempoGenesisInfo {
                 /// The epoch length used by consensus.
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,6 +42,17 @@ macro_rules! tempo_genesis_info {
                 /// Optional override for the general (non-payment) gas limit.
                 #[serde(skip_serializing_if = "Option::is_none")]
                 general_gas_limit: Option<u64>,
+                /// Activation timestamp for the N1 NVNM fork.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                n1_time: Option<u64>,
+                /// Wallet NVNM's `claimFeeShares` pays the devshare share to. Claims already
+                /// executed depend on it, so from N1 it is neither added nor edited: a fork
+                /// names another.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_devshare: Option<Address>,
+                /// Wallet the buyback share is paid to, as `fee_devshare`.
+                #[serde(skip_serializing_if = "Option::is_none")]
+                pub fee_buyback: Option<Address>,
                 $(
                     #[doc = concat!("Activation timestamp for the ", stringify!($variant), " hardfork.")]
                     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,13 +78,28 @@ macro_rules! tempo_genesis_info {
 tempo_hardfork::tempo_post_genesis_hardforks!(tempo_genesis_info);
 
 impl TempoGenesisInfo {
-    /// Extract Tempo genesis info from genesis extra_fields
-    fn extract_from(genesis: &Genesis) -> Self {
-        genesis
-            .config
-            .extra_fields
-            .deserialize_as::<Self>()
-            .unwrap_or_default()
+    /// Returns the activation timestamp for an NVNM fork, or `None` if not scheduled.
+    fn nvnm_fork_time(&self, fork: NvnmHardfork) -> Option<u64> {
+        macro_rules! nvnm_fork_time_match {
+            ($($variant:ident),* $(,)?) => {
+                paste::paste! {
+                    match fork {
+                        $(NvnmHardfork::$variant => self.[<$variant:lower _time>],)*
+                        // `Baseline` is not scheduled, and the enum is non-exhaustive across
+                        // crates, as in `fork_time`.
+                        _ => None,
+                    }
+                }
+            };
+        }
+
+        tempo_nvnm_hardfork::nvnm_post_genesis_hardforks!(nvnm_fork_time_match)
+    }
+
+    /// Extract Tempo genesis info from genesis extra_fields. They are consensus-critical yet
+    /// outside the genesis hash, so a malformed value or an unknown key is an error, not a default.
+    fn extract_from(genesis: &Genesis) -> Result<Self, serde_json::Error> {
+        genesis.config.extra_fields.deserialize_as()
     }
 
     pub fn epoch_length(&self) -> Option<NonZeroU64> {
@@ -88,8 +115,8 @@ impl TempoGenesisInfo {
 #[derive(Debug, Clone, Default)]
 pub struct TempoChainSpecParser;
 
-/// Chains supported by Tempo. First value should be used as the default.
-pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
+/// NVNM's chains by name; the first is the default.
+pub const SUPPORTED_CHAINS: &[&str] = &["nvnm-testnet", "nvnm-canary", "nvnm-mainnet"];
 
 /// Clap value parser for [`ChainSpec`]s.
 ///
@@ -98,10 +125,16 @@ pub const SUPPORTED_CHAINS: &[&str] = &["mainnet", "moderato", "testnet"];
 #[cfg(feature = "cli")]
 pub fn chain_value_parser(s: &str) -> eyre::Result<Arc<TempoChainSpec>> {
     Ok(match s {
+        "nvnm-testnet" => NVNM_TESTNET.clone(),
+        "nvnm-canary" => NVNM_CANARY.clone(),
+        "nvnm-mainnet" => NVNM_MAINNET.clone(),
+        // Tempo's, unlisted: shadowfork names them.
         "mainnet" => PRESTO.clone(),
         "testnet" | "moderato" => MODERATO.clone(),
         "dev" => DEV.clone(),
-        _ => TempoChainSpec::from_genesis(reth_cli::chainspec::parse_genesis(s)?).into(),
+        _ => TempoChainSpec::try_from_genesis(reth_cli::chainspec::parse_genesis(s)?)
+            .map_err(|e| eyre::eyre!("invalid Tempo genesis config: {e}"))?
+            .into(),
     })
 }
 
@@ -123,6 +156,9 @@ pub fn chainspec_from_chain_id(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     match chain_id {
         4217 => Some(PRESTO.clone()),
         42431 => Some(MODERATO.clone()),
+        7872 => Some(NVNM_MAINNET.clone()),
+        787222 => Some(NVNM_CANARY.clone()),
+        787223 => Some(NVNM_TESTNET.clone()),
         _ => None,
     }
 }
@@ -145,6 +181,34 @@ pub static PRESTO: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .with_network_identity(NetworkIdentity::mainnet())
         .with_default_follow_url("wss://rpc.mainnet.tempo.xyz")
         .into()
+});
+
+/// NVNM testnet, chain 787223, still on its genesis DKG identity.
+pub static NVNM_TESTNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-testnet.json"))
+        .expect("`./genesis/nvnm-testnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://ws.nvnm.testnet.nvnmchain.io")
+        .into()
+});
+
+/// NVNM canary, chain 787222, where a fork runs before it reaches the testnet.
+pub static NVNM_CANARY: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-canary.json"))
+        .expect("`./genesis/nvnm-canary.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://ws.nvnm.canary.mantrachain.dev")
+        .into()
+});
+
+/// NVNM mainnet, chain 7872. Its genesis is a stand-in until the launch run writes the real one.
+pub static NVNM_MAINNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
+    let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-mainnet.json"))
+        .expect("`./genesis/nvnm-mainnet.json` must be present and deserializable");
+
+    TempoChainSpec::from_genesis(genesis).into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -196,10 +260,16 @@ impl TempoChainSpec {
         TempoConsensusSpec::general_gas_limit_at(self, timestamp, gas_limit, shared_gas_limit)
     }
 
-    /// Converts the given [`Genesis`] into a [`TempoChainSpec`].
+    /// [`Self::try_from_genesis`], panicking on its error: for a genesis already known to parse.
     pub fn from_genesis(genesis: Genesis) -> Self {
+        Self::try_from_genesis(genesis).expect("genesis has invalid Tempo fields")
+    }
+
+    /// Converts the given [`Genesis`] into a [`TempoChainSpec`], or returns why its Tempo fields
+    /// do not parse.
+    pub fn try_from_genesis(genesis: Genesis) -> Result<Self, serde_json::Error> {
         // Extract Tempo genesis info from extra_fields
-        let info = TempoGenesisInfo::extract_from(&genesis);
+        let info = TempoGenesisInfo::extract_from(&genesis)?;
 
         // Create base chainspec from genesis (already has ordered Ethereum hardforks)
         let mut base_spec = ChainSpec::from_genesis(genesis);
@@ -210,6 +280,12 @@ impl TempoChainSpec {
         });
 
         base_spec.hardforks.extend(tempo_forks);
+        // `insert` keeps the list in time order, so fork id counts both lanes in turn.
+        let nvnm_forks = NvnmHardfork::VARIANTS.iter().filter_map(|&fork| {
+            info.nvnm_fork_time(fork)
+                .map(|time| (fork, ForkCondition::Timestamp(time)))
+        });
+        base_spec.hardforks.extend(nvnm_forks);
 
         let inner = base_spec.map_header(|inner| TempoHeader {
             general_gas_limit: 0,
@@ -224,12 +300,12 @@ impl TempoChainSpec {
         let network_identity =
             NetworkIdentity::from_extra_data(inner.genesis_header().inner.extra_data.as_ref()).ok();
 
-        Self {
+        Ok(Self {
             inner,
             info,
             network_identity,
             default_follow_url: None,
-        }
+        })
     }
 
     /// Sets the compiled consensus network identity for this chain.
@@ -252,6 +328,16 @@ impl TempoChainSpec {
     /// Returns the mainnet chainspec.
     pub fn mainnet() -> Self {
         PRESTO.as_ref().clone()
+    }
+
+    /// Returns the NVNM fork active at `timestamp`: the latest one reached, else `Baseline`.
+    pub fn nvnm_hardfork_at(&self, timestamp: u64) -> NvnmHardfork {
+        NvnmHardfork::VARIANTS
+            .iter()
+            .rev()
+            .copied()
+            .find(|&fork| self.fork(fork).active_at_timestamp(timestamp))
+            .unwrap_or_default()
     }
 }
 
@@ -351,7 +437,9 @@ impl EthChainSpec for TempoChainSpec {
         match self.inner.chain_id() {
             4217 => Some(presto_nodes()),
             42431 => Some(moderato_nodes()),
-            _ => self.inner.bootnodes(),
+            787223 => Some(nvnm_testnet_nodes()),
+            // `None` makes reth seed discovery with Ethereum mainnet's bootnodes.
+            _ => Some(Vec::new()),
         }
     }
 
@@ -468,6 +556,7 @@ mod tests {
     use reth_chainspec::{ForkCondition, Hardforks};
     #[cfg(feature = "cli")]
     use reth_cli::chainspec::ChainSpecParser as _;
+    use tempo_nvnm_hardfork::NvnmHardfork;
     use tempo_primitives::Header;
 
     #[test]
@@ -602,6 +691,37 @@ mod tests {
     }
 
     #[test]
+    fn test_try_from_genesis_refuses_unknown_and_malformed_fields() {
+        let try_from = |config: serde_json::Value| {
+            let genesis =
+                serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} }))
+                    .unwrap();
+            super::TempoChainSpec::try_from_genesis(genesis).map_err(|e| e.to_string())
+        };
+
+        // A misspelt key, or a fork this binary lacks, is not dropped.
+        for key in ["epochLenght", "t99Time", "n99Time"] {
+            let err = try_from(serde_json::json!({ "chainId": 1234, key: 5 })).unwrap_err();
+            assert!(err.starts_with(&format!("unknown field `{key}`")), "{err}");
+        }
+        // A malformed value does not fall back to a default with every fork off.
+        let err = try_from(serde_json::json!({ "chainId": 1234, "t12Time": "0" })).unwrap_err();
+        assert!(err.starts_with("invalid type: string"), "{err}");
+        assert!(try_from(serde_json::json!({ "chainId": 1234, "t12Time": null })).is_ok());
+    }
+
+    #[test]
+    #[cfg(feature = "cli")]
+    fn test_chain_parser_reports_an_invalid_genesis_config() {
+        let genesis = r#"{ "config": { "chainId": 1234, "t99Time": 5 }, "alloc": {} }"#;
+        let err = super::chain_value_parser(genesis).unwrap_err().to_string();
+        assert!(
+            err.starts_with("invalid Tempo genesis config: unknown field `t99Time`"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn test_from_genesis_with_hardforks_at_zero() {
         // Build genesis config with every post-Genesis fork at timestamp 0
         let mut config = serde_json::Map::new();
@@ -635,6 +755,28 @@ mod tests {
         assert_eq!(chainspec.tempo_hardfork_at(0), latest);
         assert_eq!(chainspec.tempo_hardfork_at(1000), latest);
         assert_eq!(chainspec.tempo_hardfork_at(u64::MAX), latest);
+    }
+
+    #[test]
+    fn test_nvnm_fork_times_schedule_the_lane() {
+        let genesis = |config| {
+            super::TempoChainSpec::from_genesis(
+                serde_json::from_value(serde_json::json!({ "config": config, "alloc": {} }))
+                    .unwrap(),
+            )
+        };
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234, "n1Time": 100 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(99), NvnmHardfork::Baseline);
+        assert_eq!(chainspec.nvnm_hardfork_at(100), NvnmHardfork::N1);
+        // `Baseline` is no fork, so `tempo_forkSchedule` does not list it.
+        assert!(
+            reth_chainspec::Hardforks::forks_iter(&chainspec)
+                .all(|(fork, _)| fork.name() != NvnmHardfork::Baseline.name())
+        );
+
+        let chainspec = genesis(serde_json::json!({ "chainId": 1234 }));
+        assert_eq!(chainspec.nvnm_hardfork_at(u64::MAX), NvnmHardfork::Baseline);
     }
 
     #[test]
@@ -1062,6 +1204,72 @@ mod tests {
                 .expect(&format!("failed to parse chain `{name}`"));
 
             assert_eq!(spec.chain(), resolved.chain(), "chain mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn bootnodes_are_never_none() {
+        assert!(!super::PRESTO.bootnodes().unwrap().is_empty());
+        assert!(!super::MODERATO.bootnodes().unwrap().is_empty());
+        assert_eq!(super::DEV.bootnodes(), Some(Vec::new()));
+
+        // Even an id reth knows (Ethereum mainnet) gets none of reth's lists.
+        let genesis: alloy_genesis::Genesis = serde_json::from_value(serde_json::json!({
+            "config": { "chainId": 1 },
+            "alloc": {}
+        }))
+        .unwrap();
+        let ethereum = super::TempoChainSpec::from_genesis(genesis);
+        assert_eq!(ethereum.bootnodes(), Some(Vec::new()));
+    }
+
+    /// Block 0 and config as the live nodes report them (`debug_chainConfig`), plus the T12 this
+    /// release schedules: canary on 2026-10-23 08:00 UTC, the testnet five days later, mainnet from
+    /// genesis.
+    #[test]
+    fn nvnm_chains_match_the_live_networks() {
+        use alloy_primitives::b256;
+
+        for (spec, id, genesis, t12, follow, lane) in [
+            (
+                &*super::NVNM_CANARY,
+                787222,
+                b256!("e9a16cac769c304d46a79a927a6b500747550c44b7132dffb1285a6a5b6b53d3"),
+                1_792_742_400,
+                Some("wss://ws.nvnm.canary.mantrachain.dev"),
+                NvnmHardfork::N1,
+            ),
+            (
+                &*super::NVNM_TESTNET,
+                787223,
+                b256!("e7d038a8f33908410c933e666ec7f3bef752ea91929ebbacf31348348a51e300"),
+                1_793_260_800,
+                Some("wss://ws.nvnm.testnet.nvnmchain.io"),
+                NvnmHardfork::N1,
+            ),
+            (
+                &*super::NVNM_MAINNET,
+                7872,
+                b256!("3d084628b2e06c2bcddd9e19bfb3d5de8118363bf9e8fb819d572bb94a7f9843"),
+                0,
+                None,
+                // Mainnet splits fees from its first block.
+                NvnmHardfork::N1,
+            ),
+        ] {
+            assert_eq!(spec.chain().id(), id);
+            assert_eq!(spec.genesis_hash(), genesis, "{id}");
+            assert_eq!(
+                spec.info.epoch_length().map(|n| n.get()),
+                Some(21_600),
+                "{id}"
+            );
+            assert_eq!(spec.info.fork_time(TempoHardfork::T11), Some(0), "{id}");
+            assert_eq!(spec.info.fork_time(TempoHardfork::T12), Some(t12), "{id}");
+            assert_eq!(spec.info.fork_time(TempoHardfork::T13), None, "{id}");
+            assert_eq!(spec.nvnm_hardfork_at(u64::MAX), lane, "{id}");
+            assert!(spec.network_identity.is_some(), "{id}");
+            assert_eq!(spec.default_follow_url(), follow, "{id}");
         }
     }
 }

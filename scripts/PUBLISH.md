@@ -1,5 +1,13 @@
 # Publishing Crates
 
+> **Note:** the CI workflows that drove this pipeline upstream
+> (`publish.yml`, `publish-check.yml`, `semver-check.yml`, `changelog.yml`,
+> `release-pr.yml`) were removed when this repository was forked, because they
+> published crates owned by `tempoxyz` on crates.io and depended on Tempo's
+> GitHub App and changelog infrastructure. Publishing is now manual:
+> `./scripts/publish-crates.sh --publish`. The descriptions of those workflows
+> further down are kept for reference only.
+
 Publishes `tempo-hardfork`, `tempo-contracts`, `tempo-primitives`, `tempo-chainspec`, and `tempo-alloy` to crates.io with all reth-specific code and dependencies removed.
 
 ## Usage

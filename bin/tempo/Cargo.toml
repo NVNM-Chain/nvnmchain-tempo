@@ -35,6 +35,7 @@ tempo-chainspec = { workspace = true, features = ["default"] }
 tempo-evm.workspace = true
 antithesis_sdk = { workspace = true, optional = true }
 tempo-faucet.workspace = true
+tempo-anchoring-index.workspace = true
 tempo-telemetry-util.workspace = true
 tempo-state-bloat.workspace = true
 tempo-corpus = { workspace = true, optional = true }

@@ -254,6 +254,9 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: header.consensus_context.map(|ctx| ctx.proposer),
+                nvnm_hardfork: self.chain_spec.nvnm_hardfork_at(header.timestamp()),
+                fee_devshare: self.chain_spec.info.fee_devshare,
+                fee_buyback: self.chain_spec.info.fee_buyback,
             },
             _non_exhaustive: (),
         };
@@ -297,6 +300,9 @@ impl ConfigureEvm for TempoEvmConfig {
                     .epoch_length()
                     .unwrap_or(NonZeroU64::MIN),
                 proposer_public_key: attributes.consensus_context.map(|ctx| ctx.proposer),
+                nvnm_hardfork: self.chain_spec.nvnm_hardfork_at(attributes.timestamp),
+                fee_devshare: self.chain_spec.info.fee_devshare,
+                fee_buyback: self.chain_spec.info.fee_buyback,
             },
             _non_exhaustive: (),
         };

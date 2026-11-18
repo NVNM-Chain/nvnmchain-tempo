@@ -25,7 +25,6 @@ on:
       - "crates/primitives/**"
       - "scripts/foundry-patch.sh"
       - ".github/workflows/specs.yml"
-      - ".github/workflows/update-reth.yml"
   merge_group:
   pull_request:
 
@@ -95,7 +94,6 @@ jobs:
               - '!crates/nitro-attestation/fuzz/Cargo.toml'
               - 'scripts/foundry-patch.sh'
               - '.github/workflows/specs.yml'
-              - '.github/workflows/update-reth.yml'
 
   foundry-resolver-smoke:
     name: Foundry Resolver Smoke
@@ -169,9 +167,7 @@ jobs:
     name: ABI Alignment Check
     needs: check-specs-changes
     if: needs.check-specs-changes.outputs.should_run == 'true'
-    # Depot keeps the Rust cache out of the repository's 10 GB GitHub cache and
-    # gives sccache a shared backend.
-    runs-on: depot-ubuntu-latest-4
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
@@ -231,9 +227,9 @@ jobs:
   foundry-build:
     name: Build patched Forge
     needs: check-specs-changes
-    if: github.repository == 'tempoxyz/tempo' && needs.check-specs-changes.outputs.should_run == 'true'
-    runs-on: depot-ubuntu-latest-8
-    timeout-minutes: 60
+    if: needs.check-specs-changes.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       id-token: write
       contents: read
@@ -290,8 +286,8 @@ jobs:
       fail-fast: false
       matrix:
         profile: [default, next]
-    runs-on: depot-ubuntu-latest-8
-    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       id-token: write
       contents: read
