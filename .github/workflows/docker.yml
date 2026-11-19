@@ -267,7 +267,8 @@ jobs:
               docker buildx imagetools create --metadata-file "manifest-${image}.json" "${args[@]}" "${sources[@]}"
               # Every tag names this one list: it is signed once, by the digest pushed here, which
               # another run moving a tag such as sha- cannot change.
-              echo "${repo}@$(jq -r '."containerimage.descriptor".digest' "manifest-${image}.json")" >> image-refs.txt
+              digest="$(jq -er '."containerimage.descriptor".digest' "manifest-${image}.json")"
+              echo "${repo}@${digest}" >> image-refs.txt
             else
               # Nothing to point at the per-arch digests, so they stay in the
               # registry untagged. Every trigger left derives tags, so this is
@@ -314,6 +315,7 @@ jobs:
           for i in "${!refs[@]}"; do
             if ! wait "${pids[$i]}"; then
               sign_failures=$((sign_failures + 1))
+              echo "::error::Failed to sign ${refs[$i]}"
             fi
             echo "::group::${refs[$i]}"
             cat "sign-${i}.log"
