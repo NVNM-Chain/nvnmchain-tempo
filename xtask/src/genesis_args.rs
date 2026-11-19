@@ -320,13 +320,10 @@ impl GenesisArgs {
         with_genesis_storage(&mut evm, || TIP20Factory::new().initialize())?;
 
         println!("Creating pathUSD through factory");
-        create_path_usd_token(
-            pathusd_admin,
-            &addresses,
-            self.pathusd_amount,
-            self.pathusd_balances.as_ref(),
-            &mut evm,
-        )?;
+        create_path_usd_token(pathusd_admin, &addresses, self.pathusd_amount, &mut evm)?;
+        if let Some(balances) = &self.pathusd_balances {
+            mint_path_usd(pathusd_admin, balances, &mut evm)?;
+        }
 
         let (alpha_token_address, beta_token_address, theta_token_address, ousd_token_address) =
             if !self.no_extra_tokens {
@@ -757,7 +754,6 @@ fn create_path_usd_token(
     admin: Address,
     recipients: &[Address],
     amount_per_recipient: u64,
-    balances: Option<&BTreeMap<Address, u64>>,
     evm: &mut GenesisEvm,
 ) -> eyre::Result<()> {
     with_genesis_storage(evm, || {
@@ -787,7 +783,20 @@ fn create_path_usd_token(
                 )
                 .expect("Could not mint pathUSD");
         }
-        for (&to, &amount) in balances.into_iter().flatten() {
+
+        Ok(())
+    })
+}
+
+/// Mints each of `balances` in pathUSD, on top of what its address already holds.
+fn mint_path_usd(
+    admin: Address,
+    balances: &BTreeMap<Address, u64>,
+    evm: &mut GenesisEvm,
+) -> eyre::Result<()> {
+    with_genesis_storage(evm, || {
+        let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+        for (&to, &amount) in balances {
             token.mint(
                 admin,
                 ITIP20::mintCall {
@@ -796,7 +805,6 @@ fn create_path_usd_token(
                 },
             )?;
         }
-
         Ok(())
     })
 }
@@ -1470,17 +1478,18 @@ mod pathusd_tests {
     const HOLDER: Address = address!("0x00000000000000000000000000000000000000C0");
 
     #[test]
-    fn balances_are_minted_besides_the_generated_accounts() -> eyre::Result<()> {
+    fn balances_are_minted_on_top_of_the_generated_accounts() -> eyre::Result<()> {
         let mut evm = create_genesis_evm(genesis_evm_env(1337));
         with_genesis_storage(&mut evm, || TIP403Registry::new().initialize())?;
         with_genesis_storage(&mut evm, || TIP20Factory::new().initialize())?;
-        let balances = BTreeMap::from([(HOLDER, 1_500_000)]);
-        create_path_usd_token(ADMIN, &[ACCOUNT], 7, Some(&balances), &mut evm)?;
+        create_path_usd_token(ADMIN, &[ACCOUNT], 7, &mut evm)?;
+        let balances = BTreeMap::from([(ACCOUNT, 3), (HOLDER, 1_500_000)]);
+        mint_path_usd(ADMIN, &balances, &mut evm)?;
 
         with_genesis_storage(&mut evm, || {
             let token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
             let balance = |account| token.balance_of(ITIP20::balanceOfCall { account });
-            assert_eq!(balance(ACCOUNT)?, U256::from(7));
+            assert_eq!(balance(ACCOUNT)?, U256::from(10));
             assert_eq!(balance(HOLDER)?, U256::from(1_500_000));
             Ok(())
         })
