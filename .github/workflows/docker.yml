@@ -242,6 +242,7 @@ jobs:
             [tempo-xtask]="$TAGS_TEMPO_XTASK"
           )
 
+          : > image-refs.txt
           for image in tempo tempo-localnet tempo-xtask; do
             repo="${REGISTRY}/${image}"
             sources=()
@@ -263,7 +264,10 @@ jobs:
 
             echo "Creating ${image} manifest list from: ${sources[*]}"
             if [ "${#args[@]}" -gt 0 ]; then
-              docker buildx imagetools create "${args[@]}" "${sources[@]}"
+              docker buildx imagetools create --metadata-file "manifest-${image}.json" "${args[@]}" "${sources[@]}"
+              # Every tag names this one list: it is signed once, by the digest pushed here, which
+              # another run moving a tag such as sha- cannot change.
+              echo "${repo}@$(jq -r '."containerimage.descriptor".digest' "manifest-${image}.json")" >> image-refs.txt
             else
               # Nothing to point at the per-arch digests, so they stay in the
               # registry untagged. Every trigger left derives tags, so this is
@@ -278,10 +282,6 @@ jobs:
       - name: Sign Docker images
         id: sign-images
         shell: bash
-        env:
-          TEMPO_TAGS: ${{ steps.meta-tempo.outputs.tags }}
-          TEMPO_LOCALNET_TAGS: ${{ steps.meta-tempo-localnet.outputs.tags }}
-          TEMPO_XTASK_TAGS: ${{ steps.meta-tempo-xtask.outputs.tags }}
         run: |
           set -euo pipefail
           sign_image() {
@@ -304,28 +304,27 @@ jobs:
             done
           }
 
-          images=(
-            "$TEMPO_TAGS"
-            "$TEMPO_LOCALNET_TAGS"
-            "$TEMPO_XTASK_TAGS"
-          )
+          mapfile -t refs < image-refs.txt
+          pids=()
+          for i in "${!refs[@]}"; do
+            sign_image "${refs[$i]}" > "sign-${i}.log" 2>&1 &
+            pids[i]=$!
+          done
           sign_failures=0
-          signed=0
-          for tags in "${images[@]}"; do
-            while IFS= read -r image; do
-              [ -n "$image" ] || continue
-              signed=$((signed + 1))
-              if ! sign_image "$image"; then
-                sign_failures=$((sign_failures + 1))
-              fi
-            done <<< "$tags"
+          for i in "${!refs[@]}"; do
+            if ! wait "${pids[$i]}"; then
+              sign_failures=$((sign_failures + 1))
+            fi
+            echo "::group::${refs[$i]}"
+            cat "sign-${i}.log"
+            echo "::endgroup::"
           done
 
           if [ "$sign_failures" -ne 0 ]; then
-            echo "Failed to sign $sign_failures image reference(s)" >&2
+            echo "Failed to sign $sign_failures image(s)" >&2
             exit 1
           fi
-          echo "Signed ${signed} image reference(s)"
+          echo "Signed ${#refs[@]} image(s)"
 
       - name: Summarize Docker build
         if: ${{ always() }}
