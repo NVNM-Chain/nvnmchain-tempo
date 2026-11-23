@@ -203,7 +203,7 @@ pub static NVNM_CANARY: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
         .into()
 });
 
-/// NVNM mainnet, chain 7872. Its genesis is a stand-in until the launch run writes the real one.
+/// NVNM mainnet, chain 7872.
 pub static NVNM_MAINNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-mainnet.json"))
         .expect("`./genesis/nvnm-mainnet.json` must be present and deserializable");
@@ -1250,7 +1250,7 @@ mod tests {
             (
                 &*super::NVNM_MAINNET,
                 7872,
-                b256!("3d084628b2e06c2bcddd9e19bfb3d5de8118363bf9e8fb819d572bb94a7f9843"),
+                b256!("26fb3c2045935a1f0af8e50784adf3ff3abec7e126cc8746b03c9a8ecac1ecff"),
                 0,
                 None,
                 // Mainnet splits fees from its first block.
