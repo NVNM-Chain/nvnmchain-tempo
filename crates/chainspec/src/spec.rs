@@ -208,7 +208,9 @@ pub static NVNM_MAINNET: LazyLock<Arc<TempoChainSpec>> = LazyLock::new(|| {
     let genesis: Genesis = serde_json::from_str(include_str!("./genesis/nvnm-mainnet.json"))
         .expect("`./genesis/nvnm-mainnet.json` must be present and deserializable");
 
-    TempoChainSpec::from_genesis(genesis).into()
+    TempoChainSpec::from_genesis(genesis)
+        .with_default_follow_url("wss://rpc.nvnm.mainnet.nvnmchain.io")
+        .into()
 });
 
 /// Development chainspec with funded dev accounts and activated tempo hardforks
@@ -1252,7 +1254,7 @@ mod tests {
                 7872,
                 b256!("26fb3c2045935a1f0af8e50784adf3ff3abec7e126cc8746b03c9a8ecac1ecff"),
                 0,
-                None,
+                Some("wss://rpc.nvnm.mainnet.nvnmchain.io"),
                 // Mainnet splits fees from its first block.
                 NvnmHardfork::N1,
             ),
